@@ -113,7 +113,7 @@ const PERSONA_SPEECH_PRESETS: Record<string, PersonaSpeechPreset> = {
 
 const DEFAULT_PERSONA_ID = DEFAULT_PERSONAS[0].id;
 
-const RESPONSE_DELAY_MS = 1500;
+const RESPONSE_DELAY_MS = 1000;
 const API_BASE_URL = 'http://localhost:4002';
 
 const getSpeechRecognitionConstructor = (): (() => SpeechRecognitionInstance) | null => {
@@ -198,6 +198,7 @@ export default function Home() {
   const shouldListenRef = useRef(false);
   const pendingResponseTimerRef = useRef<number | null>(null);
   const lastUserUtteranceRef = useRef<string>('');
+  const accumulatedTranscriptRef = useRef<string>('');
   const isSpeakingRef = useRef(false);
   const sessionPersonaRef = useRef<string | null>(null);
   const sessionDataRef = useRef<Record<string, any> | null>(null);
@@ -383,6 +384,8 @@ export default function Home() {
     recognition.onresult = handleRecognitionResult;
     recognition.onstart = () => {
       isRecognitionActiveRef.current = true;
+      // Don't clear accumulated transcript here - it might restart during continuous recognition
+      // We only clear when we process the transcript
       if (!isSpeakingRef.current) {
         setStatus('listening');
       }
@@ -390,7 +393,34 @@ export default function Home() {
 
     recognition.onend = () => {
       isRecognitionActiveRef.current = false;
-      if (shouldListenRef.current && !isSpeakingRef.current) {
+      
+      // Fallback: If we have accumulated text but no timer is running, process it
+      // (This handles cases where the timer might not have fired)
+      const completeTranscript = accumulatedTranscriptRef.current.trim();
+      
+      if (completeTranscript && shouldListenRef.current && !pendingResponseTimerRef.current) {
+        // Clear accumulated transcript
+        accumulatedTranscriptRef.current = '';
+        setLiveUserTranscript('');
+        
+        // Add to conversation history
+        setTranscripts((prev) => [
+          ...prev,
+          {
+            role: 'user',
+            text: completeTranscript,
+            timestamp: new Date(),
+          },
+        ]);
+        
+        setStatus('processing');
+        
+        // Process immediately since we're already past the delay point
+        void deliverAgentResponse(completeTranscript);
+      }
+      
+      // Allow restarting even while AI is speaking to support interruption
+      if (shouldListenRef.current) {
         restartListening();
       }
     };
@@ -413,15 +443,15 @@ export default function Home() {
   };
 
   const startListening = () => {
-    if (isSpeakingRef.current) {
-      return;
-    }
-
+    // Allow listening even while AI is speaking to support interruption
     const recognition = initialiseRecognition();
 
     try {
       recognition.start();
       isRecognitionActiveRef.current = true;
+      if (!isSpeakingRef.current) {
+        setStatus('listening');
+      }
     } catch (err) {
       console.debug('Speech recognition start() ignored:', err);
     }
@@ -429,7 +459,8 @@ export default function Home() {
 
   const restartListening = () => {
     window.setTimeout(() => {
-      if (shouldListenRef.current && !isRecognitionActiveRef.current && !isSpeakingRef.current) {
+      // Allow restarting even while AI is speaking to support interruption
+      if (shouldListenRef.current && !isRecognitionActiveRef.current) {
         startListening();
       }
     }, 200);
@@ -440,52 +471,70 @@ export default function Home() {
       return;
     }
 
-    let finalTranscript = '';
+    // Accumulate all transcripts (both interim and final)
+    let currentTranscript = '';
+    let hasFinalTranscript = false;
+
     for (let i = event.resultIndex; i < event.results.length; i += 1) {
       const result = event.results[i];
       if (result[0]) {
         if (result.isFinal) {
-          finalTranscript += result[0].transcript;
+          currentTranscript += result[0].transcript;
+          hasFinalTranscript = true;
+          // Accumulate final transcripts
+          accumulatedTranscriptRef.current += result[0].transcript + ' ';
         } else {
+          // Show interim results as user is speaking
           setLiveUserTranscript(result[0].transcript);
         }
       }
     }
 
-    const cleanedTranscript = finalTranscript.trim();
-    if (!cleanedTranscript) {
-      return;
-    }
-
-    setLiveUserTranscript('');
-
-    if (isSpeakingRef.current) {
+    // If user starts speaking while AI is speaking, stop AI immediately
+    if (isSpeakingRef.current && (currentTranscript.trim() || accumulatedTranscriptRef.current.trim())) {
       window.speechSynthesis.cancel();
       isSpeakingRef.current = false;
+      setStatus('listening');
+      clearPendingResponseTimer(); // Cancel any pending responses
     }
 
-    clearPendingResponseTimer();
-    lastUserUtteranceRef.current = cleanedTranscript;
-    setTranscripts((prev) => [
-      ...prev,
-      {
-        role: 'user',
-        text: cleanedTranscript,
-        timestamp: new Date(),
-      },
-    ]);
-
-    setStatus('processing');
-
-    pendingResponseTimerRef.current = window.setTimeout(() => {
-      pendingResponseTimerRef.current = null;
-      if (!shouldListenRef.current) {
-        return;
-      }
-
-      const latestUtterance = lastUserUtteranceRef.current;
-      void deliverAgentResponse(latestUtterance);
-    }, RESPONSE_DELAY_MS);
+    // When we get a final transcript, start/reset a timer
+    // If no more speech comes within the delay period, process the accumulated transcript
+    if (hasFinalTranscript && accumulatedTranscriptRef.current.trim()) {
+      clearPendingResponseTimer();
+      
+      // Wait for user to finish speaking (1 second of silence)
+      pendingResponseTimerRef.current = window.setTimeout(() => {
+        pendingResponseTimerRef.current = null;
+        
+        if (!shouldListenRef.current) {
+          return;
+        }
+        
+        const completeTranscript = accumulatedTranscriptRef.current.trim();
+        
+        if (completeTranscript) {
+          // Clear accumulated transcript
+          accumulatedTranscriptRef.current = '';
+          setLiveUserTranscript('');
+          
+          // Add to conversation history
+          setTranscripts((prev) => [
+            ...prev,
+            {
+              role: 'user',
+              text: completeTranscript,
+              timestamp: new Date(),
+            },
+          ]);
+          
+          setStatus('processing');
+          
+          // Process the complete transcript
+          void deliverAgentResponse(completeTranscript);
+        }
+      }, RESPONSE_DELAY_MS);
+    }
   };
 
   const deliverAgentResponse = async (userUtterance: string) => {
@@ -589,9 +638,12 @@ export default function Home() {
 
     window.speechSynthesis.cancel();
 
+    // Keep recognition active while speaking to allow interruption
+    // Don't stop recognition - let it continue listening
     const recognition = recognitionRef.current;
-    if (recognition && isRecognitionActiveRef.current) {
-      recognition.stop();
+    if (recognition && !isRecognitionActiveRef.current && shouldListenRef.current) {
+      // Only start recognition if it's not already active
+      startListening();
     }
 
     const utterance = new SpeechSynthesisUtterance(text);
@@ -600,13 +652,21 @@ export default function Home() {
     utterance.onstart = () => {
       isSpeakingRef.current = true;
       setStatus('speaking');
+      // Ensure recognition is active for interruption
+      if (recognition && !isRecognitionActiveRef.current && shouldListenRef.current) {
+        startListening();
+      }
     };
 
     utterance.onend = () => {
       isSpeakingRef.current = false;
       setLiveAssistantUtterance('');
       if (shouldListenRef.current) {
-        restartListening();
+        // Keep listening if not already active
+        if (!isRecognitionActiveRef.current) {
+          restartListening();
+        }
+        setStatus('listening');
       } else {
         setStatus('idle');
       }
@@ -617,7 +677,10 @@ export default function Home() {
       isSpeakingRef.current = false;
       setLiveAssistantUtterance('');
       if (shouldListenRef.current) {
-        restartListening();
+        if (!isRecognitionActiveRef.current) {
+          restartListening();
+        }
+        setStatus('listening');
       } else {
         setStatus('idle');
       }
@@ -640,6 +703,7 @@ export default function Home() {
     setIsStartingSession(true);
     shouldListenRef.current = true;
     clearPendingResponseTimer();
+    accumulatedTranscriptRef.current = ''; // Clear any previous transcript
     setStatus('processing');
 
     try {
@@ -677,7 +741,7 @@ export default function Home() {
           <header className="mb-8">
             <h1 className="text-4xl font-bold leading-tight">🎧 Local Voice Agent Playground</h1>
             <p className="text-slate-300 mt-2">
-              Speak naturally. The agent listens, waits 1.5 seconds after you finish, and responds aloud. Interrupt any time to take back the mic.
+              Speak naturally. The agent listens, waits 1 second after you finish, and responds aloud. Interrupt any time to take back the mic.
             </p>
           </header>
 
@@ -822,7 +886,7 @@ export default function Home() {
 
             {transcripts.length === 0 ? (
               <p className="text-sm text-slate-400">
-                Click “Start conversation” and begin speaking. The agent will wait for a 1.5 second pause before replying.
+                Click "Start conversation" and begin speaking. The agent will wait for a 1 second pause before replying.
               </p>
             ) : (
               <div className="max-h-96 space-y-3 overflow-y-auto pr-2">
