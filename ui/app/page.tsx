@@ -200,6 +200,7 @@ export default function Home() {
   const lastUserUtteranceRef = useRef<string>('');
   const accumulatedTranscriptRef = useRef<string>('');
   const isSpeakingRef = useRef(false);
+  const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const sessionPersonaRef = useRef<string | null>(null);
   const sessionDataRef = useRef<Record<string, any> | null>(null);
   const pendingSessionPromiseRef = useRef<Promise<string | null> | null>(null);
@@ -267,7 +268,9 @@ export default function Home() {
 
     if (typeof window !== 'undefined') {
       window.speechSynthesis.cancel();
+      window.speechSynthesis.cancel(); // Ensure complete stop
     }
+    currentUtteranceRef.current = null;
 
     if (recognitionRef.current) {
       try {
@@ -384,11 +387,23 @@ export default function Home() {
     recognition.onresult = handleRecognitionResult;
     recognition.onstart = () => {
       isRecognitionActiveRef.current = true;
-      // Don't clear accumulated transcript here - it might restart during continuous recognition
-      // We only clear when we process the transcript
-      if (!isSpeakingRef.current) {
+      // If recognition starts while AI is speaking, stop AI immediately
+      // (This can happen if user starts speaking)
+      if (isSpeakingRef.current) {
+        if (typeof window !== 'undefined' && window.speechSynthesis) {
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.cancel();
+        }
+        currentUtteranceRef.current = null;
+        isSpeakingRef.current = false;
+        setLiveAssistantUtterance('');
+        setStatus('listening');
+        clearPendingResponseTimer();
+      } else {
         setStatus('listening');
       }
+      // Don't clear accumulated transcript here - it might restart during continuous recognition
+      // We only clear when we process the transcript
     };
 
     recognition.onend = () => {
@@ -471,31 +486,69 @@ export default function Home() {
       return;
     }
 
-    // Accumulate all transcripts (both interim and final)
+    // FIRST: Check if user is speaking while AI is speaking (interruption)
+    // Check BOTH interim and final results - ANY speech detection = interrupt immediately
+    let hasAnySpeech = false;
+    let interruptDetected = false;
+
+    // Check ALL results first to detect any speech
+    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+      const result = event.results[i];
+      if (result[0]) {
+        const transcriptText = result[0].transcript;
+        // ANY transcript text (even a single character) means user is speaking
+        if (transcriptText && transcriptText.trim().length > 0) {
+          hasAnySpeech = true;
+          
+          // If AI is speaking and we detect ANY user speech, interrupt IMMEDIATELY
+          if (isSpeakingRef.current) {
+            interruptDetected = true;
+            break; // Stop checking, we need to interrupt NOW
+          }
+        }
+      }
+    }
+
+    // CRITICAL: If user starts speaking while AI is speaking, stop AI IMMEDIATELY
+    // Do this BEFORE processing any transcripts
+    if (interruptDetected) {
+      // Force stop speech synthesis immediately - multiple calls to ensure it stops completely
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.cancel(); // Extra calls to ensure complete stop
+        window.speechSynthesis.cancel(); // One more time for good measure
+      }
+      // Clear the current utterance reference
+      currentUtteranceRef.current = null;
+      isSpeakingRef.current = false;
+      setLiveAssistantUtterance(''); // Clear the live utterance display immediately
+      setStatus('listening');
+      clearPendingResponseTimer(); // Cancel any pending responses
+      // Clear old accumulated transcript since user is starting a new utterance
+      accumulatedTranscriptRef.current = '';
+      // Force UI update
+      setLiveUserTranscript('');
+    }
+
+    // NOW: Process and accumulate transcripts (only if not interrupted)
     let currentTranscript = '';
     let hasFinalTranscript = false;
 
     for (let i = event.resultIndex; i < event.results.length; i += 1) {
       const result = event.results[i];
       if (result[0]) {
+        const transcriptText = result[0].transcript;
+        
         if (result.isFinal) {
-          currentTranscript += result[0].transcript;
+          currentTranscript += transcriptText;
           hasFinalTranscript = true;
-          // Accumulate final transcripts
-          accumulatedTranscriptRef.current += result[0].transcript + ' ';
+          // Only accumulate if we didn't just interrupt (or if interrupt already handled)
+          accumulatedTranscriptRef.current += transcriptText + ' ';
         } else {
           // Show interim results as user is speaking
-          setLiveUserTranscript(result[0].transcript);
+          setLiveUserTranscript(transcriptText);
         }
       }
-    }
-
-    // If user starts speaking while AI is speaking, stop AI immediately
-    if (isSpeakingRef.current && (currentTranscript.trim() || accumulatedTranscriptRef.current.trim())) {
-      window.speechSynthesis.cancel();
-      isSpeakingRef.current = false;
-      setStatus('listening');
-      clearPendingResponseTimer(); // Cancel any pending responses
     }
 
     // When we get a final transcript, start/reset a timer
@@ -636,7 +689,13 @@ export default function Home() {
       return;
     }
 
-    window.speechSynthesis.cancel();
+    // Cancel any existing speech immediately
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.cancel(); // Ensure complete stop
+    }
+    currentUtteranceRef.current = null;
+    isSpeakingRef.current = false;
 
     // Keep recognition active while speaking to allow interruption
     // Don't stop recognition - let it continue listening
@@ -647,42 +706,53 @@ export default function Home() {
     }
 
     const utterance = new SpeechSynthesisUtterance(text);
+    currentUtteranceRef.current = utterance; // Store reference for direct cancellation
     utterance.pitch = preset.pitch;
     utterance.rate = preset.rate;
     utterance.onstart = () => {
-      isSpeakingRef.current = true;
-      setStatus('speaking');
-      // Ensure recognition is active for interruption
-      if (recognition && !isRecognitionActiveRef.current && shouldListenRef.current) {
-        startListening();
+      // Only set speaking if this utterance is still the current one
+      if (currentUtteranceRef.current === utterance) {
+        isSpeakingRef.current = true;
+        setStatus('speaking');
+        // Ensure recognition is active for interruption
+        if (recognition && !isRecognitionActiveRef.current && shouldListenRef.current) {
+          startListening();
+        }
       }
     };
 
     utterance.onend = () => {
-      isSpeakingRef.current = false;
-      setLiveAssistantUtterance('');
-      if (shouldListenRef.current) {
-        // Keep listening if not already active
-        if (!isRecognitionActiveRef.current) {
-          restartListening();
+      // Only process if this is still the current utterance
+      if (currentUtteranceRef.current === utterance) {
+        isSpeakingRef.current = false;
+        currentUtteranceRef.current = null;
+        setLiveAssistantUtterance('');
+        if (shouldListenRef.current) {
+          // Keep listening if not already active
+          if (!isRecognitionActiveRef.current) {
+            restartListening();
+          }
+          setStatus('listening');
+        } else {
+          setStatus('idle');
         }
-        setStatus('listening');
-      } else {
-        setStatus('idle');
       }
     };
 
     utterance.onerror = (event) => {
       console.error('Speech synthesis error', event);
-      isSpeakingRef.current = false;
-      setLiveAssistantUtterance('');
-      if (shouldListenRef.current) {
-        if (!isRecognitionActiveRef.current) {
-          restartListening();
+      if (currentUtteranceRef.current === utterance) {
+        isSpeakingRef.current = false;
+        currentUtteranceRef.current = null;
+        setLiveAssistantUtterance('');
+        if (shouldListenRef.current) {
+          if (!isRecognitionActiveRef.current) {
+            restartListening();
+          }
+          setStatus('listening');
+        } else {
+          setStatus('idle');
         }
-        setStatus('listening');
-      } else {
-        setStatus('idle');
       }
     };
 
