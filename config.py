@@ -19,13 +19,13 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # ============================================================================
 VOICE_MODEL = os.getenv("VOICE_MODEL", "whisper-1")
 TTS_MODEL = os.getenv("TTS_MODEL", "tts-1-hd")
-INFERENCE_MODEL = os.getenv("INFERENCE_MODEL", "gpt-4o")
+INFERENCE_MODEL = os.getenv("INFERENCE_MODEL", "gpt-4o-mini")
 
 # ============================================================================
 # API CONFIGURATION
 # ============================================================================
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("API_PORT", "4000"))
+API_PORT = int(os.getenv("API_PORT", "4002"))
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 RELOAD = os.getenv("RELOAD", "True").lower() == "true"
 
