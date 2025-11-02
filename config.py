@@ -25,7 +25,7 @@ INFERENCE_MODEL = os.getenv("INFERENCE_MODEL", "gpt-4o")
 # API CONFIGURATION
 # ============================================================================
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("API_PORT", "8000"))
+API_PORT = int(os.getenv("API_PORT", "4000"))
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 RELOAD = os.getenv("RELOAD", "True").lower() == "true"
 

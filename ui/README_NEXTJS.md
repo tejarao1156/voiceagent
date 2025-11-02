@@ -39,7 +39,7 @@ Get your API key from: https://platform.openai.com/api-keys
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+Open [http://localhost:9000](http://localhost:9000) in your browser.
 
 ## Usage
 

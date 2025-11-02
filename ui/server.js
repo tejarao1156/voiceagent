@@ -5,7 +5,7 @@ const WebSocket = require('ws');
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = 'localhost';
-const port = 3000;
+const port = 9000;
 
 const app = next({ dev, hostname, port, dir: __dirname });
 const handle = app.getRequestHandler();

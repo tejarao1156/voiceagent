@@ -75,7 +75,7 @@ python -c "from database import create_tables; create_tables()"
 # or python main.py
 ```
 
-The API will be available at `http://localhost:8000`.
+The API will be available at `http://localhost:4000`.
 
 ### 5. Run the Web UI (optional)
 
@@ -84,7 +84,7 @@ The API will be available at `http://localhost:8000`.
 # or: cd ui && npm install && npm run dev
 ```
 
-The UI will be available at `http://localhost:3000` (proxied through `ui/server.js`).
+The UI will be available at `http://localhost:9000` (proxied through `ui/server.js`).
 
 ### 6. Run API and UI Together
 
@@ -97,7 +97,7 @@ This script launches both servers in parallel; use `Ctrl+C` to stop them.
 ### 7. List Personas
 
 ```bash
-curl http://localhost:8000/personas
+curl http://localhost:4000/personas
 ```
 
 Use the returned persona identifier (for example `friendly_guide`, `calm_concierge`, `energetic_host`) when calling conversation or TTS endpoints.
@@ -106,9 +106,9 @@ Use the returned persona identifier (for example `friendly_guide`, `calm_concier
 
 The API is fully documented with Swagger/OpenAPI documentation. Once the server is running, visit:
 
-- **Interactive API Docs**: `http://localhost:8000/docs`
-- **ReDoc Documentation**: `http://localhost:8000/redoc`
-- **OpenAPI Schema**: `http://localhost:8000/openapi.json`
+- **Interactive API Docs**: `http://localhost:4000/docs`
+- **ReDoc Documentation**: `http://localhost:4000/redoc`
+- **OpenAPI Schema**: `http://localhost:4000/openapi.json`
 
 ### API Endpoints Overview
 
@@ -149,7 +149,7 @@ PERSONA = "friendly_guide"
 
 # Start conversation with a specific persona
 response = requests.post(
-    "http://localhost:8000/conversation/start",
+    "http://localhost:4000/conversation/start",
     params={"customer_id": "customer123", "persona": PERSONA},
 )
 response.raise_for_status()
@@ -158,7 +158,7 @@ session_id = response.json()["session_id"]
 # Process voice input end-to-end (STT → conversation → TTS)
 with open("audio.wav", "rb") as source_audio:
     response = requests.post(
-        "http://localhost:8000/voice-agent/process",
+        "http://localhost:4000/voice-agent/process",
         files={"audio_file": source_audio},
         data={"session_id": session_id, "persona": PERSONA},
     )
@@ -174,7 +174,7 @@ print(f"Persona: {result['persona']}   Voice: {result['voice']}")
 
 ```javascript
 // Connect to real-time voice agent
-const ws = new WebSocket('ws://localhost:8000/ws/voice-agent/session123');
+const ws = new WebSocket('ws://localhost:4000/ws/voice-agent/session123');
 
 ws.onopen = function(event) {
     console.log('Connected to voice agent');

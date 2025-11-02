@@ -213,7 +213,7 @@ export default function Home() {
 
     const loadPersonas = async () => {
       try {
-        const response = await fetch('http://localhost:8000/personas');
+        const response = await fetch('http://localhost:4000/personas');
         if (!response.ok) {
           throw new Error(`Persona fetch failed: ${response.status}`);
         }
