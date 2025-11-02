@@ -15,7 +15,7 @@ from models import (
     HealthResponse, RootResponse,
     VoiceInputRequest, VoiceInputResponse, VoiceOutputRequest, VoiceOutputResponse,
     ConversationRequest, ConversationResponse, ConversationStartRequest, ConversationStartResponse,
-    VoiceAgentProcessResponse,
+    VoiceAgentProcessResponse, PersonaSummary,
     ErrorResponse, SuccessResponse,
     PaginationRequest, PaginationResponse
 )
@@ -27,6 +27,7 @@ from models import Customer, ConversationSession
 from config import DEBUG
 from tools import SpeechToTextTool, TextToSpeechTool, ConversationalResponseTool
 from realtime_websocket import realtime_agent
+from personas import get_persona_config, list_personas
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -135,6 +136,38 @@ async def health_check():
         version="1.0.0"
     )
 
+
+@app.get(
+    "/personas",
+    response_model=List[PersonaSummary],
+    summary="List Personas",
+    description="Retrieve all available persona configurations",
+    tags=["Personas"]
+)
+async def personas_list() -> List[PersonaSummary]:
+    """Return available persona summaries for client selection."""
+    return [PersonaSummary(**persona) for persona in list_personas()]
+
+
+@app.get(
+    "/personas/{persona_id}",
+    response_model=PersonaSummary,
+    summary="Retrieve Persona",
+    description="Get details for a specific persona",
+    tags=["Personas"]
+)
+async def persona_detail(persona_id: str) -> PersonaSummary:
+    """Return specific persona details, falling back to default if unknown."""
+    persona_config = get_persona_config(persona_id)
+    return PersonaSummary(
+        id=persona_config["id"],
+        name=persona_config.get("display_name", persona_config["id"].title()),
+        description=persona_config.get("description", ""),
+        tts_voice=persona_config.get("tts_voice"),
+        tts_model=persona_config.get("tts_model"),
+        realtime_voice=persona_config.get("realtime_voice"),
+    )
+
 # ============================================================================
 # VOICE PROCESSING ENDPOINTS
 # ============================================================================
@@ -149,7 +182,8 @@ async def health_check():
 async def speech_to_text(
     audio_file: UploadFile = File(..., description="Audio file to transcribe"),
     session_id: Optional[str] = Form(None, description="Conversation session ID"),
-    customer_id: Optional[str] = Form(None, description="Customer ID")
+    customer_id: Optional[str] = Form(None, description="Customer ID"),
+    persona: Optional[str] = Form(None, description="Persona identifier (optional)")
 ):
     """
     Convert speech audio to text using OpenAI Whisper.
@@ -204,13 +238,21 @@ async def text_to_speech(request: VoiceOutputRequest):
     ```
     """
     try:
-        result = await tts_tool.synthesize(request.text, request.voice)
-        
+        persona_config = get_persona_config(request.persona)
+        selected_voice = request.voice or persona_config.get("tts_voice")
+        result = await tts_tool.synthesize(
+            request.text,
+            selected_voice,
+            persona=persona_config,
+        )
+
         return VoiceOutputResponse(
             success=result["success"],
             audio_base64=result.get("audio_base64"),
             text=result.get("text", request.text),
-            error=result.get("error")
+            error=result.get("error"),
+            persona=persona_config.get("id"),
+            voice=result.get("voice") or selected_voice,
         )
     except Exception as e:
         logger.error(f"Text-to-speech error: {str(e)}")
@@ -229,6 +271,7 @@ async def text_to_speech(request: VoiceOutputRequest):
 )
 async def start_conversation(
     customer_id: Optional[str] = Query(None, description="Customer ID"),
+    persona: Optional[str] = Query(None, description="Persona identifier"),
     db: Session = Depends(get_db)
 ):
     """
@@ -240,7 +283,7 @@ async def start_conversation(
     ```
     """
     try:
-        session_data = conversation_tool.create_session(customer_id)
+        session_data = conversation_tool.create_session(customer_id, persona)
         
         # Save session to database
         db_session = ConversationSession(
@@ -257,7 +300,8 @@ async def start_conversation(
         return ConversationStartResponse(
             session_id=db_session.id,
             session_data=session_data,
-            message="Conversation started successfully"
+            message="Conversation started successfully",
+            persona=session_data.get("persona"),
         )
     except Exception as e:
         logger.error(f"Error starting conversation: {str(e)}")
@@ -286,6 +330,8 @@ async def process_conversation(
     """
     try:
         # Get session data
+        persona_name = request.persona
+
         if request.session_id:
             db_session = db.query(ConversationSession).filter(
                 ConversationSession.id == request.session_id
@@ -295,13 +341,15 @@ async def process_conversation(
                 raise HTTPException(status_code=404, detail="Session not found")
             
             session_data = json.loads(db_session.session_data)
+            if not persona_name:
+                persona_name = session_data.get("persona")
         else:
             # Create new session if none provided
-            session_data = conversation_tool.create_session(request.customer_id)
+            session_data = conversation_tool.create_session(request.customer_id, persona_name)
         
         # Process user input (general conversation)
         result = await conversation_tool.generate_response(
-            session_data, request.text
+            session_data, request.text, persona_name
         )
         
         # Update session in database
@@ -313,7 +361,8 @@ async def process_conversation(
             response=result["response"],
             session_data=result["session_data"],
             next_state=result.get("next_state"),
-            actions=result.get("actions", [])
+            actions=result.get("actions", []),
+            persona=result.get("persona"),
         )
         
     except Exception as e:
@@ -365,10 +414,11 @@ async def toolkit_text_to_speech(request: VoiceOutputRequest):
 )
 async def toolkit_start_conversation(
     customer_id: Optional[str] = Query(None, description="Customer ID"),
+    persona: Optional[str] = Query(None, description="Persona identifier"),
     db: Session = Depends(get_db)
 ):
     """Expose conversation session creation for testing."""
-    return await start_conversation(customer_id=customer_id, db=db)
+    return await start_conversation(customer_id=customer_id, persona=persona, db=db)
 
 
 @app.post(
@@ -401,6 +451,7 @@ async def process_voice_agent_input(
     audio_file: UploadFile = File(..., description="Audio file from customer"),
     session_id: Optional[str] = Form(None, description="Conversation session ID"),
     customer_id: Optional[str] = Form(None, description="Customer ID"),
+    persona: Optional[str] = Form(None, description="Persona identifier"),
     db: Session = Depends(get_db)
 ):
     """
@@ -431,7 +482,8 @@ async def process_voice_agent_input(
                 error="Speech-to-text failed",
                 user_input=None,
                 agent_response=None,
-                audio_response=None
+                audio_response=None,
+                persona=persona,
             )
         
         user_text = stt_result["text"]
@@ -441,16 +493,35 @@ async def process_voice_agent_input(
             ConversationRequest(
                 text=user_text,
                 session_id=session_id,
-                customer_id=customer_id
+                customer_id=customer_id,
+                persona=persona,
             ),
             db
         )
         
+        persona_config = get_persona_config(conversation_result.persona)
+        selected_voice = persona_config.get("tts_voice")
+
         # Step 3: Convert response to speech
         tts_result = await voice_processor.generate_voice_response(
             conversation_result.response,
-            "alloy"
+            selected_voice,
+            persona=persona_config,
         )
+
+        if not tts_result.get("success", False):
+            return VoiceAgentProcessResponse(
+                success=False,
+                user_input=user_text,
+                agent_response=conversation_result.response,
+                audio_response=None,
+                session_data=conversation_result.session_data,
+                next_state=conversation_result.next_state,
+                actions=conversation_result.actions,
+                persona=conversation_result.persona,
+                voice=selected_voice,
+                error=tts_result.get("error", "Text-to-speech failed"),
+            )
         
         return VoiceAgentProcessResponse(
             success=True,
@@ -459,7 +530,9 @@ async def process_voice_agent_input(
             audio_response=tts_result.get("audio_base64"),
             session_data=conversation_result.session_data,
             next_state=conversation_result.next_state,
-            actions=conversation_result.actions
+            actions=conversation_result.actions,
+            persona=conversation_result.persona,
+            voice=tts_result.get("voice") or selected_voice,
         )
         
     except Exception as e:

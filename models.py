@@ -76,6 +76,7 @@ class VoiceInputRequest(BaseModel):
     """Voice input request model"""
     session_id: Optional[str] = Field(None, description="Conversation session ID")
     customer_id: Optional[str] = Field(None, description="Customer ID")
+    persona: Optional[str] = Field(None, description="Persona identifier to use for processing")
 
 class VoiceInputResponse(BaseModel):
     """Voice input response model"""
@@ -86,7 +87,8 @@ class VoiceInputResponse(BaseModel):
 class VoiceOutputRequest(BaseModel):
     """Voice output request model"""
     text: str = Field(..., description="Text to convert to speech", example="Hello, how can I help you?")
-    voice: Optional[str] = Field("alloy", description="Voice to use", example="alloy")
+    voice: Optional[str] = Field(None, description="Voice to use; overrides persona voice if provided", example="alloy")
+    persona: Optional[str] = Field(None, description="Persona identifier influencing voice and style", example="friendly_guide")
 
 class VoiceOutputResponse(BaseModel):
     """Voice output response model"""
@@ -94,6 +96,8 @@ class VoiceOutputResponse(BaseModel):
     audio_base64: Optional[str] = Field(None, description="Base64 encoded audio data")
     text: Optional[str] = Field(None, description="Original text")
     error: Optional[str] = Field(None, description="Error message if operation failed")
+    persona: Optional[str] = Field(None, description="Persona used for synthesis")
+    voice: Optional[str] = Field(None, description="Voice identifier used for synthesis")
 
 # Conversation Models
 class ConversationRequest(BaseModel):
@@ -101,6 +105,7 @@ class ConversationRequest(BaseModel):
     text: str = Field(..., description="User input text", example="Hello, how can you help me?")
     session_id: Optional[str] = Field(None, description="Conversation session ID")
     customer_id: Optional[str] = Field(None, description="Customer ID")
+    persona: Optional[str] = Field(None, description="Persona identifier to use for this turn")
 
 class ConversationResponse(BaseModel):
     """Conversation response model"""
@@ -108,16 +113,19 @@ class ConversationResponse(BaseModel):
     session_data: Dict[str, Any] = Field(..., description="Updated session data")
     next_state: Optional[str] = Field(None, description="Next conversation state")
     actions: List[str] = Field(default=[], description="Actions to take")
+    persona: Optional[str] = Field(None, description="Persona that generated this response")
 
 class ConversationStartRequest(BaseModel):
     """Conversation start request model"""
     customer_id: Optional[str] = Field(None, description="Customer ID")
+    persona: Optional[str] = Field(None, description="Persona identifier to bind to the session")
 
 class ConversationStartResponse(BaseModel):
     """Conversation start response model"""
     session_id: str = Field(..., description="New session ID")
     session_data: Dict[str, Any] = Field(..., description="Initial session data")
     message: str = Field(..., description="Success message")
+    persona: Optional[str] = Field(None, description="Persona associated with the session")
 
 # Voice Agent Pipeline Models
 class VoiceAgentProcessResponse(BaseModel):
@@ -129,6 +137,9 @@ class VoiceAgentProcessResponse(BaseModel):
     session_data: Optional[Dict[str, Any]] = Field(None, description="Updated session data")
     next_state: Optional[str] = Field(None, description="Next conversation state")
     actions: List[str] = Field(default=[], description="Actions to take")
+    persona: Optional[str] = Field(None, description="Persona used for this turn")
+    voice: Optional[str] = Field(None, description="Voice identifier used for speech synthesis")
+    error: Optional[str] = Field(None, description="Error message when success is False")
 
 # Error Models
 class ErrorResponse(BaseModel):
@@ -156,6 +167,16 @@ class PaginationResponse(BaseModel):
     total: int = Field(..., description="Total items")
     pages: int = Field(..., description="Total pages")
 
+
+class PersonaSummary(BaseModel):
+    """Lightweight persona metadata"""
+    id: str = Field(..., description="Persona identifier", example="friendly_guide")
+    name: str = Field(..., description="Display name", example="Friendly Guide")
+    description: str = Field(..., description="Persona description")
+    tts_voice: Optional[str] = Field(None, description="Voice associated with persona")
+    tts_model: Optional[str] = Field(None, description="Preferred TTS model")
+    realtime_voice: Optional[str] = Field(None, description="Realtime voice identifier")
+
 # ============================================================================
 # EXPORTS
 # ============================================================================
@@ -173,5 +194,6 @@ __all__ = [
     "ConversationStartRequest", "ConversationStartResponse",
     "VoiceAgentProcessResponse",
     "ErrorResponse", "SuccessResponse",
-    "PaginationRequest", "PaginationResponse"
+    "PaginationRequest", "PaginationResponse",
+    "PersonaSummary"
 ]
