@@ -71,6 +71,16 @@ const DEFAULT_PERSONAS: PersonaOption[] = [
     name: 'Energetic Host',
     description: 'High-energy emcee who keeps the pace lively.',
   },
+  {
+    id: 'american_frontdesk',
+    name: 'Front Desk Host',
+    description: 'Welcoming American restaurant host with warm hospitality.',
+  },
+  {
+    id: 'fine_dining_host',
+    name: 'Fine Dining Host',
+    description: "Poised maître d' with a refined, international accent.",
+  },
 ];
 
 const PERSONA_SPEECH_PRESETS: Record<string, PersonaSpeechPreset> = {
@@ -88,6 +98,16 @@ const PERSONA_SPEECH_PRESETS: Record<string, PersonaSpeechPreset> = {
     rate: 1.18,
     pitch: 1.05,
     decorate: (base) => `${base} Let's keep the momentum going!`,
+  },
+  american_frontdesk: {
+    rate: 1.02,
+    pitch: 1.0,
+    decorate: (base) => `Absolutely! ${base} I'll take care of things for you.`,
+  },
+  fine_dining_host: {
+    rate: 0.98,
+    pitch: 0.95,
+    decorate: (base) => `It would be my pleasure. ${base}`,
   },
 };
 
