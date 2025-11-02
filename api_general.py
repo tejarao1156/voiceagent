@@ -25,6 +25,7 @@ from voice_processor import VoiceProcessor
 from conversation_manager import ConversationManager, ConversationState
 from models import Customer, ConversationSession
 from config import DEBUG
+from tools import SpeechToTextTool, TextToSpeechTool, ConversationalResponseTool
 from realtime_websocket import realtime_agent
 
 # Configure logging
@@ -50,7 +51,7 @@ app = FastAPI(
     1. Set up your `.env` file with OpenAI API key and database credentials
     2. Start the server with `python main.py`
     3. Visit `/docs` for interactive API documentation
-    4. Try the real-time demo with `realtime_client.html`
+    4. Try the real-time demo with `ui/realtime_client.html`
     
     ### Authentication
     Currently no authentication is required. In production, implement proper API key or JWT authentication.
@@ -85,9 +86,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize components
-voice_processor = VoiceProcessor()
+# Initialize modular tools and core managers
+speech_tool = SpeechToTextTool()
+tts_tool = TextToSpeechTool()
+voice_processor = VoiceProcessor(speech_tool=speech_tool, tts_tool=tts_tool)
 conversation_manager = ConversationManager()
+conversation_tool = ConversationalResponseTool(conversation_manager)
 
 # Create database tables on startup
 @app.on_event("startup")
@@ -168,7 +172,7 @@ async def speech_to_text(
         else:
             file_format = audio_file.content_type.split('/')[-1] if audio_file.content_type else "wav"
         
-        result = await voice_processor.process_voice_input(audio_data, file_format)
+        result = await speech_tool.transcribe(audio_data, file_format)
         
         return VoiceInputResponse(
             success=result["success"],
@@ -200,12 +204,12 @@ async def text_to_speech(request: VoiceOutputRequest):
     ```
     """
     try:
-        result = await voice_processor.generate_voice_response(request.text, request.voice)
+        result = await tts_tool.synthesize(request.text, request.voice)
         
         return VoiceOutputResponse(
             success=result["success"],
             audio_base64=result.get("audio_base64"),
-            text=result.get("text"),
+            text=result.get("text", request.text),
             error=result.get("error")
         )
     except Exception as e:
@@ -236,7 +240,7 @@ async def start_conversation(
     ```
     """
     try:
-        session_data = conversation_manager.create_session(customer_id)
+        session_data = conversation_tool.create_session(customer_id)
         
         # Save session to database
         db_session = ConversationSession(
@@ -293,10 +297,10 @@ async def process_conversation(
             session_data = json.loads(db_session.session_data)
         else:
             # Create new session if none provided
-            session_data = conversation_manager.create_session(request.customer_id)
+            session_data = conversation_tool.create_session(request.customer_id)
         
         # Process user input (general conversation)
-        result = await conversation_manager.process_user_input(
+        result = await conversation_tool.generate_response(
             session_data, request.text
         )
         
@@ -315,6 +319,72 @@ async def process_conversation(
     except Exception as e:
         logger.error(f"Error processing conversation: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# TOOLKIT ENDPOINTS
+# ============================================================================
+
+@app.post(
+    "/tools/understanding/speech-to-text",
+    response_model=VoiceInputResponse,
+    summary="Tool: Speech to Text",
+    description="Direct access to the speech-to-text tool for testing",
+    tags=["Tools"]
+)
+async def toolkit_speech_to_text(
+    audio_file: UploadFile = File(..., description="Audio file to transcribe"),
+    session_id: Optional[str] = Form(None, description="Conversation session ID"),
+    customer_id: Optional[str] = Form(None, description="Customer ID")
+):
+    """Expose the speech-to-text tool as a standalone endpoint."""
+    return await speech_to_text(
+        audio_file=audio_file,
+        session_id=session_id,
+        customer_id=customer_id,
+    )
+
+
+@app.post(
+    "/tools/response/text-to-speech",
+    response_model=VoiceOutputResponse,
+    summary="Tool: Text to Speech",
+    description="Direct access to the text-to-speech tool for testing",
+    tags=["Tools"]
+)
+async def toolkit_text_to_speech(request: VoiceOutputRequest):
+    """Expose the text-to-speech tool as a standalone endpoint."""
+    return await text_to_speech(request)
+
+
+@app.post(
+    "/tools/conversation/start",
+    response_model=ConversationStartResponse,
+    summary="Tool: Start Conversation",
+    description="Direct access to conversation session creation",
+    tags=["Tools"]
+)
+async def toolkit_start_conversation(
+    customer_id: Optional[str] = Query(None, description="Customer ID"),
+    db: Session = Depends(get_db)
+):
+    """Expose conversation session creation for testing."""
+    return await start_conversation(customer_id=customer_id, db=db)
+
+
+@app.post(
+    "/tools/conversation/process",
+    response_model=ConversationResponse,
+    summary="Tool: Conversation Response",
+    description="Direct access to the conversation response generator",
+    tags=["Tools"]
+)
+async def toolkit_process_conversation(
+    request: ConversationRequest,
+    db: Session = Depends(get_db)
+):
+    """Expose the conversation response tool as a standalone endpoint."""
+    return await process_conversation(request, db)
+
 
 # ============================================================================
 # VOICE AGENT COMPLETE PIPELINE
