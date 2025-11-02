@@ -24,7 +24,7 @@ from database import get_db, create_tables
 from voice_processor import VoiceProcessor
 from conversation_manager import ConversationManager, ConversationState
 from models import Customer, ConversationSession
-from config import DEBUG
+from config import DEBUG, API_HOST, API_PORT
 from tools import SpeechToTextTool, TextToSpeechTool, ConversationalResponseTool
 from realtime_websocket import realtime_agent
 from personas import get_persona_config, list_personas
@@ -68,7 +68,7 @@ app = FastAPI(
     },
     servers=[
         {
-            "url": "http://localhost:8000",
+            "url": f"http://localhost:{API_PORT}",
             "description": "Development server"
         },
         {
@@ -192,7 +192,7 @@ async def speech_to_text(
     
     **Example usage**:
     ```bash
-    curl -X POST "http://localhost:8000/voice/speech-to-text" \
+    curl -X POST "http://localhost:4000/voice/speech-to-text" \
          -F "audio_file=@recording.wav" \
          -F "session_id=session123"
     ```
@@ -232,7 +232,7 @@ async def text_to_speech(request: VoiceOutputRequest):
     
     **Example usage**:
     ```bash
-    curl -X POST "http://localhost:8000/voice/text-to-speech" \
+    curl -X POST "http://localhost:4000/voice/text-to-speech" \
          -H "Content-Type: application/json" \
          -d '{"text": "Hello, how can I help you?", "voice": "alloy"}'
     ```
@@ -279,7 +279,7 @@ async def start_conversation(
     
     **Example usage**:
     ```bash
-    curl -X POST "http://localhost:8000/conversation/start?customer_id=customer123"
+    curl -X POST "http://localhost:4000/conversation/start?customer_id=customer123"
     ```
     """
     try:
@@ -323,7 +323,7 @@ async def process_conversation(
     
     **Example usage**:
     ```bash
-    curl -X POST "http://localhost:8000/conversation/process" \
+    curl -X POST "http://localhost:4000/conversation/process" \
          -H "Content-Type: application/json" \
          -d '{"text": "I want to order a pizza", "session_id": "session123"}'
     ```
@@ -465,7 +465,7 @@ async def process_voice_agent_input(
     
     **Example usage**:
     ```bash
-    curl -X POST "http://localhost:8000/voice-agent/process" \
+    curl -X POST "http://localhost:4000/voice-agent/process" \
          -F "audio_file=@customer_recording.wav" \
          -F "session_id=session123" \
          -F "customer_id=customer123"
@@ -564,7 +564,7 @@ async def websocket_voice_agent(websocket: WebSocket, session_id: str):
     
     **Example usage:**
     ```javascript
-    const ws = new WebSocket('ws://localhost:8000/ws/voice-agent/session123');
+    const ws = new WebSocket('ws://localhost:4000/ws/voice-agent/session123');
     
     // Send audio chunk
     ws.send(JSON.stringify({
@@ -611,7 +611,7 @@ async def websocket_status():
     
     **Example usage**:
     ```bash
-    curl "http://localhost:8000/ws/status"
+    curl "http://localhost:4000/ws/status"
     ```
     """
     try:
@@ -637,7 +637,7 @@ async def disconnect_websocket(session_id: str):
     
     **Example usage**:
     ```bash
-    curl -X POST "http://localhost:8000/ws/disconnect/session123"
+    curl -X POST "http://localhost:4000/ws/disconnect/session123"
     ```
     """
     try:
@@ -678,4 +678,4 @@ async def general_exception_handler(request, exc):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=API_HOST, port=API_PORT)

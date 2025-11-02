@@ -25,7 +25,7 @@ def serve_chat_ui():
     # Change working directory to the UI folder
     os.chdir(ui_dir)
     
-    PORT = 3000
+    PORT = 9000
     
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
@@ -42,7 +42,7 @@ def serve_chat_ui():
         with socketserver.TCPServer(("", PORT), Handler) as httpd:
             print("🚀 Chat UI Server Starting...")
             print(f"📱 Chat UI: http://localhost:{PORT}/chat_ui.html")
-            print(f"🔧 API Server: http://localhost:8000")
+            print(f"🔧 API Server: http://localhost:4000")
             print("=" * 50)
             print("✅ Both servers are running!")
             print("🌐 Opening chat UI in your browser...")
