@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 type Status = 'idle' | 'listening' | 'processing' | 'speaking';
 
@@ -8,6 +8,7 @@ interface TranscriptEntry {
   role: 'user' | 'assistant';
   text: string;
   timestamp: Date;
+  personaId?: string;
 }
 
 type SpeechRecognitionResult = {
@@ -42,6 +43,56 @@ type SpeechRecognitionInstance = {
   abort: () => void;
 };
 
+interface PersonaOption {
+  id: string;
+  name: string;
+  description: string;
+}
+
+type PersonaSpeechPreset = {
+  rate: number;
+  pitch: number;
+  decorate: (base: string) => string;
+};
+
+const DEFAULT_PERSONAS: PersonaOption[] = [
+  {
+    id: 'friendly_guide',
+    name: 'Friendly Guide',
+    description: 'Warm, upbeat helper who keeps things encouraging.',
+  },
+  {
+    id: 'calm_concierge',
+    name: 'Calm Concierge',
+    description: 'Composed professional with a steady, reassuring presence.',
+  },
+  {
+    id: 'energetic_host',
+    name: 'Energetic Host',
+    description: 'High-energy emcee who keeps the pace lively.',
+  },
+];
+
+const PERSONA_SPEECH_PRESETS: Record<string, PersonaSpeechPreset> = {
+  friendly_guide: {
+    rate: 1.05,
+    pitch: 1.1,
+    decorate: (base) => `${base} 😊`,
+  },
+  calm_concierge: {
+    rate: 0.95,
+    pitch: 0.9,
+    decorate: (base) => `Certainly. ${base}`,
+  },
+  energetic_host: {
+    rate: 1.18,
+    pitch: 1.05,
+    decorate: (base) => `${base} Let's keep the momentum going!`,
+  },
+};
+
+const DEFAULT_PERSONA_ID = DEFAULT_PERSONAS[0].id;
+
 const RESPONSE_DELAY_MS = 1500;
 
 const getSpeechRecognitionConstructor = (): (() => SpeechRecognitionInstance) | null => {
@@ -57,37 +108,47 @@ const getSpeechRecognitionConstructor = (): (() => SpeechRecognitionInstance) | 
   return () => new ctor();
 };
 
-const generateAgentResponse = (input: string, history: TranscriptEntry[]): string => {
+const getSpeechPreset = (personaId: string): PersonaSpeechPreset => {
+  return PERSONA_SPEECH_PRESETS[personaId] || PERSONA_SPEECH_PRESETS[DEFAULT_PERSONA_ID];
+};
+
+const generateAgentResponse = (
+  input: string,
+  history: TranscriptEntry[],
+  personaId: string
+): string => {
   const normalized = input.trim().toLowerCase();
+  const preset = getSpeechPreset(personaId);
 
   if (!normalized) {
-    return "I didn't quite catch that. Could you try again?";
+    return preset.decorate("I didn't quite catch that. Could you try again?");
   }
 
   if (normalized.includes('hello') || normalized.includes('hi')) {
-    return 'Hello! What would you like to talk about today?';
+    return preset.decorate('Hello! What would you like to talk about today?');
   }
 
   if (normalized.includes('menu')) {
-    return 'Right now the specials are truffle risotto, grilled salmon, and a berry tart. What sounds good to you?';
+    return preset.decorate('Right now the specials are truffle risotto, grilled salmon, and a berry tart. What sounds good to you?');
   }
 
   if (normalized.includes('order')) {
-    return 'Sure thing. Tell me what you would like to order and I will make sure it is ready.';
+    return preset.decorate('Sure thing. Tell me what you would like to order and I will make sure it is ready.');
   }
 
   if (normalized.includes('thank')) {
-    return 'You are very welcome. Happy to help whenever you need me!';
+    return preset.decorate('You are very welcome. Happy to help whenever you need me!');
   }
 
   if (history.length >= 4) {
     const lastUserTurn = [...history].reverse().find((entry) => entry.role === 'user');
     if (lastUserTurn) {
-      return `Earlier you mentioned "${lastUserTurn.text}". Would you like to go deeper on that?`;
+      return preset.decorate(`Earlier you mentioned "${lastUserTurn.text}". Would you like to go deeper on that?`);
     }
   }
 
-  return `You said: ${input}. I am still listening, what else should we cover?`;
+  const baseResponse = `You said: ${input}. I am still listening, what else should we cover?`;
+  return preset.decorate(baseResponse);
 };
 
 export default function Home() {
@@ -97,6 +158,17 @@ export default function Home() {
   const [isBrowserSupported, setBrowserSupported] = useState<boolean | null>(null);
   const [liveUserTranscript, setLiveUserTranscript] = useState('');
   const [liveAssistantUtterance, setLiveAssistantUtterance] = useState('');
+  const [personaOptions, setPersonaOptions] = useState<PersonaOption[]>(DEFAULT_PERSONAS);
+  const [selectedPersona, setSelectedPersona] = useState<string>(DEFAULT_PERSONA_ID);
+  const [personaNotice, setPersonaNotice] = useState<string | null>(null);
+
+  const activePersona = useMemo<PersonaOption>(() => {
+    return personaOptions.find((option) => option.id === selectedPersona) || personaOptions[0];
+  }, [personaOptions, selectedPersona]);
+
+  const activeSpeechPreset = useMemo<PersonaSpeechPreset>(() => {
+    return getSpeechPreset(selectedPersona);
+  }, [selectedPersona]);
 
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const isRecognitionActiveRef = useRef(false);
@@ -115,6 +187,49 @@ export default function Home() {
     const synthesisSupported = 'speechSynthesis' in window;
     setBrowserSupported(Boolean(recognitionCtor && synthesisSupported));
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadPersonas = async () => {
+      try {
+        const response = await fetch('http://localhost:8000/personas');
+        if (!response.ok) {
+          throw new Error(`Persona fetch failed: ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (!Array.isArray(data) || data.length === 0) {
+          return;
+        }
+
+        if (!cancelled) {
+          const normalized: PersonaOption[] = data.map((item: any) => ({
+            id: item.id,
+            name: item.name ?? item.id,
+            description: item.description ?? '',
+          }));
+
+          setPersonaOptions(normalized);
+
+          if (!normalized.some((option) => option.id === selectedPersona)) {
+            setSelectedPersona(normalized[0].id);
+          }
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setPersonaNotice('Using built-in persona presets (API unavailable).');
+        }
+        console.debug('Persona fetch failed, using defaults:', err);
+      }
+    };
+
+    loadPersonas();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPersona]);
 
   useEffect(() => {
     return () => {
@@ -249,21 +364,22 @@ export default function Home() {
   };
 
   const deliverAgentResponse = (userUtterance: string) => {
-    const response = generateAgentResponse(userUtterance, transcripts);
+    const response = generateAgentResponse(userUtterance, transcripts, selectedPersona);
     setTranscripts((prev) => [
       ...prev,
       {
         role: 'assistant',
         text: response,
         timestamp: new Date(),
+        personaId: selectedPersona,
       },
     ]);
 
     setLiveAssistantUtterance(response);
-    speakResponse(response);
+    speakResponse(response, activeSpeechPreset);
   };
 
-  const speakResponse = (text: string) => {
+  const speakResponse = (text: string, preset: PersonaSpeechPreset) => {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
       setError('Speech synthesis is not supported in this browser.');
       return;
@@ -277,8 +393,8 @@ export default function Home() {
     }
 
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.pitch = 1;
-    utterance.rate = 1;
+    utterance.pitch = preset.pitch;
+    utterance.rate = preset.rate;
     utterance.onstart = () => {
       isSpeakingRef.current = true;
       setStatus('speaking');
@@ -396,6 +512,31 @@ export default function Home() {
             </div>
           </section>
 
+          <section className="mb-8">
+            <label className="block text-sm font-semibold uppercase tracking-wide text-slate-300 mb-2">
+              Persona
+            </label>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+              <select
+                value={selectedPersona}
+                onChange={(event) => setSelectedPersona(event.target.value)}
+                className="w-full sm:w-64 rounded-2xl border border-slate-600 bg-slate-900/60 px-4 py-2 text-sm text-slate-100 focus:border-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-400/40"
+              >
+                {personaOptions.map((persona) => (
+                  <option key={persona.id} value={persona.id}>
+                    {persona.name}
+                  </option>
+                ))}
+              </select>
+              <div className="text-xs text-slate-400 flex-1">
+                {activePersona?.description || 'Choose how the assistant should sound and respond.'}
+              </div>
+            </div>
+            {personaNotice && (
+              <p className="mt-2 text-xs text-amber-300">{personaNotice}</p>
+            )}
+          </section>
+
           {isBrowserSupported === false && (
             <div className="mb-6 rounded-xl border border-red-400/40 bg-red-500/10 p-4 text-red-100">
               <strong className="block font-semibold">Browser not supported</strong>
@@ -505,7 +646,9 @@ export default function Home() {
                   >
                     <div className="flex items-center justify-between text-xs uppercase tracking-wide text-slate-400">
                       <span className="font-semibold text-slate-300">
-                        {entry.role === 'user' ? 'You' : 'Assistant'}
+                        {entry.role === 'user'
+                          ? 'You'
+                          : personaOptions.find((option) => option.id === entry.personaId)?.name || 'Assistant'}
                       </span>
                       <span>{entry.timestamp.toLocaleTimeString()}</span>
                     </div>

@@ -11,6 +11,7 @@ A general-purpose voice agent backend system built with FastAPI, OpenAI, and Pos
 - **General Purpose**: Designed for any conversation use case
 - **REST API**: Comprehensive API for all voice agent operations
 - **Database Models**: Complete data models for conversation sessions
+- **Persona System**: Choose configurable personas that tailor tone and TTS voices
 
 ## Architecture
 
@@ -93,6 +94,14 @@ The UI will be available at `http://localhost:3000` (proxied through `ui/server.
 
 This script launches both servers in parallel; use `Ctrl+C` to stop them.
 
+### 7. List Personas
+
+```bash
+curl http://localhost:8000/personas
+```
+
+Use the returned persona identifier (for example `friendly_guide`, `calm_concierge`, `energetic_host`) when calling conversation or TTS endpoints.
+
 ## API Documentation
 
 The API is fully documented with Swagger/OpenAPI documentation. Once the server is running, visit:
@@ -115,6 +124,8 @@ The API is fully documented with Swagger/OpenAPI documentation. Once the server 
 #### 🔧 General
 - `GET /` - Root endpoint with API information
 - `GET /health` - Health check endpoint
+- `GET /personas` - List available personas with voices and descriptions
+- `GET /personas/{persona}` - Retrieve a specific persona profile
 
 #### ⚡ Real-time (WebSocket)
 - `WS /ws/voice-agent/{session_id}` - Real-time voice agent WebSocket
@@ -134,20 +145,29 @@ The API is fully documented with Swagger/OpenAPI documentation. Once the server 
 ```python
 import requests
 
-# Start conversation
-response = requests.post("http://localhost:8000/conversation/start", 
-                        json={"customer_id": "customer123"})
+PERSONA = "friendly_guide"
+
+# Start conversation with a specific persona
+response = requests.post(
+    "http://localhost:8000/conversation/start",
+    params={"customer_id": "customer123", "persona": PERSONA},
+)
+response.raise_for_status()
 session_id = response.json()["session_id"]
 
-# Process voice input
-with open("audio.wav", "rb") as f:
-    response = requests.post("http://localhost:8000/voice-agent/process",
-                           files={"audio_file": f},
-                           data={"session_id": session_id})
-    
-    result = response.json()
-    print(f"User said: {result['user_input']}")
-    print(f"Agent responded: {result['agent_response']}")
+# Process voice input end-to-end (STT → conversation → TTS)
+with open("audio.wav", "rb") as source_audio:
+    response = requests.post(
+        "http://localhost:8000/voice-agent/process",
+        files={"audio_file": source_audio},
+        data={"session_id": session_id, "persona": PERSONA},
+    )
+
+response.raise_for_status()
+result = response.json()
+print(f"User said: {result['user_input']}")
+print(f"Agent responded: {result['agent_response']}")
+print(f"Persona: {result['persona']}   Voice: {result['voice']}")
 ```
 
 ### Real-time Voice Agent (WebSocket)
@@ -219,6 +239,7 @@ voiceagent/
 ├── database.py            # Database configuration
 ├── voice_processor.py     # Speech-to-text and text-to-speech facade
 ├── conversation_manager.py # Conversation flow management
+├── personas.py            # Persona catalog describing voices and tone
 ├── tools/                 # Modular tool implementations
 │   ├── understanding/
 │   │   └── speech_to_text/

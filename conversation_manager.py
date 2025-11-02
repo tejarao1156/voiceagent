@@ -78,7 +78,12 @@ Current conversation state will be provided to help you understand context."""
         session_data["last_activity"] = datetime.utcnow().isoformat()
         return session_data
     
-    async def process_user_input(self, session_data: Dict[str, Any], user_input: str) -> Dict[str, Any]:
+    async def process_user_input(
+        self,
+        session_data: Dict[str, Any],
+        user_input: str,
+        persona_config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """
         Process user input and generate appropriate response
         
@@ -91,10 +96,10 @@ Current conversation state will be provided to help you understand context."""
         """
         try:
             # Prepare context for the AI
-            context = self._prepare_context(session_data)
+            context = self._prepare_context(session_data, persona_config)
             
             # Generate response using OpenAI
-            response = await self._generate_response(context, user_input)
+            response = await self._generate_response(context, user_input, persona_config)
             
             # Update session based on response
             session_data = self._update_session_from_response(session_data, user_input, response)
@@ -119,20 +124,43 @@ Current conversation state will be provided to help you understand context."""
                 "actions": []
             }
     
-    def _prepare_context(self, session_data: Dict[str, Any]) -> str:
+    def _prepare_context(
+        self,
+        session_data: Dict[str, Any],
+        persona_config: Optional[Dict[str, Any]] = None
+    ) -> str:
         """Prepare context string for AI processing"""
         context = f"""
 Current conversation state: {session_data['state']}
 Customer ID: {session_data.get('customer_id', 'Unknown')}
 Current conversation history: {len(session_data.get('conversation_history', []))} interactions
 """
+        if persona_config:
+            context += (
+                f"Persona: {persona_config.get('display_name', persona_config.get('id'))}\n"
+                f"Persona description: {persona_config.get('description', 'N/A')}\n"
+            )
         return context
     
-    async def _generate_response(self, context: str, user_input: str) -> Dict[str, Any]:
+    async def _generate_response(
+        self,
+        context: str,
+        user_input: str,
+        persona_config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Generate response using OpenAI"""
         try:
+            if persona_config and persona_config.get("conversation_prompt"):
+                system_prompt = (
+                    self.system_prompt
+                    + "\n\nPersona Style Instructions:\n"
+                    + persona_config["conversation_prompt"]
+                )
+            else:
+                system_prompt = self.system_prompt
+
             messages = [
-                {"role": "system", "content": self.system_prompt + "\n\nContext:\n" + context},
+                {"role": "system", "content": system_prompt + "\n\nContext:\n" + context},
                 {"role": "user", "content": user_input}
             ]
             

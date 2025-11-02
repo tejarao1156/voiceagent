@@ -29,9 +29,14 @@ class VoiceProcessor:
 
         return result["text"]
 
-    async def text_to_speech(self, text: str, voice: str = "alloy") -> bytes:
+    async def text_to_speech(
+        self,
+        text: str,
+        voice: str = "alloy",
+        persona: Optional[Dict[str, Any]] = None
+    ) -> bytes:
         """Convert text to raw audio bytes using the TTS tool."""
-        result = await self.tts_tool.synthesize(text, voice)
+        result = await self.tts_tool.synthesize(text, voice, persona=persona)
         if not result["success"]:
             error_message = result.get("error", "Unknown synthesis error")
             logger.error("Text-to-speech failed: %s", error_message)
@@ -56,9 +61,14 @@ class VoiceProcessor:
             result.setdefault("confidence", 1.0)
         return result
 
-    async def generate_voice_response(self, text: str, voice: str = "alloy") -> Dict[str, Any]:
+    async def generate_voice_response(
+        self,
+        text: str,
+        voice: str = "alloy",
+        persona: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Generate voice response from text using text-to-speech tool."""
-        result = await self.tts_tool.synthesize(text, voice)
+        result = await self.tts_tool.synthesize(text, voice, persona=persona)
         if result["success"]:
             # Ensure base64 is present even if synthesis implementations change.
             if not result.get("audio_base64") and result.get("audio_bytes"):
