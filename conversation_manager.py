@@ -98,8 +98,14 @@ Current conversation state will be provided to help you understand context."""
             # Prepare context for the AI
             context = self._prepare_context(session_data, persona_config)
             
-            # Generate response using OpenAI
-            response = await self._generate_response(context, user_input, persona_config)
+            # Get conversation history (ensure it exists and is a list)
+            conversation_history = session_data.get("conversation_history", [])
+            if not isinstance(conversation_history, list):
+                conversation_history = []
+                session_data["conversation_history"] = conversation_history
+            
+            # Generate response using OpenAI with conversation history
+            response = await self._generate_response(context, user_input, conversation_history, persona_config)
             
             # Update session based on response
             session_data = self._update_session_from_response(session_data, user_input, response)
@@ -146,9 +152,10 @@ Current conversation history: {len(session_data.get('conversation_history', []))
         self,
         context: str,
         user_input: str,
+        conversation_history: List[Dict[str, Any]],
         persona_config: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Generate response using OpenAI"""
+        """Generate response using OpenAI with conversation history"""
         try:
             if persona_config and persona_config.get("conversation_prompt"):
                 system_prompt = (
@@ -159,16 +166,35 @@ Current conversation history: {len(session_data.get('conversation_history', []))
             else:
                 system_prompt = self.system_prompt
 
+            # Build messages array with conversation history
             messages = [
-                {"role": "system", "content": system_prompt + "\n\nContext:\n" + context},
-                {"role": "user", "content": user_input}
+                {"role": "system", "content": system_prompt + "\n\nContext:\n" + context}
             ]
+            
+            # Add ALL conversation history to maintain complete context
+            # Each interaction has user_input and agent_response
+            for interaction in conversation_history:
+                # Add user message
+                if interaction.get("user_input"):
+                    messages.append({
+                        "role": "user",
+                        "content": interaction["user_input"]
+                    })
+                # Add assistant response
+                if interaction.get("agent_response"):
+                    messages.append({
+                        "role": "assistant",
+                        "content": interaction["agent_response"]
+                    })
+            
+            # Add current user input
+            messages.append({"role": "user", "content": user_input})
             
             response = self.client.chat.completions.create(
                 model=INFERENCE_MODEL,
                 messages=messages,
                 temperature=0.7,
-                max_tokens=500
+                max_tokens=800  # Increased to allow better responses with context
             )
             
             response_text = response.choices[0].message.content.strip()
