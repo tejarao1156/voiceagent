@@ -3,7 +3,7 @@ import openai
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from enum import Enum
-from config import OPENAI_API_KEY
+from config import OPENAI_API_KEY, INFERENCE_MODEL
 import logging
 
 logger = logging.getLogger(__name__)
@@ -165,7 +165,7 @@ Current conversation history: {len(session_data.get('conversation_history', []))
             ]
             
             response = self.client.chat.completions.create(
-                model="gpt-4",
+                model=INFERENCE_MODEL,
                 messages=messages,
                 temperature=0.7,
                 max_tokens=500

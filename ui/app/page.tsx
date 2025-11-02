@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 type Status = 'idle' | 'listening' | 'processing' | 'speaking';
 
@@ -114,6 +114,7 @@ const PERSONA_SPEECH_PRESETS: Record<string, PersonaSpeechPreset> = {
 const DEFAULT_PERSONA_ID = DEFAULT_PERSONAS[0].id;
 
 const RESPONSE_DELAY_MS = 1500;
+const API_BASE_URL = 'http://localhost:4002';
 
 const getSpeechRecognitionConstructor = (): (() => SpeechRecognitionInstance) | null => {
   if (typeof window === 'undefined') {
@@ -132,7 +133,7 @@ const getSpeechPreset = (personaId: string): PersonaSpeechPreset => {
   return PERSONA_SPEECH_PRESETS[personaId] || PERSONA_SPEECH_PRESETS[DEFAULT_PERSONA_ID];
 };
 
-const generateAgentResponse = (
+const generateFallbackResponse = (
   input: string,
   history: TranscriptEntry[],
   personaId: string
@@ -163,7 +164,7 @@ const generateAgentResponse = (
   if (history.length >= 4) {
     const lastUserTurn = [...history].reverse().find((entry) => entry.role === 'user');
     if (lastUserTurn) {
-      return preset.decorate(`Earlier you mentioned "${lastUserTurn.text}". Would you like to go deeper on that?`);
+    return preset.decorate(`Earlier you mentioned "${lastUserTurn.text}". Would you like to go deeper on that?`);
     }
   }
 
@@ -181,6 +182,8 @@ export default function Home() {
   const [personaOptions, setPersonaOptions] = useState<PersonaOption[]>(DEFAULT_PERSONAS);
   const [selectedPersona, setSelectedPersona] = useState<string>(DEFAULT_PERSONA_ID);
   const [personaNotice, setPersonaNotice] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [isStartingSession, setIsStartingSession] = useState(false);
 
   const activePersona = useMemo<PersonaOption>(() => {
     return personaOptions.find((option) => option.id === selectedPersona) || personaOptions[0];
@@ -196,6 +199,87 @@ export default function Home() {
   const pendingResponseTimerRef = useRef<number | null>(null);
   const lastUserUtteranceRef = useRef<string>('');
   const isSpeakingRef = useRef(false);
+  const sessionPersonaRef = useRef<string | null>(null);
+  const sessionDataRef = useRef<Record<string, any> | null>(null);
+  const pendingSessionPromiseRef = useRef<Promise<string | null> | null>(null);
+  const transcriptsRef = useRef<TranscriptEntry[]>([]);
+
+  const buildApiUrl = (path: string, params?: Record<string, string | undefined>) => {
+    const searchParams = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        if (value) {
+          searchParams.append(key, value);
+        }
+      });
+    }
+
+    const query = searchParams.toString();
+    return query ? `${API_BASE_URL}${path}?${query}` : `${API_BASE_URL}${path}`;
+  };
+
+  const createConversationSession = async (personaId: string): Promise<string> => {
+    const response = await fetch(
+      buildApiUrl('/conversation/start', { persona: personaId }),
+      {
+        method: 'POST',
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Conversation session failed with status ${response.status}`);
+    }
+
+    const data = await response.json();
+    const newSessionId = data.session_id as string;
+    setSessionId(newSessionId);
+    sessionPersonaRef.current = (data.persona as string | undefined) || personaId;
+    sessionDataRef.current = data.session_data ?? null;
+    return newSessionId;
+  };
+
+  const ensureConversationSession = async (): Promise<string | null> => {
+    if (sessionId && sessionPersonaRef.current === selectedPersona) {
+      return sessionId;
+    }
+
+    if (pendingSessionPromiseRef.current) {
+      try {
+        return await pendingSessionPromiseRef.current;
+      } catch {
+        return null;
+      }
+    }
+
+    const promise = createConversationSession(selectedPersona).finally(() => {
+      pendingSessionPromiseRef.current = null;
+    });
+
+    pendingSessionPromiseRef.current = promise;
+    return promise;
+  };
+
+  const stopConversation = useCallback(() => {
+    shouldListenRef.current = false;
+
+    clearPendingResponseTimer();
+
+    if (typeof window !== 'undefined') {
+      window.speechSynthesis.cancel();
+    }
+
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (err) {
+        console.debug('Speech recognition stop() ignored:', err);
+      }
+    }
+
+    isRecognitionActiveRef.current = false;
+    isSpeakingRef.current = false;
+    setStatus('idle');
+  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -213,7 +297,7 @@ export default function Home() {
 
     const loadPersonas = async () => {
       try {
-        const response = await fetch('http://localhost:4000/personas');
+        const response = await fetch(buildApiUrl('/personas'));
         if (!response.ok) {
           throw new Error(`Persona fetch failed: ${response.status}`);
         }
@@ -252,10 +336,26 @@ export default function Home() {
   }, [selectedPersona]);
 
   useEffect(() => {
+    transcriptsRef.current = transcripts;
+  }, [transcripts]);
+
+  useEffect(() => {
+    stopConversation();
+    setTranscripts([]);
+    setLiveAssistantUtterance('');
+    setLiveUserTranscript('');
+    setSessionId(null);
+    setIsStartingSession(false);
+    sessionPersonaRef.current = null;
+    sessionDataRef.current = null;
+    pendingSessionPromiseRef.current = null;
+  }, [selectedPersona, stopConversation]);
+
+  useEffect(() => {
     return () => {
       stopConversation();
     };
-  }, []);
+  }, [stopConversation]);
 
   const clearPendingResponseTimer = () => {
     if (pendingResponseTimerRef.current !== null) {
@@ -379,24 +479,106 @@ export default function Home() {
 
     pendingResponseTimerRef.current = window.setTimeout(() => {
       pendingResponseTimerRef.current = null;
-      deliverAgentResponse(lastUserUtteranceRef.current);
+      if (!shouldListenRef.current) {
+        return;
+      }
+
+      const latestUtterance = lastUserUtteranceRef.current;
+      void deliverAgentResponse(latestUtterance);
     }, RESPONSE_DELAY_MS);
   };
 
-  const deliverAgentResponse = (userUtterance: string) => {
-    const response = generateAgentResponse(userUtterance, transcripts, selectedPersona);
-    setTranscripts((prev) => [
-      ...prev,
-      {
-        role: 'assistant',
-        text: response,
-        timestamp: new Date(),
-        personaId: selectedPersona,
-      },
-    ]);
+  const deliverAgentResponse = async (userUtterance: string) => {
+    if (!shouldListenRef.current) {
+      return;
+    }
 
-    setLiveAssistantUtterance(response);
-    speakResponse(response, activeSpeechPreset);
+    try {
+      setStatus('processing');
+
+      const ensuredSessionId = await ensureConversationSession();
+      if (!ensuredSessionId) {
+        throw new Error('Unable to establish a conversation session.');
+      }
+
+      const response = await fetch(buildApiUrl('/conversation/process'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: userUtterance,
+          session_id: ensuredSessionId,
+          persona: selectedPersona,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Conversation processing failed with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      let assistantText = typeof data.response === 'string' ? (data.response as string).trim() : '';
+      if (!assistantText) {
+        assistantText = generateFallbackResponse(
+          userUtterance,
+          transcriptsRef.current,
+          selectedPersona
+        );
+      }
+
+      if (!shouldListenRef.current) {
+        return;
+      }
+
+      sessionDataRef.current = data.session_data ?? sessionDataRef.current;
+      if (data.persona) {
+        sessionPersonaRef.current = data.persona as string;
+      }
+
+      setTranscripts((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          text: assistantText,
+          timestamp: new Date(),
+          personaId: (data.persona as string | undefined) || selectedPersona,
+        },
+      ]);
+
+      setLiveAssistantUtterance(assistantText);
+      speakResponse(assistantText, activeSpeechPreset);
+    } catch (err) {
+      if (!shouldListenRef.current) {
+        return;
+      }
+
+      console.error('Failed to fetch agent response:', err);
+      const fallback = generateFallbackResponse(
+        userUtterance,
+        transcriptsRef.current,
+        selectedPersona
+      );
+
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Something went wrong while generating the response.'
+      );
+
+      setTranscripts((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          text: fallback,
+          timestamp: new Date(),
+          personaId: selectedPersona,
+        },
+      ]);
+
+      setLiveAssistantUtterance(fallback);
+      speakResponse(fallback, activeSpeechPreset);
+    }
   };
 
   const speakResponse = (text: string, preset: PersonaSpeechPreset) => {
@@ -444,8 +626,8 @@ export default function Home() {
     window.speechSynthesis.speak(utterance);
   };
 
-  const startConversation = () => {
-    if (status !== 'idle') {
+  const startConversation = async () => {
+    if (status !== 'idle' || isStartingSession) {
       return;
     }
 
@@ -454,38 +636,27 @@ export default function Home() {
       return;
     }
 
+    setError(null);
+    setIsStartingSession(true);
+    shouldListenRef.current = true;
+    clearPendingResponseTimer();
+    setStatus('processing');
+
     try {
-      setError(null);
-      shouldListenRef.current = true;
-      clearPendingResponseTimer();
+      const ensuredSessionId = await ensureConversationSession();
+      if (!ensuredSessionId) {
+        throw new Error('Unable to create a conversation session.');
+      }
+
       startListening();
     } catch (err: any) {
       console.error('Failed to start conversation:', err);
       setError(err.message || 'Failed to start conversation');
+      shouldListenRef.current = false;
       stopConversation();
+    } finally {
+      setIsStartingSession(false);
     }
-  };
-
-  const stopConversation = () => {
-    shouldListenRef.current = false;
-
-    clearPendingResponseTimer();
-
-    if (typeof window !== 'undefined') {
-      window.speechSynthesis.cancel();
-    }
-
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (err) {
-        console.debug('Speech recognition stop() ignored:', err);
-      }
-    }
-
-    isRecognitionActiveRef.current = false;
-    isSpeakingRef.current = false;
-    setStatus('idle');
   };
 
   const handleInterruptClick = () => {
@@ -577,9 +748,9 @@ export default function Home() {
             <button
               type="button"
               onClick={startConversation}
-              disabled={status !== 'idle'}
+              disabled={status !== 'idle' || isStartingSession}
               className={`inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold transition ${
-                status === 'idle'
+                status === 'idle' && !isStartingSession
                   ? 'bg-emerald-500 text-white hover:bg-emerald-400'
                   : 'bg-slate-600 text-slate-300 cursor-not-allowed'
               }`}
