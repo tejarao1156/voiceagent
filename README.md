@@ -67,13 +67,31 @@ If the connection test passes, create the database tables:
 python -c "from database import create_tables; create_tables()"
 ```
 
-### 4. Run the Server
+### 4. Run the API Server
 
 ```bash
-python main.py
+./start_api.sh
+# or python main.py
 ```
 
-The API will be available at `http://localhost:8000`
+The API will be available at `http://localhost:8000`.
+
+### 5. Run the Web UI (optional)
+
+```bash
+./start_ui.sh
+# or: cd ui && npm install && npm run dev
+```
+
+The UI will be available at `http://localhost:3000` (proxied through `ui/server.js`).
+
+### 6. Run API and UI Together
+
+```bash
+./start_all.sh
+```
+
+This script launches both servers in parallel; use `Ctrl+C` to stop them.
 
 ## API Documentation
 
@@ -102,6 +120,12 @@ The API is fully documented with Swagger/OpenAPI documentation. Once the server 
 - `WS /ws/voice-agent/{session_id}` - Real-time voice agent WebSocket
 - `GET /ws/status` - Get WebSocket connection status
 - `POST /ws/disconnect/{session_id}` - Disconnect WebSocket session
+
+#### 🧰 Tools
+- `POST /tools/understanding/speech-to-text` - Direct speech-to-text tool access
+- `POST /tools/response/text-to-speech` - Direct text-to-speech tool access
+- `POST /tools/conversation/start` - Create conversation sessions via tool interface
+- `POST /tools/conversation/process` - Generate conversation responses via tool interface
 
 ## Usage Examples
 
@@ -170,7 +194,7 @@ ws.send(JSON.stringify({
 
 ### HTML Client Demo
 
-Open `realtime_client.html` in your browser for a complete real-time voice agent demo with:
+Open `ui/realtime_client.html` in your browser for a complete real-time voice agent demo with:
 - Real-time audio recording and processing
 - Text input support
 - Voice responses
@@ -193,10 +217,25 @@ voiceagent/
 ├── api_general.py         # Complete FastAPI application with Swagger docs
 ├── models.py              # Unified database models and API schemas
 ├── database.py            # Database configuration
-├── voice_processor.py     # Speech-to-text and text-to-speech
+├── voice_processor.py     # Speech-to-text and text-to-speech facade
 ├── conversation_manager.py # Conversation flow management
+├── tools/                 # Modular tool implementations
+│   ├── understanding/
+│   │   └── speech_to_text/
+│   └── response/
+│       ├── conversation/
+│       └── text_to_speech/
 ├── realtime_websocket.py  # Real-time WebSocket handler
-├── realtime_client.html   # HTML client for real-time demo
+├── serve_chat.py         # Simple server for ui/chat_ui.html
+├── start_api.sh          # Helper script to launch API server
+├── start_ui.sh           # Helper script to launch UI server
+├── start_all.sh          # Helper script to launch both servers
+├── ui/                   # Next.js web client and standalone demos
+│   ├── app/              # Next.js app directory
+│   ├── server.js         # Custom Next.js + WebSocket proxy
+│   ├── package.json      # Frontend dependencies and scripts
+│   ├── chat_ui.html      # Standalone chat UI page
+│   └── realtime_client.html # Realtime HTML demo client
 ├── config.py             # Configuration management
 ├── dev.env               # Complete development environment configuration
 ├── env.example           # Environment configuration template
