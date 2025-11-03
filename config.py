@@ -15,6 +15,12 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@localho
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # ============================================================================
+# HUGGING FACE CONFIGURATION
+# ============================================================================
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")  # Optional - works without but better with it
+HF_TOKEN = os.getenv("HF_TOKEN")  # Required for fal-ai provider
+
+# ============================================================================
 # VOICE PROCESSING CONFIGURATION
 # ============================================================================
 VOICE_MODEL = os.getenv("VOICE_MODEL", "whisper-1")

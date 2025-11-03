@@ -200,7 +200,7 @@ export default function Home() {
   const lastUserUtteranceRef = useRef<string>('');
   const accumulatedTranscriptRef = useRef<string>('');
   const isSpeakingRef = useRef(false);
-  const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const currentUtteranceRef = useRef<HTMLAudioElement | SpeechSynthesisUtterance | null>(null);
   const sessionPersonaRef = useRef<string | null>(null);
   const sessionDataRef = useRef<Record<string, any> | null>(null);
   const pendingSessionPromiseRef = useRef<Promise<string | null> | null>(null);
@@ -266,9 +266,15 @@ export default function Home() {
 
     clearPendingResponseTimer();
 
-    if (typeof window !== 'undefined') {
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.cancel(); // Ensure complete stop
+    // Stop any audio playback
+    if (currentUtteranceRef.current) {
+      if (currentUtteranceRef.current instanceof HTMLAudioElement) {
+        currentUtteranceRef.current.pause();
+        currentUtteranceRef.current.currentTime = 0;
+      } else if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.cancel();
+      }
     }
     currentUtteranceRef.current = null;
 
@@ -390,9 +396,15 @@ export default function Home() {
       // If recognition starts while AI is speaking, stop AI immediately
       // (This can happen if user starts speaking)
       if (isSpeakingRef.current) {
-        if (typeof window !== 'undefined' && window.speechSynthesis) {
-          window.speechSynthesis.cancel();
-          window.speechSynthesis.cancel();
+        // Stop audio playback
+        if (currentUtteranceRef.current) {
+          if (currentUtteranceRef.current instanceof HTMLAudioElement) {
+            currentUtteranceRef.current.pause();
+            currentUtteranceRef.current.currentTime = 0;
+          } else if (typeof window !== 'undefined' && window.speechSynthesis) {
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.cancel();
+          }
         }
         currentUtteranceRef.current = null;
         isSpeakingRef.current = false;
@@ -512,11 +524,16 @@ export default function Home() {
     // CRITICAL: If user starts speaking while AI is speaking, stop AI IMMEDIATELY
     // Do this BEFORE processing any transcripts
     if (interruptDetected) {
-      // Force stop speech synthesis immediately - multiple calls to ensure it stops completely
-      if (typeof window !== 'undefined' && window.speechSynthesis) {
-        window.speechSynthesis.cancel();
-        window.speechSynthesis.cancel(); // Extra calls to ensure complete stop
-        window.speechSynthesis.cancel(); // One more time for good measure
+      // Force stop audio playback immediately
+      if (currentUtteranceRef.current) {
+        if (currentUtteranceRef.current instanceof HTMLAudioElement) {
+          currentUtteranceRef.current.pause();
+          currentUtteranceRef.current.currentTime = 0;
+        } else if (typeof window !== 'undefined' && window.speechSynthesis) {
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.cancel();
+        }
       }
       // Clear the current utterance reference
       currentUtteranceRef.current = null;
@@ -683,18 +700,20 @@ export default function Home() {
     }
   };
 
-  const speakResponse = (text: string, preset: PersonaSpeechPreset) => {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      setError('Speech synthesis is not supported in this browser.');
+  const speakResponse = async (text: string, preset: PersonaSpeechPreset) => {
+    if (typeof window === 'undefined') {
+      setError('Audio playback is not supported in this browser.');
       return;
     }
 
     // Cancel any existing speech immediately
-    if (typeof window !== 'undefined' && window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.cancel(); // Ensure complete stop
+    if (currentUtteranceRef.current) {
+      if (currentUtteranceRef.current instanceof HTMLAudioElement) {
+        currentUtteranceRef.current.pause();
+        currentUtteranceRef.current.currentTime = 0;
+      }
+      currentUtteranceRef.current = null;
     }
-    currentUtteranceRef.current = null;
     isSpeakingRef.current = false;
 
     // Keep recognition active while speaking to allow interruption
@@ -705,58 +724,170 @@ export default function Home() {
       startListening();
     }
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    currentUtteranceRef.current = utterance; // Store reference for direct cancellation
-    utterance.pitch = preset.pitch;
-    utterance.rate = preset.rate;
-    utterance.onstart = () => {
-      // Only set speaking if this utterance is still the current one
-      if (currentUtteranceRef.current === utterance) {
-        isSpeakingRef.current = true;
-        setStatus('speaking');
-        // Ensure recognition is active for interruption
-        if (recognition && !isRecognitionActiveRef.current && shouldListenRef.current) {
-          startListening();
-        }
-      }
-    };
+    try {
+      // Call backend TTS API
+      const apiUrl = buildApiUrl('/voice/text-to-speech');
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text,
+          persona: selectedPersona,
+        }),
+      });
 
-    utterance.onend = () => {
-      // Only process if this is still the current utterance
-      if (currentUtteranceRef.current === utterance) {
-        isSpeakingRef.current = false;
-        currentUtteranceRef.current = null;
-        setLiveAssistantUtterance('');
-        if (shouldListenRef.current) {
-          // Keep listening if not already active
-          if (!isRecognitionActiveRef.current) {
-            restartListening();
+      if (!response.ok) {
+        throw new Error(`TTS API error: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      
+      if (!data.success || !data.audio_base64) {
+        throw new Error(data.error || 'TTS generation failed');
+      }
+
+      // Decode base64 audio
+      const audioBytes = Uint8Array.from(atob(data.audio_base64), c => c.charCodeAt(0));
+      
+      // Determine audio format from response or default to wav
+      const audioFormat = data.format || 'wav';
+      const mimeType = audioFormat === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+      
+      const audioBlob = new Blob([audioBytes], { type: mimeType });
+      const audioUrl = URL.createObjectURL(audioBlob);
+
+      // Create audio element
+      const audio = new Audio(audioUrl);
+      currentUtteranceRef.current = audio as any; // Store reference for cancellation
+      
+      // Apply playback rate (pitch is not supported by HTML5 Audio, but rate is)
+      audio.playbackRate = preset.rate || 1.0;
+      
+      // Preload the audio to ensure it's ready
+      audio.preload = 'auto';
+      
+      // Wait for audio to be ready before playing
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = () => {
+          audio.removeEventListener('canplaythrough', onCanPlay);
+          audio.removeEventListener('error', onError);
+          clearTimeout(timeoutId);
+        };
+        
+        const onCanPlay = () => {
+          cleanup();
+          resolve();
+        };
+        
+        const onError = (e: Event) => {
+          cleanup();
+          reject(new Error('Audio loading failed'));
+        };
+        
+        audio.addEventListener('canplaythrough', onCanPlay);
+        audio.addEventListener('error', onError);
+        
+        // If already can play, resolve immediately
+        if (audio.readyState >= 3) { // HAVE_FUTURE_DATA or HAVE_ENOUGH_DATA
+          cleanup();
+          resolve();
+          return;
+        }
+        
+        // Timeout after 5 seconds
+        const timeoutId = setTimeout(() => {
+          cleanup();
+          reject(new Error('Audio loading timeout'));
+        }, 5000);
+        
+        // Force load
+        audio.load();
+      });
+
+      audio.onplay = () => {
+        // Only set speaking if this audio is still the current one
+        if (currentUtteranceRef.current === audio) {
+          isSpeakingRef.current = true;
+          setStatus('speaking');
+          // Ensure recognition is active for interruption
+          if (recognition && !isRecognitionActiveRef.current && shouldListenRef.current) {
+            startListening();
           }
-          setStatus('listening');
-        } else {
-          setStatus('idle');
         }
-      }
-    };
+      };
 
-    utterance.onerror = (event) => {
-      console.error('Speech synthesis error', event);
-      if (currentUtteranceRef.current === utterance) {
-        isSpeakingRef.current = false;
-        currentUtteranceRef.current = null;
-        setLiveAssistantUtterance('');
-        if (shouldListenRef.current) {
-          if (!isRecognitionActiveRef.current) {
-            restartListening();
+      audio.onended = () => {
+        // Only process if this is still the current audio
+        if (currentUtteranceRef.current === audio) {
+          isSpeakingRef.current = false;
+          currentUtteranceRef.current = null;
+          setLiveAssistantUtterance('');
+          URL.revokeObjectURL(audioUrl); // Clean up
+          if (shouldListenRef.current) {
+            // Keep listening if not already active
+            if (!isRecognitionActiveRef.current) {
+              restartListening();
+            }
+            setStatus('listening');
+          } else {
+            setStatus('idle');
           }
-          setStatus('listening');
-        } else {
-          setStatus('idle');
         }
-      }
-    };
+      };
 
-    window.speechSynthesis.speak(utterance);
+      audio.onerror = (event) => {
+        console.error('Audio playback error', event);
+        if (currentUtteranceRef.current === audio) {
+          isSpeakingRef.current = false;
+          currentUtteranceRef.current = null;
+          setLiveAssistantUtterance('');
+          URL.revokeObjectURL(audioUrl); // Clean up
+          if (shouldListenRef.current) {
+            if (!isRecognitionActiveRef.current) {
+              restartListening();
+            }
+            setStatus('listening');
+          } else {
+            setStatus('idle');
+          }
+        }
+      };
+
+      // Start playing - handle autoplay restrictions
+      try {
+        const playPromise = audio.play();
+        if (playPromise !== undefined) {
+          await playPromise;
+        }
+      } catch (playError: any) {
+        // Handle autoplay restrictions
+        if (playError.name === 'NotAllowedError' || playError.name === 'NotSupportedError') {
+          console.error('Audio autoplay blocked:', playError);
+          // User interaction required - try to play again after a short delay
+          // or show a message to the user
+          throw new Error(
+            'Audio playback blocked by browser. Please interact with the page to enable audio.'
+          );
+        }
+        throw playError;
+      }
+      
+    } catch (error) {
+      console.error('TTS error:', error);
+      setError(`Failed to generate speech: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      isSpeakingRef.current = false;
+      currentUtteranceRef.current = null;
+      if (shouldListenRef.current) {
+        if (!isRecognitionActiveRef.current) {
+          restartListening();
+        }
+        setStatus('listening');
+      } else {
+        setStatus('idle');
+      }
+    }
   };
 
   const startConversation = async () => {
@@ -795,7 +926,16 @@ export default function Home() {
 
   const handleInterruptClick = () => {
     if (isSpeakingRef.current) {
-      window.speechSynthesis.cancel();
+      // Stop audio playback
+      if (currentUtteranceRef.current) {
+        if (currentUtteranceRef.current instanceof HTMLAudioElement) {
+          currentUtteranceRef.current.pause();
+          currentUtteranceRef.current.currentTime = 0;
+        } else if (typeof window !== 'undefined' && window.speechSynthesis) {
+          window.speechSynthesis.cancel();
+        }
+      }
+      currentUtteranceRef.current = null;
       isSpeakingRef.current = false;
       setStatus('listening');
       if (shouldListenRef.current) {
