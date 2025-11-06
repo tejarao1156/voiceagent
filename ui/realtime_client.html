@@ -144,7 +144,7 @@
         }
         
         function connect() {
-            const wsUrl = `ws://localhost:4000/ws/voice-agent/${sessionId}`;
+            const wsUrl = `ws://localhost:4002/ws/voice-agent/${sessionId}`;
             ws = new WebSocket(wsUrl);
             
             ws.onopen = function(event) {

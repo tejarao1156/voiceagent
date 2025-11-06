@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Query, Path, WebSocket, WebSocketDisconnect
+from starlette.requests import Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
 from typing import Optional, Dict, Any, List
 import json
@@ -25,7 +26,7 @@ from voice_processor import VoiceProcessor
 from conversation_manager import ConversationManager, ConversationState
 from models import Customer, ConversationSession
 from config import DEBUG, API_HOST, API_PORT
-from tools import SpeechToTextTool, TextToSpeechTool, ConversationalResponseTool
+from tools import SpeechToTextTool, TextToSpeechTool, ConversationalResponseTool, TwilioPhoneTool
 from realtime_websocket import realtime_agent
 from personas import get_persona_config, list_personas
 
@@ -93,12 +94,21 @@ tts_tool = TextToSpeechTool()
 voice_processor = VoiceProcessor(speech_tool=speech_tool, tts_tool=tts_tool)
 conversation_manager = ConversationManager()
 conversation_tool = ConversationalResponseTool(conversation_manager)
+twilio_phone_tool = TwilioPhoneTool(
+    speech_tool=speech_tool,
+    tts_tool=tts_tool,
+    conversation_tool=conversation_tool
+)
 
 # Create database tables on startup
 @app.on_event("startup")
 async def startup_event():
-    create_tables()
-    logger.info("Database tables created successfully")
+    try:
+        create_tables()
+        logger.info("Database tables created successfully")
+    except Exception as e:
+        logger.warning(f"Database connection failed: {e}. Server will continue without database features.")
+        logger.info("Note: Some features may be limited without database connection.")
 
 # ============================================================================
 # GENERAL ENDPOINTS
@@ -646,6 +656,200 @@ async def disconnect_websocket(session_id: str):
     except Exception as e:
         logger.error(f"Error disconnecting session {session_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# TWILIO PHONE INTEGRATION ENDPOINTS
+# ============================================================================
+
+@app.post(
+    "/webhooks/twilio/incoming",
+    summary="Twilio Incoming Call Webhook",
+    description="Handle incoming phone calls from Twilio",
+    tags=["Twilio Phone Integration"]
+)
+async def twilio_incoming_call(request: Request):
+    """
+    Webhook endpoint for incoming Twilio phone calls.
+    
+    When a call comes in, Twilio sends a POST request to this endpoint.
+    The endpoint returns TwiML instructions to start a Media Stream,
+    which enables real-time bidirectional audio processing.
+    
+    **Configuration:**
+    1. Set up your Twilio phone number
+    2. Configure webhook URL in Twilio Console:
+       - Voice & Fax → Phone Numbers → [Your Number] → Configure
+       - Set "A CALL COMES IN" webhook to: `https://your-domain.com/webhooks/twilio/incoming`
+    
+    **Example Twilio Console Setup:**
+    ```
+    Webhook URL: https://your-domain.com/webhooks/twilio/incoming
+    HTTP Method: POST
+    ```
+    
+    **For Local Development:**
+    Use ngrok to expose your local server:
+    ```bash
+    ngrok http 4002
+    # Then use: https://your-ngrok-url.ngrok.io/webhooks/twilio/incoming
+    ```
+    """
+    try:
+        # Get form data from Twilio webhook
+        form_data = await request.form()
+        call_data = dict(form_data)
+        
+        logger.info(f"Received incoming call webhook: {call_data.get('CallSid')}")
+        
+        # Process the call and get TwiML response
+        twiml = await twilio_phone_tool.handle_incoming_call(call_data)
+        
+        # Return TwiML response
+        from fastapi.responses import Response
+        return Response(content=twiml, media_type="application/xml")
+        
+    except Exception as e:
+        logger.error(f"Error handling incoming call webhook: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(
+    "/webhooks/twilio/status",
+    summary="Twilio Call Status Webhook",
+    description="Handle call status updates from Twilio",
+    tags=["Twilio Phone Integration"]
+)
+async def twilio_call_status(request: Request):
+    """
+    Webhook endpoint for Twilio call status updates.
+    
+    Twilio sends status updates when call status changes:
+    - ringing: Call is ringing
+    - answered: Call was answered
+    - completed: Call completed normally
+    - failed: Call failed
+    - busy: Call was busy
+    - no-answer: Call was not answered
+    
+    **Configuration:**
+    In Twilio Console, set "STATUS CALLBACK URL" to:
+    `https://your-domain.com/webhooks/twilio/status`
+    """
+    try:
+        # Get form data from Twilio webhook
+        form_data = await request.form()
+        status_data = dict(form_data)
+        
+        # Process status update
+        await twilio_phone_tool.handle_call_status(status_data)
+        
+        return {"status": "ok", "message": "Status update processed"}
+        
+    except Exception as e:
+        logger.error(f"Error handling status webhook: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.websocket("/webhooks/twilio/stream")
+async def twilio_media_stream(websocket: WebSocket):
+    """
+    WebSocket endpoint for Twilio Media Stream.
+    
+    This endpoint handles real-time bidirectional audio streaming:
+    - Receives audio from the phone call (μ-law PCM format)
+    - Processes audio through your AI tools:
+      * Speech-to-Text (OpenAI Whisper)
+      * Conversation AI (GPT)
+      * Text-to-Speech (OpenAI TTS)
+    - Sends audio back to the phone call
+    
+    **How it works:**
+    1. Twilio connects to this WebSocket when Media Stream starts
+    2. Audio flows bidirectionally in real-time
+    3. Your AI processes the conversation automatically
+    
+    **Message Format:**
+    - Incoming: JSON events + base64-encoded audio payloads
+    - Outgoing: JSON events + base64-encoded audio payloads
+    
+    **Note:** This endpoint is called automatically by Twilio when
+    a Media Stream is started via the TwiML response from
+    `/webhooks/twilio/incoming`. The CallSid is extracted from
+    the Media Stream messages.
+    """
+    try:
+        logger.info("Media Stream WebSocket connection received")
+        
+        # Try to get CallSid from query params (some Twilio setups pass it)
+        query_params = dict(websocket.query_params)
+        call_sid = query_params.get("CallSid") or query_params.get("call_sid")
+        
+        if not call_sid:
+            # CallSid will be extracted from Media Stream messages by the tool
+            logger.debug("No CallSid in query params, will extract from stream messages")
+            call_sid = None
+        
+        # Handle the Media Stream (tool will accept websocket and extract CallSid if needed)
+        await twilio_phone_tool.handle_media_stream(websocket, call_sid)
+        
+    except WebSocketDisconnect:
+        logger.info("Media Stream WebSocket disconnected")
+    except Exception as e:
+        logger.error(f"Error in Media Stream WebSocket: {str(e)}")
+        try:
+            await websocket.close()
+        except:
+            pass
+
+@app.get(
+    "/twilio/dashboard",
+    summary="Twilio Phone Dashboard",
+    description="HTML dashboard for monitoring Twilio phone calls",
+    tags=["Twilio Phone Integration"],
+    response_class=HTMLResponse
+)
+async def twilio_dashboard():
+    """Serve the Twilio phone dashboard UI."""
+    import os
+    dashboard_path = os.path.join(os.path.dirname(__file__), "ui", "twilio_phone_ui.html")
+    if os.path.exists(dashboard_path):
+        return FileResponse(dashboard_path)
+    else:
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+
+@app.get(
+    "/ui/chat",
+    summary="Chat UI",
+    description="Conversation chat UI with voice and text support",
+    tags=["UI"],
+    response_class=HTMLResponse
+)
+async def chat_ui():
+    """Serve the chat UI."""
+    import os
+    chat_path = os.path.join(os.path.dirname(__file__), "ui", "chat_ui.html")
+    if os.path.exists(chat_path):
+        return FileResponse(chat_path)
+    else:
+        raise HTTPException(status_code=404, detail="Chat UI not found")
+
+@app.get(
+    "/twilio/status",
+    summary="Get Twilio Call Status",
+    description="Get status of active Twilio calls and configuration",
+    tags=["Twilio Phone Integration"]
+)
+async def get_twilio_status():
+    """Get current status of Twilio integration."""
+    from config import TWILIO_ACCOUNT_SID, TWILIO_PHONE_NUMBER, TWILIO_WEBHOOK_BASE_URL
+    
+    return {
+        "configured": bool(TWILIO_ACCOUNT_SID and TWILIO_PHONE_NUMBER),
+        "phone_number": TWILIO_PHONE_NUMBER,
+        "account_sid": TWILIO_ACCOUNT_SID[:10] + "..." if TWILIO_ACCOUNT_SID else None,
+        "webhook_base_url": TWILIO_WEBHOOK_BASE_URL,
+        "active_calls": len(twilio_phone_tool.active_calls),
+        "active_call_sids": list(twilio_phone_tool.active_calls.keys()),
+        "server_status": "online"
+    }
 
 # ============================================================================
 # ERROR HANDLERS
