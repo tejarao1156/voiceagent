@@ -11,6 +11,7 @@ A general-purpose voice agent backend system built with FastAPI, OpenAI, and Pos
 - **General Purpose**: Designed for any conversation use case
 - **REST API**: Comprehensive API for all voice agent operations
 - **Database Models**: Complete data models for conversation sessions
+- **Persona System**: Choose configurable personas that tailor tone and TTS voices
 
 ## Architecture
 
@@ -67,21 +68,47 @@ If the connection test passes, create the database tables:
 python -c "from database import create_tables; create_tables()"
 ```
 
-### 4. Run the Server
+### 4. Run the API Server
 
 ```bash
-python main.py
+./start_api.sh
+# or python main.py
 ```
 
-The API will be available at `http://localhost:8000`
+The API will be available at `http://localhost:4000`.
+
+### 5. Run the Web UI (optional)
+
+```bash
+./start_ui.sh
+# or: cd ui && npm install && npm run dev
+```
+
+The UI will be available at `http://localhost:9000` (proxied through `ui/server.js`).
+
+### 6. Run API and UI Together
+
+```bash
+./start_all.sh
+```
+
+This script launches both servers in parallel; use `Ctrl+C` to stop them.
+
+### 7. List Personas
+
+```bash
+curl http://localhost:4000/personas
+```
+
+Use the returned persona identifier (for example `friendly_guide`, `calm_concierge`, `energetic_host`) when calling conversation or TTS endpoints.
 
 ## API Documentation
 
 The API is fully documented with Swagger/OpenAPI documentation. Once the server is running, visit:
 
-- **Interactive API Docs**: `http://localhost:8000/docs`
-- **ReDoc Documentation**: `http://localhost:8000/redoc`
-- **OpenAPI Schema**: `http://localhost:8000/openapi.json`
+- **Interactive API Docs**: `http://localhost:4000/docs`
+- **ReDoc Documentation**: `http://localhost:4000/redoc`
+- **OpenAPI Schema**: `http://localhost:4000/openapi.json`
 
 ### API Endpoints Overview
 
@@ -97,11 +124,19 @@ The API is fully documented with Swagger/OpenAPI documentation. Once the server 
 #### 🔧 General
 - `GET /` - Root endpoint with API information
 - `GET /health` - Health check endpoint
+- `GET /personas` - List available personas with voices and descriptions
+- `GET /personas/{persona}` - Retrieve a specific persona profile
 
 #### ⚡ Real-time (WebSocket)
 - `WS /ws/voice-agent/{session_id}` - Real-time voice agent WebSocket
 - `GET /ws/status` - Get WebSocket connection status
 - `POST /ws/disconnect/{session_id}` - Disconnect WebSocket session
+
+#### 🧰 Tools
+- `POST /tools/understanding/speech-to-text` - Direct speech-to-text tool access
+- `POST /tools/response/text-to-speech` - Direct text-to-speech tool access
+- `POST /tools/conversation/start` - Create conversation sessions via tool interface
+- `POST /tools/conversation/process` - Generate conversation responses via tool interface
 
 ## Usage Examples
 
@@ -110,27 +145,36 @@ The API is fully documented with Swagger/OpenAPI documentation. Once the server 
 ```python
 import requests
 
-# Start conversation
-response = requests.post("http://localhost:8000/conversation/start", 
-                        json={"customer_id": "customer123"})
+PERSONA = "friendly_guide"
+
+# Start conversation with a specific persona
+response = requests.post(
+    "http://localhost:4000/conversation/start",
+    params={"customer_id": "customer123", "persona": PERSONA},
+)
+response.raise_for_status()
 session_id = response.json()["session_id"]
 
-# Process voice input
-with open("audio.wav", "rb") as f:
-    response = requests.post("http://localhost:8000/voice-agent/process",
-                           files={"audio_file": f},
-                           data={"session_id": session_id})
-    
-    result = response.json()
-    print(f"User said: {result['user_input']}")
-    print(f"Agent responded: {result['agent_response']}")
+# Process voice input end-to-end (STT → conversation → TTS)
+with open("audio.wav", "rb") as source_audio:
+    response = requests.post(
+        "http://localhost:4000/voice-agent/process",
+        files={"audio_file": source_audio},
+        data={"session_id": session_id, "persona": PERSONA},
+    )
+
+response.raise_for_status()
+result = response.json()
+print(f"User said: {result['user_input']}")
+print(f"Agent responded: {result['agent_response']}")
+print(f"Persona: {result['persona']}   Voice: {result['voice']}")
 ```
 
 ### Real-time Voice Agent (WebSocket)
 
 ```javascript
 // Connect to real-time voice agent
-const ws = new WebSocket('ws://localhost:8000/ws/voice-agent/session123');
+const ws = new WebSocket('ws://localhost:4000/ws/voice-agent/session123');
 
 ws.onopen = function(event) {
     console.log('Connected to voice agent');
@@ -170,7 +214,7 @@ ws.send(JSON.stringify({
 
 ### HTML Client Demo
 
-Open `realtime_client.html` in your browser for a complete real-time voice agent demo with:
+Open `ui/realtime_client.html` in your browser for a complete real-time voice agent demo with:
 - Real-time audio recording and processing
 - Text input support
 - Voice responses
@@ -193,10 +237,26 @@ voiceagent/
 ├── api_general.py         # Complete FastAPI application with Swagger docs
 ├── models.py              # Unified database models and API schemas
 ├── database.py            # Database configuration
-├── voice_processor.py     # Speech-to-text and text-to-speech
+├── voice_processor.py     # Speech-to-text and text-to-speech facade
 ├── conversation_manager.py # Conversation flow management
+├── personas.py            # Persona catalog describing voices and tone
+├── tools/                 # Modular tool implementations
+│   ├── understanding/
+│   │   └── speech_to_text/
+│   └── response/
+│       ├── conversation/
+│       └── text_to_speech/
 ├── realtime_websocket.py  # Real-time WebSocket handler
-├── realtime_client.html   # HTML client for real-time demo
+├── serve_chat.py         # Simple server for ui/chat_ui.html
+├── start_api.sh          # Helper script to launch API server
+├── start_ui.sh           # Helper script to launch UI server
+├── start_all.sh          # Helper script to launch both servers
+├── ui/                   # Next.js web client and standalone demos
+│   ├── app/              # Next.js app directory
+│   ├── server.js         # Custom Next.js + WebSocket proxy
+│   ├── package.json      # Frontend dependencies and scripts
+│   ├── chat_ui.html      # Standalone chat UI page
+│   └── realtime_client.html # Realtime HTML demo client
 ├── config.py             # Configuration management
 ├── dev.env               # Complete development environment configuration
 ├── env.example           # Environment configuration template

@@ -15,17 +15,23 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@localho
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # ============================================================================
+# HUGGING FACE CONFIGURATION
+# ============================================================================
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")  # Optional - works without but better with it
+HF_TOKEN = os.getenv("HF_TOKEN")  # Required for fal-ai provider
+
+# ============================================================================
 # VOICE PROCESSING CONFIGURATION
 # ============================================================================
 VOICE_MODEL = os.getenv("VOICE_MODEL", "whisper-1")
 TTS_MODEL = os.getenv("TTS_MODEL", "tts-1-hd")
-INFERENCE_MODEL = os.getenv("INFERENCE_MODEL", "gpt-4o")
+INFERENCE_MODEL = os.getenv("INFERENCE_MODEL", "gpt-4o-mini")
 
 # ============================================================================
 # API CONFIGURATION
 # ============================================================================
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("API_PORT", "8000"))
+API_PORT = int(os.getenv("API_PORT", "4002"))
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 RELOAD = os.getenv("RELOAD", "True").lower() == "true"
 

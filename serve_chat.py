@@ -13,22 +13,23 @@ from pathlib import Path
 def serve_chat_ui():
     """Serve the chat UI on localhost"""
     
-    # Get the directory where this script is located
-    script_dir = Path(__file__).parent
-    chat_ui_path = script_dir / "chat_ui.html"
+    # Get the project root (directory of this script)
+    project_root = Path(__file__).parent
+    ui_dir = project_root / "ui"
+    chat_ui_path = ui_dir / "chat_ui.html"
     
     if not chat_ui_path.exists():
-        print("❌ Error: chat_ui.html not found!")
+        print("❌ Error: chat_ui.html not found in ui/!")
         return
     
-    # Change to the script directory
-    os.chdir(script_dir)
+    # Change working directory to the UI folder
+    os.chdir(ui_dir)
     
-    PORT = 3000
+    PORT = 9000
     
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=script_dir, **kwargs)
+            super().__init__(*args, directory=ui_dir, **kwargs)
         
         def end_headers(self):
             # Add CORS headers
@@ -41,7 +42,7 @@ def serve_chat_ui():
         with socketserver.TCPServer(("", PORT), Handler) as httpd:
             print("🚀 Chat UI Server Starting...")
             print(f"📱 Chat UI: http://localhost:{PORT}/chat_ui.html")
-            print(f"🔧 API Server: http://localhost:8000")
+            print(f"🔧 API Server: http://localhost:4000")
             print("=" * 50)
             print("✅ Both servers are running!")
             print("🌐 Opening chat UI in your browser...")

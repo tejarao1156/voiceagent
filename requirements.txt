@@ -14,3 +14,7 @@ python-dotenv==1.0.0
 redis==5.0.1
 celery==5.3.4
 httpx==0.25.2
+transformers>=4.35.0
+torch>=2.0.0
+soundfile>=0.12.1
+kokoro-tts>=0.1.0
