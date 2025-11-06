@@ -106,7 +106,14 @@ class TwilioPhoneTool:
             
             # Start Media Stream - this enables real-time bidirectional audio
             # Include CallSid as parameter so we can map it to the session
+            # Use wss:// for WebSocket (required for Media Stream)
             stream_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/stream?CallSid={call_sid}"
+            # Ensure WebSocket URL uses wss:// protocol
+            if stream_url.startswith("https://"):
+                stream_url = stream_url.replace("https://", "wss://", 1)
+            elif stream_url.startswith("http://"):
+                stream_url = stream_url.replace("http://", "ws://", 1)
+            
             response.start().stream(url=stream_url)
 
             # Generate initial greeting
@@ -118,7 +125,7 @@ class TwilioPhoneTool:
             
             greeting_text = greeting_result.get("response", "Hello! How can I help you today?")
             
-            # Say initial greeting (optional - can use TTS through Media Stream instead)
+            # Say initial greeting while Media Stream connects
             response.say(greeting_text, voice="alice")
 
             twiml = str(response)
@@ -138,24 +145,16 @@ class TwilioPhoneTool:
         
         Args:
             websocket: WebSocket connection from Twilio Media Stream
-            call_sid: Twilio call identifier (passed via query parameter in stream URL)
+            call_sid: Twilio call identifier (may be in query params or in stream messages)
         """
-        if not call_sid or call_sid == "unknown":
-            logger.error("No CallSid provided for Media Stream")
-            await websocket.close()
-            return
-        
         await websocket.accept()
-        logger.info(f"Media Stream connected for call {call_sid}")
-
-        session_id = self.active_calls.get(call_sid)
-        if not session_id:
-            logger.error(f"No session found for call {call_sid}")
-            await websocket.close()
-            return
-
-        session_data = self.session_data.get(session_id, {})
-        audio_buffer = self.audio_buffers.get(call_sid, [])
+        logger.info("Media Stream WebSocket connection accepted")
+        
+        # CallSid may come from query params or from stream messages
+        # Don't close connection if not provided - wait for "start" event
+        session_id = None
+        session_data = {}
+        audio_buffer = []
 
         try:
             # Send initial connection message
@@ -178,7 +177,45 @@ class TwilioPhoneTool:
                     data = json.loads(message)
                     event_type = data.get("event")
 
-                    if event_type == "media":
+                    if event_type == "start":
+                        # Extract CallSid from start event (Twilio sends it here)
+                        start_data = data.get("start", {})
+                        stream_call_sid = start_data.get("callSid") or data.get("callSid") or call_sid
+                        
+                        if stream_call_sid and stream_call_sid != "unknown":
+                            call_sid = stream_call_sid
+                            logger.info(f"Media Stream started for call {call_sid}")
+                            
+                            # Get or create session
+                            session_id = self.active_calls.get(call_sid)
+                            if not session_id:
+                                logger.warning(f"No session found for call {call_sid}, creating new session")
+                                # Create session on the fly if needed
+                                from_number = start_data.get("callerNumber", "unknown")
+                                session_data = self.conversation_tool.create_session(
+                                    customer_id=f"phone_{from_number}",
+                                    persona=None
+                                )
+                                session_id = session_data.get("session_id", call_sid)
+                                self.active_calls[call_sid] = session_id
+                                self.session_data[session_id] = session_data
+                                self.audio_buffers[call_sid] = []
+                            else:
+                                session_data = self.session_data.get(session_id, {})
+                            
+                            audio_buffer = self.audio_buffers.get(call_sid, [])
+                        else:
+                            logger.error("No CallSid found in start event")
+                    
+                    elif event_type == "media":
+                        if not call_sid:
+                            logger.warning("Received media before start event, skipping")
+                            continue
+                        
+                        if not session_id:
+                            logger.warning("Received media before session initialized, skipping")
+                            continue
+                        
                         # Incoming audio data
                         media_payload = data.get("media", {})
                         audio_base64 = media_payload.get("payload")
@@ -201,9 +238,6 @@ class TwilioPhoneTool:
                                     combined_audio, session_id, call_sid, websocket
                                 ))
 
-                    elif event_type == "start":
-                        logger.info(f"Media Stream started for call {call_sid}")
-                    
                     elif event_type == "stop":
                         logger.info(f"Media Stream stopped for call {call_sid}")
                         break
@@ -219,11 +253,15 @@ class TwilioPhoneTool:
                     continue
 
         except Exception as e:
-            logger.error(f"Error in Media Stream handler for call {call_sid}: {e}")
+            logger.error(f"Error in Media Stream handler for call {call_sid or 'unknown'}: {e}")
         finally:
             # Cleanup
-            self._cleanup_call(call_sid)
-            await websocket.close()
+            if call_sid:
+                self._cleanup_call(call_sid)
+            try:
+                await websocket.close()
+            except:
+                pass
 
     async def _process_phone_audio(
         self,

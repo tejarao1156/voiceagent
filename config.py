@@ -24,7 +24,7 @@ HF_TOKEN = os.getenv("HF_TOKEN")  # Required for fal-ai provider
 # VOICE PROCESSING CONFIGURATION
 # ============================================================================
 VOICE_MODEL = os.getenv("VOICE_MODEL", "whisper-1")
-TTS_MODEL = os.getenv("TTS_MODEL", "tts-1-hd")
+TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")  # Use tts-1 for faster response (lower latency)
 INFERENCE_MODEL = os.getenv("INFERENCE_MODEL", "gpt-4o-mini")
 
 # ============================================================================

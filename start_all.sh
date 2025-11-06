@@ -5,24 +5,44 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 cleanup() {
+  echo ""
   echo "Shutting down services..."
   [[ -n "${API_PID:-}" ]] && kill "$API_PID" 2>/dev/null || true
   [[ -n "${UI_PID:-}" ]] && kill "$UI_PID" 2>/dev/null || true
   wait "$API_PID" 2>/dev/null || true
   wait "$UI_PID" 2>/dev/null || true
+  echo "All services stopped."
 }
 
 trap cleanup INT TERM EXIT
 
-echo "Starting Voice Agent API..."
-"$SCRIPT_DIR/start_api.sh" &
+echo "🚀 Starting Voice Agent..."
+echo ""
+
+# Start the main API server (includes all UIs on one port)
+echo "Starting Voice Agent API server (FastAPI)..."
+python "$SCRIPT_DIR/main.py" &
 API_PID=$!
 
-echo "Starting Voice Agent UI..."
-"$SCRIPT_DIR/start_ui.sh" &
-UI_PID=$!
+# Optional: Start Next.js UI if you want it (comment out if not needed)
+# echo "Starting Voice Agent UI (Next.js)..."
+# cd "$SCRIPT_DIR/ui"
+# if [[ ! -d node_modules ]]; then
+#   echo "Installing UI dependencies..."
+#   npm install
+# fi
+# npm run dev &
+# UI_PID=$!
 
-echo "Servers are running. Press Ctrl+C to stop."
+echo ""
+echo "✅ Voice Agent is running!"
+echo ""
+echo "📋 Available endpoints:"
+echo "   🏠 Landing Page:  http://localhost:4002/"
+echo "   🎧 Chat UI:      http://localhost:4002/chat"
+echo "   📞 Dashboard:     http://localhost:4002/dashboard"
+echo "   📚 API Docs:      http://localhost:4002/docs"
+echo ""
+echo "Press Ctrl+C to stop all services."
 wait "$API_PID"
-wait "$UI_PID"
 

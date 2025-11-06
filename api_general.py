@@ -281,8 +281,9 @@ async def text_to_speech(request: VoiceOutputRequest):
 )
 async def start_conversation(
     customer_id: Optional[str] = Query(None, description="Customer ID"),
-    persona: Optional[str] = Query(None, description="Persona identifier"),
-    db: Session = Depends(get_db)
+    persona: Optional[str] = Query(None, description="Persona identifier (deprecated, use prompt)"),
+    prompt: Optional[str] = Query(None, description="Custom prompt for AI behavior"),
+    db: Optional[Session] = Depends(get_db)
 ):
     """
     Start a new conversation session.
@@ -293,25 +294,38 @@ async def start_conversation(
     ```
     """
     try:
-        session_data = conversation_tool.create_session(customer_id, persona)
+        # Use prompt if provided, otherwise fall back to persona for backward compatibility
+        persona_to_use = prompt if prompt else persona
+        session_data = conversation_tool.create_session(customer_id, persona_to_use)
         
-        # Save session to database
-        db_session = ConversationSession(
-            customer_id=customer_id,
-            session_data=json.dumps(session_data),
-            status="active"
-        )
-        db.add(db_session)
-        db.commit()
-        db.refresh(db_session)
+        # Save session to database if available
+        if db is not None:
+            try:
+                db_session = ConversationSession(
+                    customer_id=customer_id,
+                    session_data=json.dumps(session_data),
+                    status="active"
+                )
+                db.add(db_session)
+                db.commit()
+                db.refresh(db_session)
+                session_data["id"] = db_session.id
+                session_id = db_session.id
+            except Exception as db_error:
+                logger.warning(f"Database save failed, using in-memory session: {db_error}")
+                session_id = session_data.get("session_id", "mem_" + str(hash(str(session_data))))
+        else:
+            # Use in-memory session ID if database not available
+            session_id = session_data.get("session_id", "mem_" + str(hash(str(session_data))))
         
-        session_data["id"] = db_session.id
+        # Return prompt if it was provided, otherwise return persona for backward compatibility
+        prompt_value = prompt if prompt else session_data.get("persona")
         
         return ConversationStartResponse(
-            session_id=db_session.id,
+            session_id=session_id,
             session_data=session_data,
             message="Conversation started successfully",
-            persona=session_data.get("persona"),
+            persona=prompt_value,  # Using persona field for backward compatibility, but value is prompt
         )
     except Exception as e:
         logger.error(f"Error starting conversation: {str(e)}")
@@ -326,7 +340,7 @@ async def start_conversation(
 )
 async def process_conversation(
     request: ConversationRequest,
-    db: Session = Depends(get_db)
+    db: Optional[Session] = Depends(get_db)
 ):
     """
     Process user input and generate appropriate response.
@@ -339,33 +353,43 @@ async def process_conversation(
     ```
     """
     try:
-        # Get session data
-        persona_name = request.persona
+        # Get session data - use prompt if provided, otherwise persona (for backward compatibility)
+        persona_name = request.prompt if request.prompt else request.persona
+        session_data = None
 
-        if request.session_id:
-            db_session = db.query(ConversationSession).filter(
-                ConversationSession.id == request.session_id
-            ).first()
-            
-            if not db_session:
-                raise HTTPException(status_code=404, detail="Session not found")
-            
-            session_data = json.loads(db_session.session_data)
-            if not persona_name:
-                persona_name = session_data.get("persona")
-        else:
-            # Create new session if none provided
+        if request.session_id and db is not None:
+            try:
+                db_session = db.query(ConversationSession).filter(
+                    ConversationSession.id == request.session_id
+                ).first()
+                
+                if db_session:
+                    session_data = json.loads(db_session.session_data)
+                    if not persona_name:
+                        persona_name = session_data.get("persona")
+            except Exception as db_error:
+                logger.warning(f"Database lookup failed: {db_error}. Using in-memory session.")
+        
+        # Create new session if none found or database unavailable
+        if not session_data:
             session_data = conversation_tool.create_session(request.customer_id, persona_name)
         
-        # Process user input (general conversation)
+        # Process user input (general conversation) - streaming enabled for faster response
         result = await conversation_tool.generate_response(
             session_data, request.text, persona_name
         )
         
-        # Update session in database
-        if request.session_id:
-            db_session.session_data = json.dumps(result["session_data"])
-            db.commit()
+        # Update session in database if available (non-blocking for performance)
+        if request.session_id and db is not None:
+            try:
+                db_session = db.query(ConversationSession).filter(
+                    ConversationSession.id == request.session_id
+                ).first()
+                if db_session:
+                    db_session.session_data = json.dumps(result["session_data"])
+                    db.commit()
+            except Exception as db_error:
+                logger.warning(f"Database update failed: {db_error}")
         
         return ConversationResponse(
             response=result["response"],

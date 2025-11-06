@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Voice Agent Chat</title>
+    <title>Speech-to-Speech Voice Agent</title>
     <style>
         * {
             margin: 0;
@@ -12,564 +12,1186 @@
         }
 
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #1e293b 0%, #475569 100%);
             min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-
-        .chat-container {
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
-            width: 100%;
-            max-width: 800px;
-            height: 600px;
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-        }
-
-        .chat-header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
             padding: 20px;
-            text-align: center;
         }
 
-        .chat-header h1 {
-            font-size: 24px;
-            margin-bottom: 5px;
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(10px);
+            border-radius: 24px;
+            border: 1px solid rgba(100, 116, 139, 0.3);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+            padding: 32px;
         }
 
-        .chat-header p {
-            opacity: 0.9;
-            font-size: 14px;
+        header {
+            margin-bottom: 32px;
         }
 
-        .chat-messages {
-            flex: 1;
-            padding: 20px;
-            overflow-y: auto;
-            background: #f8f9fa;
+        h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 8px;
         }
 
-        .message {
-            margin-bottom: 15px;
+        .subtitle {
+            color: #cbd5e1;
+            font-size: 0.95rem;
+        }
+
+        .status-section {
+            margin-bottom: 24px;
+        }
+
+        .status-indicator {
             display: flex;
-            align-items: flex-start;
-        }
-
-        .message.user {
-            justify-content: flex-end;
-        }
-
-        .message.agent {
-            justify-content: flex-start;
-        }
-
-        .message-content {
-            max-width: 70%;
-            padding: 12px 16px;
-            border-radius: 18px;
-            word-wrap: break-word;
-        }
-
-        .message.user .message-content {
-            background: #667eea;
-            color: white;
-            border-bottom-right-radius: 5px;
-        }
-
-        .message.agent .message-content {
-            background: white;
-            color: #333;
-            border: 1px solid #e1e5e9;
-            border-bottom-left-radius: 5px;
-        }
-
-        .message-time {
-            font-size: 11px;
-            opacity: 0.7;
-            margin-top: 5px;
-        }
-
-        .chat-input {
-            padding: 20px;
-            background: white;
-            border-top: 1px solid #e1e5e9;
-            display: flex;
-            gap: 10px;
             align-items: center;
+            gap: 12px;
         }
 
-        .input-group {
-            flex: 1;
-            display: flex;
-            gap: 10px;
-        }
-
-        .text-input {
-            flex: 1;
-            padding: 12px 16px;
-            border: 2px solid #e1e5e9;
-            border-radius: 25px;
-            outline: none;
-            font-size: 14px;
-            transition: border-color 0.3s;
-        }
-
-        .text-input:focus {
-            border-color: #667eea;
-        }
-
-        .btn {
-            padding: 12px 20px;
-            border: none;
-            border-radius: 25px;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: 600;
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            box-shadow: 0 0 8px currentColor;
             transition: all 0.3s;
-            display: flex;
-            align-items: center;
-            gap: 8px;
         }
 
-        .btn-primary {
-            background: #667eea;
-            color: white;
+        .status-dot.idle {
+            background: #64748b;
         }
 
-        .btn-primary:hover {
-            background: #5a6fd8;
-            transform: translateY(-2px);
-        }
-
-        .btn-secondary {
-            background: #6c757d;
-            color: white;
-        }
-
-        .btn-secondary:hover {
-            background: #5a6268;
-        }
-
-        .btn-danger {
-            background: #dc3545;
-            color: white;
-        }
-
-        .btn-danger:hover {
-            background: #c82333;
-        }
-
-        .btn:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-            transform: none;
-        }
-
-        .voice-controls {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 10px;
-        }
-
-        .status {
-            padding: 8px 12px;
-            border-radius: 15px;
-            font-size: 12px;
-            font-weight: 600;
-            text-align: center;
-            margin-bottom: 10px;
-        }
-
-        .status.recording {
-            background: #dc3545;
-            color: white;
+        .status-dot.listening {
+            background: #0ea5e9;
             animation: pulse 1.5s infinite;
         }
 
-        .status.processing {
-            background: #ffc107;
-            color: #333;
+        .status-dot.processing {
+            background: #fbbf24;
+            animation: pulse 1.5s infinite;
         }
 
-        .status.ready {
-            background: #28a745;
-            color: white;
+        .status-dot.speaking {
+            background: #10b981;
+            animation: pulse 1.5s infinite;
         }
 
         @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.7; }
-            100% { opacity: 1; }
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
         }
 
-        .audio-player {
-            margin-top: 10px;
+        .status-text {
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #cbd5e1;
         }
 
-        .audio-player audio {
+        .prompt-section {
+            margin-bottom: 32px;
+        }
+
+        .prompt-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #cbd5e1;
+            margin-bottom: 8px;
+            display: block;
+        }
+
+        .prompt-input {
             width: 100%;
-            border-radius: 10px;
+            padding: 12px 16px;
+            border-radius: 16px;
+            border: 1px solid #475569;
+            background: rgba(15, 23, 42, 0.6);
+            color: #f1f5f9;
+            font-size: 0.875rem;
+            outline: none;
+            transition: border-color 0.2s;
+            resize: vertical;
+            min-height: 60px;
+            font-family: inherit;
         }
 
-        .loading {
-            display: inline-block;
-            width: 20px;
-            height: 20px;
-            border: 3px solid #f3f3f3;
-            border-top: 3px solid #667eea;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
+        .prompt-input:focus {
+            border-color: #10b981;
+            box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1);
         }
 
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
+        .prompt-description {
+            font-size: 0.75rem;
+            color: #94a3b8;
+            margin-top: 8px;
         }
 
-        .error {
-            background: #f8d7da;
-            color: #721c24;
-            padding: 10px;
-            border-radius: 10px;
-            margin: 10px 0;
-            border: 1px solid #f5c6cb;
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 32px;
         }
 
-        .success {
-            background: #d4edda;
-            color: #155724;
-            padding: 10px;
-            border-radius: 10px;
-            margin: 10px 0;
-            border: 1px solid #c3e6cb;
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 24px;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            border: none;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-start {
+            background: #10b981;
+            color: white;
+        }
+
+        .btn-start:hover:not(:disabled) {
+            background: #059669;
+        }
+
+        .btn-stop {
+            background: #ef4444;
+            color: white;
+        }
+
+        .btn-stop:hover:not(:disabled) {
+            background: #dc2626;
+        }
+
+        .btn-interrupt {
+            background: #f59e0b;
+            color: white;
+        }
+
+        .btn-interrupt:hover:not(:disabled) {
+            background: #d97706;
+        }
+
+        .btn-interrupt:disabled {
+            opacity: 0.3;
+        }
+
+        .error-box, .browser-warning {
+            padding: 16px;
+            border-radius: 12px;
+            margin-bottom: 24px;
+            border: 1px solid;
+        }
+
+        .error-box {
+            background: rgba(239, 68, 68, 0.1);
+            border-color: rgba(239, 68, 68, 0.4);
+            color: #fecaca;
+        }
+
+        .browser-warning {
+            background: rgba(239, 68, 68, 0.1);
+            border-color: rgba(239, 68, 68, 0.4);
+            color: #fecaca;
+        }
+
+        .error-title, .warning-title {
+            font-weight: 600;
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        .error-message, .warning-message {
+            font-size: 0.875rem;
+            margin-top: 4px;
+        }
+
+        .live-activity {
+            background: rgba(15, 23, 42, 0.4);
+            border: 1px solid #334155;
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+
+        .live-activity h2 {
+            font-size: 1.125rem;
+            font-weight: 600;
+            color: #e2e8f0;
+            margin-bottom: 16px;
+        }
+
+        .live-box {
+            padding: 16px;
+            border-radius: 12px;
+            margin-bottom: 12px;
+        }
+
+        .live-box:last-child {
+            margin-bottom: 0;
+        }
+
+        .live-box.user {
+            background: rgba(14, 165, 233, 0.05);
+            border: 1px solid rgba(14, 165, 233, 0.2);
+        }
+
+        .live-box.assistant {
+            background: rgba(16, 185, 129, 0.05);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+        }
+
+        .live-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #94a3b8;
+            margin-bottom: 4px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .live-label-text {
+            font-weight: 600;
+            color: #e2e8f0;
+        }
+
+        .live-text {
+            color: #f1f5f9;
+            min-height: 20px;
+        }
+
+        .live-text.empty {
+            opacity: 0.4;
+        }
+
+        .conversation {
+            background: rgba(15, 23, 42, 0.4);
+            border: 1px solid #334155;
+            border-radius: 16px;
+            padding: 24px;
+        }
+
+        .conversation-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .conversation-header h2 {
+            font-size: 1.125rem;
+            font-weight: 600;
+            color: #e2e8f0;
+        }
+
+        .conversation-count {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: #94a3b8;
+        }
+
+        .conversation-empty {
+            font-size: 0.875rem;
+            color: #94a3b8;
+        }
+
+        .transcripts {
+            max-height: 384px;
+            overflow-y: auto;
+            padding-right: 8px;
+        }
+
+        .transcript-entry {
+            padding: 12px 16px;
+            border-radius: 16px;
+            margin-bottom: 12px;
+            font-size: 0.875rem;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .transcript-entry.user {
+            margin-left: 40px;
+            background: rgba(14, 165, 233, 0.1);
+            color: #bae6fd;
+            border: 1px solid rgba(14, 165, 233, 0.2);
+        }
+
+        .transcript-entry.assistant {
+            margin-right: 40px;
+            background: rgba(16, 185, 129, 0.1);
+            color: #a7f3d0;
+            border: 1px solid rgba(16, 185, 129, 0.2);
+        }
+
+        .transcript-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #94a3b8;
+            margin-bottom: 8px;
+        }
+
+        .transcript-role {
+            font-weight: 600;
+            color: #cbd5e1;
+        }
+
+        .transcript-text {
+            line-height: 1.6;
+            color: #f1f5f9;
+        }
+
+        .notice {
+            margin-top: 8px;
+            font-size: 0.75rem;
+            color: #fbbf24;
         }
     </style>
 </head>
 <body>
-    <div class="chat-container">
-        <div class="chat-header">
-            <h1>🎤 Voice Agent Chat</h1>
-            <p>Chat with AI using text or voice</p>
+    <div class="container">
+        <header>
+            <h1>🎧 Speech-to-Speech Voice Agent</h1>
+            <p class="subtitle">
+                Speak naturally. The agent listens, waits 1 second after you finish, and responds aloud. Interrupt any time to take back the mic.
+            </p>
+        </header>
+
+        <div class="status-section">
+            <div class="status-indicator">
+                <div class="status-dot idle" id="statusDot"></div>
+                <span class="status-text" id="statusText">Idle</span>
+            </div>
         </div>
 
-        <div class="chat-messages" id="chatMessages">
-            <div class="message agent">
-                <div class="message-content">
-                    Hello! I'm your voice agent. You can type a message or use the voice button to speak to me.
-                    <div class="message-time">Just now</div>
+        <div class="prompt-section">
+            <label class="prompt-label" for="promptInput">Prompt</label>
+            <textarea 
+                id="promptInput" 
+                class="prompt-input" 
+                placeholder="Enter a custom prompt for the AI assistant (e.g., 'You are a helpful customer service representative')"
+                rows="3"
+            ></textarea>
+            <div class="prompt-description" id="promptDescription">
+                Enter a prompt to customize the AI's behavior and personality. Leave empty for default behavior.
+            </div>
+        </div>
+
+        <div id="browserWarning" class="browser-warning" style="display: none;">
+            <strong class="warning-title">Browser not supported</strong>
+            <p class="warning-message">
+                Your browser does not support the Web Speech API. Please try Chrome on desktop for the best experience.
+            </p>
+            </div>
+
+        <div id="errorBox" class="error-box" style="display: none;">
+            <strong class="error-title">Something went wrong</strong>
+            <p class="error-message" id="errorMessage"></p>
+        </div>
+
+        <div class="controls">
+            <button id="startBtn" class="btn btn-start">
+                <span>🎙️</span>
+                Start conversation
+                </button>
+            <button id="stopBtn" class="btn btn-stop" disabled>
+                <span>⏹️</span>
+                Stop
+            </button>
+            <button id="interruptBtn" class="btn btn-interrupt" disabled>
+                <span>✋</span>
+                Interrupt response
+                </button>
+        </div>
+
+        <div class="live-activity">
+            <h2>Live Activity</h2>
+            <div class="live-box user">
+                <div class="live-label">
+                    <span class="live-label-text">You are saying</span>
+                    <span>real-time</span>
                 </div>
+                <div class="live-text empty" id="liveUserTranscript">Silence...</div>
+            </div>
+            <div class="live-box assistant">
+                <div class="live-label">
+                    <span class="live-label-text">Assistant is saying</span>
+                    <span>real-time</span>
+                </div>
+                <div class="live-text empty" id="liveAssistantUtterance">Waiting...</div>
             </div>
         </div>
 
-        <div class="chat-input">
-            <div class="input-group">
-                <input type="text" id="textInput" class="text-input" placeholder="Type your message here..." />
-                <button id="sendBtn" class="btn btn-primary">
-                    <span>Send</span>
-                </button>
+        <div class="conversation">
+            <div class="conversation-header">
+                <h2>Conversation</h2>
+                <span class="conversation-count" id="conversationCount">waiting</span>
             </div>
-            <div class="voice-controls">
-                <button id="voiceBtn" class="btn btn-secondary">
-                    <span>🎤</span>
-                    <span id="voiceBtnText">Voice</span>
-                </button>
-                <button id="clearBtn" class="btn btn-danger">
-                    <span>🗑️</span>
-                    <span>Clear</span>
-                </button>
+            <div id="conversationEmpty" class="conversation-empty">
+                Click "Start conversation" and begin speaking. The agent will wait for a 1 second pause before replying.
             </div>
+            <div id="transcripts" class="transcripts" style="display: none;"></div>
         </div>
-
-        <div id="status" class="status ready">Ready to chat</div>
     </div>
 
     <script>
-        class VoiceAgentChat {
+        const API_BASE_URL = 'http://localhost:4002';
+        const RESPONSE_DELAY_MS = 1000;
+
+        const DEFAULT_PROMPT = "You are a friendly and helpful voice agent. Your role is to engage in natural, helpful conversations with users, provide useful information and assistance, and be conversational and natural.";
+
+        class SpeechToSpeechAgent {
             constructor() {
-                this.apiBase = 'http://localhost:4002';
+                this.status = 'idle';
+                this.transcripts = [];
                 this.sessionId = null;
-                this.isRecording = false;
-                this.mediaRecorder = null;
-                this.audioChunks = [];
+            this.isBrowserSupported = null;
+            this.liveUserTranscript = '';
+            this.liveAssistantUtterance = '';
+            this.selectedPrompt = DEFAULT_PROMPT;
+            this.sessionPrompt = null;
+            this.sessionData = null;
+            this.pendingSessionPromise = null;
+            this.recognition = null;
+            this.isRecognitionActive = false;
+            this.shouldListen = false;
+            this.pendingResponseTimer = null;
+            this.accumulatedTranscript = '';
+                this.isSpeaking = false;
+                this.currentAudio = null;
+                this.isStartingSession = false;
+                this.audioUnlocked = false;
                 
                 this.initializeElements();
-                this.initializeEventListeners();
-                this.startConversation();
+                this.checkBrowserSupport();
+                this.setupEventListeners();
             }
 
             initializeElements() {
-                this.chatMessages = document.getElementById('chatMessages');
-                this.textInput = document.getElementById('textInput');
-                this.sendBtn = document.getElementById('sendBtn');
-                this.voiceBtn = document.getElementById('voiceBtn');
-                this.voiceBtnText = document.getElementById('voiceBtnText');
-                this.clearBtn = document.getElementById('clearBtn');
-                this.status = document.getElementById('status');
+                this.statusDot = document.getElementById('statusDot');
+                this.statusText = document.getElementById('statusText');
+                this.promptInput = document.getElementById('promptInput');
+                this.promptDescription = document.getElementById('promptDescription');
+                this.browserWarning = document.getElementById('browserWarning');
+                this.errorBox = document.getElementById('errorBox');
+                this.errorMessage = document.getElementById('errorMessage');
+                this.startBtn = document.getElementById('startBtn');
+                this.stopBtn = document.getElementById('stopBtn');
+                this.interruptBtn = document.getElementById('interruptBtn');
+                this.liveUserTranscriptEl = document.getElementById('liveUserTranscript');
+                this.liveAssistantUtteranceEl = document.getElementById('liveAssistantUtterance');
+                this.conversationCount = document.getElementById('conversationCount');
+                this.conversationEmpty = document.getElementById('conversationEmpty');
+                this.transcriptsEl = document.getElementById('transcripts');
+                
+                // Set default prompt
+                if (this.promptInput) {
+                    this.promptInput.value = DEFAULT_PROMPT;
+                }
             }
 
-            initializeEventListeners() {
-                this.sendBtn.addEventListener('click', () => this.sendTextMessage());
-                this.textInput.addEventListener('keypress', (e) => {
-                    if (e.key === 'Enter') this.sendTextMessage();
+            checkBrowserSupport() {
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                const hasSynthesis = 'speechSynthesis' in window;
+                this.isBrowserSupported = Boolean(SpeechRecognition && hasSynthesis);
+                
+                if (!this.isBrowserSupported) {
+                    this.browserWarning.style.display = 'block';
+                    this.startBtn.disabled = true;
+                }
+            }
+
+            updatePrompt() {
+                this.selectedPrompt = this.promptInput.value.trim() || DEFAULT_PROMPT;
+            }
+
+            setupEventListeners() {
+                this.promptInput.addEventListener('input', () => {
+                    this.updatePrompt();
+                    this.stopConversation();
+                    this.transcripts = [];
+                    this.updateTranscripts();
+                    this.sessionId = null;
+                    this.sessionPrompt = null;
+                    this.sessionData = null;
+                    this.pendingSessionPromise = null;
                 });
-                this.voiceBtn.addEventListener('click', () => this.toggleVoiceRecording());
-                this.clearBtn.addEventListener('click', () => this.clearChat());
+
+                this.startBtn.addEventListener('click', () => this.startConversation());
+                this.stopBtn.addEventListener('click', () => this.stopConversation());
+                this.interruptBtn.addEventListener('click', () => this.handleInterrupt());
             }
 
-            async startConversation() {
-                try {
-                    const response = await fetch(`${this.apiBase}/conversation/start`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        }
-                    });
-                    
-                    if (response.ok) {
-                        const data = await response.json();
-                        this.sessionId = data.session_id;
-                        this.updateStatus('Ready to chat', 'ready');
-                    } else {
-                        throw new Error('Failed to start conversation');
-                    }
-                } catch (error) {
-                    console.error('Error starting conversation:', error);
-                    this.showError('Failed to start conversation');
-                }
-            }
-
-            async sendTextMessage() {
-                const text = this.textInput.value.trim();
-                if (!text) return;
-
-                this.addMessage(text, 'user');
-                this.textInput.value = '';
-                this.updateStatus('Processing...', 'processing');
-                this.sendBtn.disabled = true;
-
-                try {
-                    const response = await fetch(`${this.apiBase}/conversation/process`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({
-                            text: text,
-                            session_id: this.sessionId
-                        })
-                    });
-
-                    if (response.ok) {
-                        const data = await response.json();
-                        this.addMessage(data.response, 'agent');
-                        
-                        // Generate voice response
-                        await this.generateVoiceResponse(data.response);
-                    } else {
-                        throw new Error('Failed to process message');
-                    }
-                } catch (error) {
-                    console.error('Error sending message:', error);
-                    this.showError('Failed to send message');
-                } finally {
-                    this.updateStatus('Ready to chat', 'ready');
-                    this.sendBtn.disabled = false;
-                }
-            }
-
-            async toggleVoiceRecording() {
-                if (this.isRecording) {
-                    this.stopRecording();
-                } else {
-                    await this.startRecording();
-                }
-            }
-
-            async startRecording() {
-                try {
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    this.mediaRecorder = new MediaRecorder(stream);
-                    this.audioChunks = [];
-
-                    this.mediaRecorder.ondataavailable = (event) => {
-                        this.audioChunks.push(event.data);
-                    };
-
-                    this.mediaRecorder.onstop = () => {
-                        this.processRecording();
-                    };
-
-                    this.mediaRecorder.start();
-                    this.isRecording = true;
-                    this.updateStatus('Recording... Click to stop', 'recording');
-                    this.voiceBtnText.textContent = 'Stop';
-                    this.voiceBtn.classList.add('btn-danger');
-                    this.voiceBtn.classList.remove('btn-secondary');
-                } catch (error) {
-                    console.error('Error starting recording:', error);
-                    this.showError('Microphone access denied');
-                }
-            }
-
-            stopRecording() {
-                if (this.mediaRecorder && this.isRecording) {
-                    this.mediaRecorder.stop();
-                    this.isRecording = false;
-                    this.updateStatus('Processing audio...', 'processing');
-                    this.voiceBtnText.textContent = 'Voice';
-                    this.voiceBtn.classList.remove('btn-danger');
-                    this.voiceBtn.classList.add('btn-secondary');
-                }
-            }
-
-            async processRecording() {
-                try {
-                    const audioBlob = new Blob(this.audioChunks, { type: 'audio/wav' });
-                    
-                    // Convert speech to text
-                    const formData = new FormData();
-                    formData.append('audio_file', audioBlob, 'recording.wav');
-                    if (this.sessionId) {
-                        formData.append('session_id', this.sessionId);
-                    }
-
-                    const sttResponse = await fetch(`${this.apiBase}/voice/speech-to-text`, {
-                        method: 'POST',
-                        body: formData
-                    });
-
-                    if (sttResponse.ok) {
-                        const sttData = await sttResponse.json();
-                        if (sttData.success && sttData.text) {
-                            this.addMessage(sttData.text, 'user');
-                            
-                            // Process the transcribed text
-                            const response = await fetch(`${this.apiBase}/conversation/process`, {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                },
-                                body: JSON.stringify({
-                                    text: sttData.text,
-                                    session_id: this.sessionId
-                                })
-                            });
-
-                            if (response.ok) {
-                                const data = await response.json();
-                                this.addMessage(data.response, 'agent');
-                                
-                                // Generate voice response
-                                await this.generateVoiceResponse(data.response);
-                            }
-                        } else {
-                            this.showError('Could not understand your speech');
-                        }
-                    } else {
-                        throw new Error('Speech-to-text failed');
-                    }
-                } catch (error) {
-                    console.error('Error processing recording:', error);
-                    this.showError('Failed to process voice input');
-                } finally {
-                    this.updateStatus('Ready to chat', 'ready');
-                }
-            }
-
-            async generateVoiceResponse(text) {
-                try {
-                    const response = await fetch(`${this.apiBase}/voice/text-to-speech`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({
-                            text: text,
-                            voice: 'alloy'
-                        })
-                    });
-
-                    if (response.ok) {
-                        const data = await response.json();
-                        if (data.success && data.audio_base64) {
-                            this.playAudioResponse(data.audio_base64);
-                        }
-                    }
-                } catch (error) {
-                    console.error('Error generating voice response:', error);
-                }
-            }
-
-            playAudioResponse(audioBase64) {
-                const audio = new Audio(`data:audio/mp3;base64,${audioBase64}`);
-                audio.play().catch(error => {
-                    console.error('Error playing audio:', error);
-                });
-            }
-
-            addMessage(text, sender) {
-                const messageDiv = document.createElement('div');
-                messageDiv.className = `message ${sender}`;
-                
-                const contentDiv = document.createElement('div');
-                contentDiv.className = 'message-content';
-                contentDiv.textContent = text;
-                
-                const timeDiv = document.createElement('div');
-                timeDiv.className = 'message-time';
-                timeDiv.textContent = new Date().toLocaleTimeString();
-                
-                contentDiv.appendChild(timeDiv);
-                messageDiv.appendChild(contentDiv);
-                this.chatMessages.appendChild(messageDiv);
-                
-                this.scrollToBottom();
-            }
-
-            scrollToBottom() {
-                this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
-            }
-
-            clearChat() {
-                this.chatMessages.innerHTML = `
-                    <div class="message agent">
-                        <div class="message-content">
-                            Hello! I'm your voice agent. You can type a message or use the voice button to speak to me.
-                            <div class="message-time">Just now</div>
-                        </div>
-                    </div>
-                `;
-            }
-
-            updateStatus(message, type) {
-                this.status.textContent = message;
-                this.status.className = `status ${type}`;
+            setStatus(status) {
+                this.status = status;
+                this.statusDot.className = `status-dot ${status}`;
+                const statusMap = {
+                    idle: 'Idle',
+                    listening: 'Listening',
+                    processing: 'Thinking',
+                    speaking: 'Speaking'
+                };
+                this.statusText.textContent = statusMap[status] || 'Idle';
             }
 
             showError(message) {
-                const errorDiv = document.createElement('div');
-                errorDiv.className = 'error';
-                errorDiv.textContent = message;
-                this.chatMessages.appendChild(errorDiv);
-                this.scrollToBottom();
-                
+                this.errorMessage.textContent = message;
+                this.errorBox.style.display = 'block';
+            }
+
+            hideError() {
+                this.errorBox.style.display = 'none';
+            }
+
+            async unlockAudio() {
+                // Unlock audio playback by playing a silent audio on user interaction
+                if (!this.audioUnlocked) {
+                    try {
+                        const silentAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=');
+                        silentAudio.volume = 0;
+                        await silentAudio.play();
+                        silentAudio.pause();
+                        this.audioUnlocked = true;
+                        console.log('Audio playback unlocked');
+                    } catch (e) {
+                        console.warn('Could not unlock audio:', e);
+                    }
+                }
+            }
+
+            async startConversation() {
+                if (this.status !== 'idle' || this.isStartingSession) return;
+                if (this.isBrowserSupported === false) {
+                    this.showError('Your browser does not support the Web Speech API required for this voice agent.');
+                    return;
+                }
+
+                this.hideError();
+                this.isStartingSession = true;
+                this.shouldListen = true;
+                this.clearPendingTimer();
+                this.accumulatedTranscript = '';
+                this.setStatus('listening');
+
+                // Unlock audio asynchronously (don't wait for it)
+                this.unlockAudio().catch(err => console.warn('Audio unlock failed:', err));
+
+                try {
+                    // Start listening immediately (don't wait for session)
+                    this.startListening();
+                    this.startBtn.disabled = true;
+                    this.stopBtn.disabled = false;
+
+                    // Create session in background and send initial greeting
+                    this.ensureSession().then(async (sessionId) => {
+                        if (sessionId && this.shouldListen) {
+                            // Send empty message to trigger initial greeting
+                            try {
+                                const response = await fetch(`${API_BASE_URL}/conversation/process`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        text: "",
+                                        session_id: sessionId,
+                                        prompt: this.selectedPrompt
+                                    })
+                                });
+                                
+                                if (response.ok) {
+                                    const data = await response.json();
+                                    const greeting = data.response || "Hello! How can I help you today?";
+                                    
+                                    // Play greeting asynchronously
+                                    this.speakResponse(greeting).catch(err => {
+                                        console.warn('Greeting audio failed:', err);
+                                    });
+                                }
+                            } catch (err) {
+                                console.warn('Initial greeting failed:', err);
+                            }
+                        }
+                    }).catch(err => {
+                        console.error('Session creation failed:', err);
+                        // Don't show error unless user actually tries to speak
+                    });
+                } catch (err) {
+                    console.error('Failed to start conversation:', err);
+                    this.showError(err.message || 'Failed to start conversation');
+                    this.shouldListen = false;
+                    this.stopConversation();
+                } finally {
+                    this.isStartingSession = false;
+                }
+            }
+
+            stopConversation() {
+                this.shouldListen = false;
+                this.clearPendingTimer();
+
+                if (this.currentAudio) {
+                    if (this.currentAudio instanceof HTMLAudioElement) {
+                        this.currentAudio.pause();
+                        this.currentAudio.currentTime = 0;
+                    }
+                    this.currentAudio = null;
+                }
+                if (window.speechSynthesis) {
+                    window.speechSynthesis.cancel();
+                }
+
+                if (this.recognition) {
+                    try {
+                        this.recognition.stop();
+                    } catch (err) {
+                        console.debug('Recognition stop ignored:', err);
+                    }
+                }
+
+                this.isRecognitionActive = false;
+                this.isSpeaking = false;
+                this.setStatus('idle');
+                this.startBtn.disabled = false;
+                this.stopBtn.disabled = true;
+                this.interruptBtn.disabled = true;
+                this.liveUserTranscript = '';
+                this.liveAssistantUtterance = '';
+                this.updateLiveDisplay();
+            }
+
+            initializeRecognition() {
+                if (this.recognition) return this.recognition;
+
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                if (!SpeechRecognition) {
+                    throw new Error('Speech recognition is not supported in this browser.');
+                }
+
+                const recognition = new SpeechRecognition();
+                recognition.continuous = true;
+                recognition.interimResults = true;
+                recognition.lang = 'en-US';
+                recognition.maxAlternatives = 1;
+
+                recognition.onresult = (event) => this.handleRecognitionResult(event);
+                recognition.onstart = () => {
+                    this.isRecognitionActive = true;
+                    if (this.isSpeaking) {
+                        this.stopAudio();
+                        this.setStatus('listening');
+                        this.clearPendingTimer();
+                    } else {
+                        this.setStatus('listening');
+                    }
+                };
+
+                recognition.onend = () => {
+                    this.isRecognitionActive = false;
+                    const completeTranscript = this.accumulatedTranscript.trim();
+                    if (completeTranscript && this.shouldListen && !this.pendingResponseTimer) {
+                        this.accumulatedTranscript = '';
+                        this.liveUserTranscript = '';
+                        this.updateLiveDisplay();
+                        this.addTranscript({ role: 'user', text: completeTranscript, timestamp: new Date() });
+                        this.setStatus('processing');
+                        this.processTranscript(completeTranscript);
+                    }
+                    if (this.shouldListen) {
+                        this.restartListening();
+                    }
+                };
+
+                recognition.onerror = (event) => {
+                    if (event.error === 'no-speech' || event.error === 'aborted') {
+                        if (this.shouldListen && !this.isSpeaking) {
+                            this.startListening();
+                        }
+                        return;
+                    }
+                    console.error('Speech recognition error', event);
+                    this.showError(event.message || event.error || 'Speech recognition error');
+                };
+
+                this.recognition = recognition;
+                return recognition;
+            }
+
+            startListening() {
+                const recognition = this.initializeRecognition();
+                try {
+                    recognition.start();
+                    this.isRecognitionActive = true;
+                    if (!this.isSpeaking) {
+                        this.setStatus('listening');
+                    }
+                } catch (err) {
+                    console.debug('Recognition start ignored:', err);
+                }
+            }
+
+            restartListening() {
                 setTimeout(() => {
-                    errorDiv.remove();
-                }, 5000);
+                    if (this.shouldListen && !this.isRecognitionActive) {
+                        this.startListening();
+                    }
+                }, 200);
+            }
+
+            handleRecognitionResult(event) {
+                if (!event.results) return;
+
+                let hasAnySpeech = false;
+                let interruptDetected = false;
+
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    const result = event.results[i];
+                    if (result[0]) {
+                        const transcriptText = result[0].transcript;
+                        if (transcriptText && transcriptText.trim().length > 0) {
+                            hasAnySpeech = true;
+                            if (this.isSpeaking) {
+                                interruptDetected = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (interruptDetected) {
+                    this.stopAudio();
+                    this.setStatus('listening');
+                    this.clearPendingTimer();
+                    this.accumulatedTranscript = '';
+                    this.liveUserTranscript = '';
+                    this.updateLiveDisplay();
+                }
+
+                let currentTranscript = '';
+                let hasFinalTranscript = false;
+
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    const result = event.results[i];
+                    if (result[0]) {
+                        const transcriptText = result[0].transcript;
+                        if (result.isFinal) {
+                            currentTranscript += transcriptText;
+                            hasFinalTranscript = true;
+                            this.accumulatedTranscript += transcriptText + ' ';
+                        } else {
+                            this.liveUserTranscript = transcriptText;
+                            this.updateLiveDisplay();
+                        }
+                    }
+                }
+
+                if (hasFinalTranscript && this.accumulatedTranscript.trim()) {
+                    this.clearPendingTimer();
+                    this.pendingResponseTimer = setTimeout(() => {
+                        this.pendingResponseTimer = null;
+                        if (!this.shouldListen) return;
+                        const completeTranscript = this.accumulatedTranscript.trim();
+                        if (completeTranscript) {
+                            this.accumulatedTranscript = '';
+                            this.liveUserTranscript = '';
+                            this.updateLiveDisplay();
+                            this.processTranscript(completeTranscript);
+                        }
+                    }, RESPONSE_DELAY_MS);
+                }
+            }
+
+            clearPendingTimer() {
+                if (this.pendingResponseTimer !== null) {
+                    clearTimeout(this.pendingResponseTimer);
+                    this.pendingResponseTimer = null;
+                }
+            }
+
+            async processTranscript(transcript) {
+                if (!this.shouldListen) return;
+
+                try {
+                    this.setStatus('processing');
+
+                    // Ensure session exists (non-blocking if already exists)
+                    const sessionPromise = this.ensureSession();
+                    
+                    this.updatePrompt();
+                    
+                    // Start conversation processing (don't wait for session if it's still creating)
+                    const sessionId = await sessionPromise;
+                    
+                    const response = await fetch(`${API_BASE_URL}/conversation/process`, {
+                                method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                            text: transcript,
+                            session_id: sessionId,
+                            prompt: this.selectedPrompt
+                                })
+                            });
+
+                    if (!response.ok) {
+                        throw new Error(`Conversation processing failed with status ${response.status}`);
+                    }
+
+                    const data = await response.json();
+                    let assistantText = typeof data.response === 'string' ? data.response.trim() : '';
+                    if (!assistantText) {
+                        assistantText = this.generateFallbackResponse(transcript, this.transcripts);
+                    }
+
+                    if (!this.shouldListen) return;
+
+                    this.sessionData = data.session_data || this.sessionData;
+                    if (data.prompt) {
+                        this.sessionPrompt = data.prompt;
+                    }
+
+                    this.addTranscript({ role: 'assistant', text: assistantText, timestamp: new Date() });
+                    this.liveAssistantUtterance = assistantText;
+                    this.updateLiveDisplay();
+                    
+                    // Start TTS immediately in background (non-blocking)
+                    // TTS will process in parallel chunks for faster output
+                    this.speakResponse(assistantText).catch(err => {
+                        console.error('TTS error:', err);
+                        this.showError(`Failed to generate speech: ${err.message}`);
+                    });
+                } catch (err) {
+                    if (!this.shouldListen) return;
+
+                    console.error('Failed to fetch agent response:', err);
+                    const fallback = this.generateFallbackResponse(transcript, this.transcripts);
+                    this.showError(err instanceof Error ? err.message : 'Something went wrong while generating the response.');
+
+                    this.addTranscript({ role: 'assistant', text: fallback, timestamp: new Date() });
+                    this.liveAssistantUtterance = fallback;
+                    this.updateLiveDisplay();
+                    await this.speakResponse(fallback);
+                }
+            }
+
+            async speakResponse(text) {
+                if (typeof window === 'undefined') {
+                    this.showError('Audio playback is not supported in this browser.');
+                    return;
+                }
+
+                if (this.currentAudio) {
+                    if (this.currentAudio instanceof HTMLAudioElement) {
+                        this.currentAudio.pause();
+                        this.currentAudio.currentTime = 0;
+                    }
+                    this.currentAudio = null;
+                }
+                this.isSpeaking = false;
+
+                const recognition = this.recognition;
+                if (recognition && !this.isRecognitionActive && this.shouldListen) {
+                    this.startListening();
+                }
+
+                try {
+                    // Set status to speaking while waiting for TTS
+                    this.setStatus('processing');
+                    
+                    // Start TTS request immediately
+                    const response = await fetch(`${API_BASE_URL}/voice/text-to-speech`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ text })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`TTS API error: ${response.statusText}`);
+                    }
+
+                    const data = await response.json();
+                    if (!data.success || !data.audio_base64) {
+                        throw new Error(data.error || 'TTS generation failed');
+                    }
+
+                    const audioBytes = Uint8Array.from(atob(data.audio_base64), c => c.charCodeAt(0));
+                    const audioFormat = data.format || 'wav';
+                    const mimeType = audioFormat === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+                    const audioBlob = new Blob([audioBytes], { type: mimeType });
+                    const audioUrl = URL.createObjectURL(audioBlob);
+
+                    const audio = new Audio(audioUrl);
+                    this.currentAudio = audio;
+                    audio.playbackRate = 1.0;
+                    audio.preload = 'auto';
+
+                    await new Promise((resolve, reject) => {
+                        const cleanup = () => {
+                            audio.removeEventListener('canplaythrough', onCanPlay);
+                            audio.removeEventListener('error', onError);
+                            clearTimeout(timeoutId);
+                        };
+                        const onCanPlay = () => { cleanup(); resolve(); };
+                        const onError = (e) => { cleanup(); reject(new Error('Audio loading failed')); };
+                        audio.addEventListener('canplaythrough', onCanPlay);
+                        audio.addEventListener('error', onError);
+                        if (audio.readyState >= 3) {
+                            cleanup();
+                            resolve();
+                            return;
+                        }
+                        const timeoutId = setTimeout(() => {
+                            cleanup();
+                            reject(new Error('Audio loading timeout'));
+                        }, 5000);
+                        audio.load();
+                    });
+
+                    audio.onplay = () => {
+                        if (this.currentAudio === audio) {
+                            this.isSpeaking = true;
+                            this.setStatus('speaking');
+                            this.interruptBtn.disabled = false;
+                            if (recognition && !this.isRecognitionActive && this.shouldListen) {
+                                this.startListening();
+                            }
+                        }
+                    };
+
+                    audio.onended = () => {
+                        if (this.currentAudio === audio) {
+                            this.isSpeaking = false;
+                            this.currentAudio = null;
+                            this.liveAssistantUtterance = '';
+                            this.updateLiveDisplay();
+                            URL.revokeObjectURL(audioUrl);
+                            if (this.shouldListen) {
+                                if (!this.isRecognitionActive) {
+                                    this.restartListening();
+                                }
+                                this.setStatus('listening');
+                            } else {
+                                this.setStatus('idle');
+                            }
+                            this.interruptBtn.disabled = true;
+                        }
+                    };
+
+                    audio.onerror = (event) => {
+                        console.error('Audio playback error', event);
+                        if (this.currentAudio === audio) {
+                            this.isSpeaking = false;
+                            this.currentAudio = null;
+                            this.liveAssistantUtterance = '';
+                            this.updateLiveDisplay();
+                            URL.revokeObjectURL(audioUrl);
+                            if (this.shouldListen) {
+                                if (!this.isRecognitionActive) {
+                                    this.restartListening();
+                                }
+                                this.setStatus('listening');
+                            } else {
+                                this.setStatus('idle');
+                            }
+                            this.interruptBtn.disabled = true;
+                        }
+                    };
+
+                    try {
+                        // Ensure audio is unlocked before playing
+                        if (!this.audioUnlocked) {
+                            await this.unlockAudio();
+                        }
+                        
+                        const playPromise = audio.play();
+                        if (playPromise !== undefined) {
+                            await playPromise;
+                        }
+                    } catch (playError) {
+                        if (playError.name === 'NotAllowedError' || playError.name === 'NotSupportedError') {
+                            console.error('Audio autoplay blocked:', playError);
+                            // Try to unlock audio and retry once
+                            if (!this.audioUnlocked) {
+                                await this.unlockAudio();
+                                try {
+                                    const retryPromise = audio.play();
+                                    if (retryPromise !== undefined) {
+                                        await retryPromise;
+                                        return; // Success on retry
+                                    }
+                                } catch (retryError) {
+                                    // Still failed, show error
+                                }
+                            }
+                            throw new Error('Audio playback blocked by browser. Please click "Start conversation" first to enable audio.');
+                        }
+                        throw playError;
+                    }
+                } catch (error) {
+                    console.error('TTS error:', error);
+                    this.showError(`Failed to generate speech: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                    this.isSpeaking = false;
+                    this.currentAudio = null;
+                    this.interruptBtn.disabled = true;
+                    if (this.shouldListen) {
+                        if (!this.isRecognitionActive) {
+                            this.restartListening();
+                        }
+                        this.setStatus('listening');
+                    } else {
+                        this.setStatus('idle');
+                    }
+                }
+            }
+
+            stopAudio() {
+                if (this.currentAudio) {
+                    if (this.currentAudio instanceof HTMLAudioElement) {
+                        this.currentAudio.pause();
+                        this.currentAudio.currentTime = 0;
+                    }
+                    this.currentAudio = null;
+                }
+                if (window.speechSynthesis) {
+                    window.speechSynthesis.cancel();
+                }
+                this.isSpeaking = false;
+                this.liveAssistantUtterance = '';
+                this.updateLiveDisplay();
+            }
+
+            handleInterrupt() {
+                if (this.isSpeaking) {
+                    this.stopAudio();
+                    this.setStatus('listening');
+                    if (this.shouldListen) {
+                        this.restartListening();
+                    }
+                }
+            }
+
+            generateFallbackResponse(input, history) {
+                const normalized = input.trim().toLowerCase();
+                if (!normalized) {
+                    return "I didn't quite catch that. Could you try again?";
+                }
+                if (normalized.includes('hello') || normalized.includes('hi')) {
+                    return 'Hello! What would you like to talk about today?';
+                }
+                if (normalized.includes('menu')) {
+                    return 'Right now the specials are truffle risotto, grilled salmon, and a berry tart. What sounds good to you?';
+                }
+                if (normalized.includes('order')) {
+                    return 'Sure thing. Tell me what you would like to order and I will make sure it is ready.';
+                }
+                if (normalized.includes('thank')) {
+                    return 'You are very welcome. Happy to help whenever you need me!';
+                }
+                if (history && history.length >= 4) {
+                    const lastUserTurn = [...history].reverse().find((entry) => entry.role === 'user');
+                    if (lastUserTurn) {
+                        return `Earlier you mentioned "${lastUserTurn.text}". Would you like to go deeper on that?`;
+                    }
+                }
+                return `You said: ${input}. I am still listening, what else should we cover?`;
+            }
+
+            async createConversationSession() {
+                this.updatePrompt();
+                const promptParam = encodeURIComponent(this.selectedPrompt);
+                const response = await fetch(`${API_BASE_URL}/conversation/start?prompt=${promptParam}`, {
+                    method: 'POST'
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Conversation session failed with status ${response.status}`);
+                }
+
+                const data = await response.json();
+                const newSessionId = data.session_id;
+                this.sessionId = newSessionId;
+                this.sessionPrompt = data.prompt || this.selectedPrompt;
+                this.sessionData = data.session_data || null;
+                return newSessionId;
+            }
+
+            async ensureSession() {
+                this.updatePrompt();
+                if (this.sessionId && this.sessionPrompt === this.selectedPrompt) {
+                    return this.sessionId;
+                }
+
+                if (this.pendingSessionPromise) {
+                    try {
+                        return await this.pendingSessionPromise;
+                    } catch {
+                        return null;
+                    }
+                }
+
+                const promise = this.createConversationSession().finally(() => {
+                    this.pendingSessionPromise = null;
+                });
+
+                this.pendingSessionPromise = promise;
+                return promise;
+            }
+
+            addTranscript(entry) {
+                this.transcripts.push(entry);
+                this.updateTranscripts();
+            }
+
+            updateTranscripts() {
+                if (this.transcripts.length === 0) {
+                    this.conversationEmpty.style.display = 'block';
+                    this.transcriptsEl.style.display = 'none';
+                    this.conversationCount.textContent = 'waiting';
+                } else {
+                    this.conversationEmpty.style.display = 'none';
+                    this.transcriptsEl.style.display = 'block';
+                    this.conversationCount.textContent = `${this.transcripts.length} turns`;
+                    this.transcriptsEl.innerHTML = this.transcripts.map((entry, index) => {
+                        return `
+                            <div class="transcript-entry ${entry.role}" key="${entry.role}-${entry.timestamp.getTime()}-${index}">
+                                <div class="transcript-header">
+                                    <span class="transcript-role">${entry.role === 'user' ? 'You' : 'Assistant'}</span>
+                                    <span>${entry.timestamp.toLocaleTimeString()}</span>
+                        </div>
+                                <div class="transcript-text">${entry.text}</div>
+                    </div>
+                `;
+                    }).join('');
+                    this.transcriptsEl.scrollTop = this.transcriptsEl.scrollHeight;
+                }
+            }
+
+            updateLiveDisplay() {
+                this.liveUserTranscriptEl.textContent = this.liveUserTranscript || 'Silence...';
+                this.liveUserTranscriptEl.classList.toggle('empty', !this.liveUserTranscript);
+                this.liveAssistantUtteranceEl.textContent = this.liveAssistantUtterance || 'Waiting...';
+                this.liveAssistantUtteranceEl.classList.toggle('empty', !this.liveAssistantUtterance);
             }
         }
 
-        // Initialize the chat when the page loads
         document.addEventListener('DOMContentLoaded', () => {
-            new VoiceAgentChat();
+            new SpeechToSpeechAgent();
         });
     </script>
 </body>

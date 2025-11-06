@@ -105,7 +105,8 @@ class ConversationRequest(BaseModel):
     text: str = Field(..., description="User input text", example="Hello, how can you help me?")
     session_id: Optional[str] = Field(None, description="Conversation session ID")
     customer_id: Optional[str] = Field(None, description="Customer ID")
-    persona: Optional[str] = Field(None, description="Persona identifier to use for this turn")
+    persona: Optional[str] = Field(None, description="Persona identifier (deprecated, use prompt)")
+    prompt: Optional[str] = Field(None, description="Custom prompt for AI behavior")
 
 class ConversationResponse(BaseModel):
     """Conversation response model"""

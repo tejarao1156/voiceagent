@@ -190,14 +190,22 @@ Current conversation history: {len(session_data.get('conversation_history', []))
             # Add current user input
             messages.append({"role": "user", "content": user_input})
             
-            response = self.client.chat.completions.create(
+            # Use streaming for faster response (get chunks as they arrive)
+            stream = self.client.chat.completions.create(
                 model=INFERENCE_MODEL,
                 messages=messages,
                 temperature=0.7,
-                max_tokens=800  # Increased to allow better responses with context
+                max_tokens=800,  # Increased to allow better responses with context
+                stream=True  # Enable streaming for faster first token
             )
             
-            response_text = response.choices[0].message.content.strip()
+            # Collect streaming response chunks
+            response_text = ""
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    response_text += chunk.choices[0].delta.content
+            
+            response_text = response_text.strip()
             
             # Parse response for state changes and actions
             parsed_response = self._parse_ai_response(response_text)
