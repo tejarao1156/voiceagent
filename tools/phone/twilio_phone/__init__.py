@@ -61,6 +61,8 @@ class TwilioPhoneTool:
         self.session_data: Dict[str, Dict[str, Any]] = {}
         # Audio buffers for each call: {call_sid: [audio_chunks]}
         self.audio_buffers: Dict[str, list] = {}
+        # Track if AI is speaking: {call_sid: bool} - prevents feedback loop
+        self.is_speaking: Dict[str, bool] = {}
 
         logger.info("TwilioPhoneTool initialized")
 
@@ -216,6 +218,12 @@ class TwilioPhoneTool:
                             logger.warning("Received media before session initialized, skipping")
                             continue
                         
+                        # IMPORTANT: Skip processing if AI is currently speaking
+                        # This prevents the AI from hearing its own voice (feedback loop)
+                        if self.is_speaking.get(call_sid, False):
+                            # AI is speaking, ignore incoming audio to prevent feedback
+                            continue
+                        
                         # Incoming audio data
                         media_payload = data.get("media", {})
                         audio_base64 = media_payload.get("payload")
@@ -340,6 +348,9 @@ class TwilioPhoneTool:
             twilio_audio = wav_to_twilio(audio_bytes, sample_rate=16000)
             
             # Step 6: Send audio back through Media Stream
+            # Mark as speaking to prevent feedback loop
+            self.is_speaking[call_sid] = True
+            
             # Send in chunks (160 bytes per chunk = 20ms at 8000Hz)
             chunk_size = 160
             for i in range(0, len(twilio_audio), chunk_size):
@@ -359,9 +370,19 @@ class TwilioPhoneTool:
                 except Exception as e:
                     logger.error(f"Error sending audio chunk: {e}")
                     break
+            
+            # Wait a short delay after sending audio before accepting input again
+            # This prevents capturing the tail end of AI's speech
+            await asyncio.sleep(0.5)  # 500ms buffer
+            
+            # Mark as done speaking
+            self.is_speaking[call_sid] = False
+            logger.debug(f"Call {call_sid}: Finished speaking, ready for user input")
 
         except Exception as e:
             logger.error(f"Error processing phone audio for call {call_sid}: {e}")
+            # Reset speaking flag on error
+            self.is_speaking[call_sid] = False
 
     async def handle_call_status(self, status_data: Dict[str, Any]):
         """
@@ -393,6 +414,9 @@ class TwilioPhoneTool:
             
             if call_sid in self.audio_buffers:
                 del self.audio_buffers[call_sid]
+            
+            if call_sid in self.is_speaking:
+                del self.is_speaking[call_sid]
             
             logger.info(f"Cleaned up resources for call {call_sid}")
 
