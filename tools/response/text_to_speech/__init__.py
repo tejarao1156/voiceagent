@@ -39,7 +39,7 @@ class TextToSpeechTool:
 
     def _split_into_sentences(self, text: str) -> List[str]:
         """Split text into sentences for parallel processing."""
-        # Split by sentence endings, but keep sentences reasonable length
+        # Fast split by sentence endings
         sentences = re.split(r'([.!?]+)', text)
         result = []
         current = ""
@@ -50,8 +50,8 @@ class TextToSpeechTool:
             if not sentence:
                 continue
             
-            # If sentence is short, combine with next
-            if len(current) + len(sentence) < 200 and current:
+            # Combine shorter sentences (up to 300 chars per chunk for better parallelization)
+            if len(current) + len(sentence) < 300 and current:
                 current += " " + sentence
             else:
                 if current:
@@ -89,7 +89,7 @@ class TextToSpeechTool:
         voice: Optional[str] = None,
         *,
         persona: Optional[Dict[str, Any]] = None,
-        parallel: bool = True  # Enable parallel processing by default
+        parallel: bool = False  # Disable parallel by default for faster response (most texts are short)
     ) -> Dict[str, Any]:
         """Generate speech audio for the provided text using OpenAI TTS.
         
@@ -147,10 +147,10 @@ class TextToSpeechTool:
 
             logger.info(f"Generating speech: model={self.model}, voice={selected_voice}, text_length={len(text)}")
 
-            # For short texts (< 100 chars), process directly (faster)
+            # For short texts (< 200 chars), process directly (faster - no chunking overhead)
             # For longer texts, split and process in parallel
-            if len(text) < 100 or not parallel:
-                # Single TTS call for short text
+            if len(text) < 200 or not parallel:
+                # Single TTS call for short/medium text (fastest for most responses)
                 response = self.client.audio.speech.create(
                     model=self.model,
                     voice=selected_voice,

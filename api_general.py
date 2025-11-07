@@ -2,7 +2,6 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Que
 from starlette.requests import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
-from sqlalchemy.orm import Session
 from typing import Optional, Dict, Any, List
 import json
 import logging
@@ -10,8 +9,6 @@ from datetime import datetime
 
 # Import all models from the unified models file
 from models import (
-    # Database models
-    Base, Customer, ConversationSession,
     # API schemas
     HealthResponse, RootResponse,
     VoiceInputRequest, VoiceInputResponse, VoiceOutputRequest, VoiceOutputResponse,
@@ -21,10 +18,8 @@ from models import (
     PaginationRequest, PaginationResponse
 )
 
-from database import get_db, create_tables
 from voice_processor import VoiceProcessor
 from conversation_manager import ConversationManager, ConversationState
-from models import Customer, ConversationSession
 from config import DEBUG, API_HOST, API_PORT
 from tools import SpeechToTextTool, TextToSpeechTool, ConversationalResponseTool, TwilioPhoneTool
 from realtime_websocket import realtime_agent
@@ -50,7 +45,7 @@ app = FastAPI(
     - **General Purpose**: Designed for any conversation use case
     
     ### Quick Start
-    1. Set up your `.env` file with OpenAI API key and database credentials
+    1. Set up your `.env` file with OpenAI API key
     2. Start the server with `python main.py`
     3. Visit `/docs` for interactive API documentation
     4. Try the real-time demo with `ui/realtime_client.html`
@@ -100,15 +95,10 @@ twilio_phone_tool = TwilioPhoneTool(
     conversation_tool=conversation_tool
 )
 
-# Create database tables on startup
+# Startup event - no database initialization
 @app.on_event("startup")
 async def startup_event():
-    try:
-        create_tables()
-        logger.info("Database tables created successfully")
-    except Exception as e:
-        logger.warning(f"Database connection failed: {e}. Server will continue without database features.")
-        logger.info("Note: Some features may be limited without database connection.")
+    logger.info("Voice Agent API started (running without database - using in-memory sessions)")
 
 # ============================================================================
 # GENERAL ENDPOINTS
@@ -116,20 +106,90 @@ async def startup_event():
 
 @app.get(
     "/",
-    response_model=RootResponse,
     summary="Root Endpoint",
-    description="Get basic API information and status",
-    tags=["General"]
+    description="Landing page with links to all UIs and API documentation",
+    tags=["General"],
+    response_class=HTMLResponse
 )
 async def root():
-    """Root endpoint with API information"""
-    return RootResponse(
-        message="Voice Agent API",
-        version="1.0.0",
-        status="running",
-        documentation="/docs",
-        health_check="/health"
-    )
+    """Root endpoint with links to all available UIs and documentation"""
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Voice Agent - Home</title>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                padding: 20px;
+            }
+            .container {
+                background: white;
+                border-radius: 20px;
+                box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+                padding: 40px;
+                max-width: 600px;
+                width: 100%;
+            }
+            h1 {
+                color: #333;
+                margin-bottom: 10px;
+                font-size: 2rem;
+            }
+            .subtitle {
+                color: #666;
+                margin-bottom: 30px;
+            }
+            .links {
+                display: flex;
+                flex-direction: column;
+                gap: 15px;
+            }
+            .link {
+                display: block;
+                padding: 15px 20px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                text-decoration: none;
+                border-radius: 10px;
+                transition: transform 0.2s;
+                font-weight: 500;
+            }
+            .link:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            }
+            .link-api {
+                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            }
+            .link-docs {
+                background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🎧 Voice Agent</h1>
+            <p class="subtitle">AI-powered voice conversation system</p>
+            <div class="links">
+                <a href="/chat" class="link">🎤 Chat UI - Voice Conversation</a>
+                <a href="/dashboard" class="link">📞 Twilio Dashboard</a>
+                <a href="/docs" class="link link-docs">📚 API Documentation (Swagger)</a>
+                <a href="/redoc" class="link link-docs">📖 API Documentation (ReDoc)</a>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
 
 @app.get(
     "/health",
@@ -282,15 +342,14 @@ async def text_to_speech(request: VoiceOutputRequest):
 async def start_conversation(
     customer_id: Optional[str] = Query(None, description="Customer ID"),
     persona: Optional[str] = Query(None, description="Persona identifier (deprecated, use prompt)"),
-    prompt: Optional[str] = Query(None, description="Custom prompt for AI behavior"),
-    db: Optional[Session] = Depends(get_db)
+    prompt: Optional[str] = Query(None, description="Custom prompt for AI behavior")
 ):
     """
     Start a new conversation session.
     
     **Example usage**:
     ```bash
-    curl -X POST "http://localhost:4000/conversation/start?customer_id=customer123"
+    curl -X POST "http://localhost:4002/conversation/start?customer_id=customer123"
     ```
     """
     try:
@@ -298,25 +357,8 @@ async def start_conversation(
         persona_to_use = prompt if prompt else persona
         session_data = conversation_tool.create_session(customer_id, persona_to_use)
         
-        # Save session to database if available
-        if db is not None:
-            try:
-                db_session = ConversationSession(
-                    customer_id=customer_id,
-                    session_data=json.dumps(session_data),
-                    status="active"
-                )
-                db.add(db_session)
-                db.commit()
-                db.refresh(db_session)
-                session_data["id"] = db_session.id
-                session_id = db_session.id
-            except Exception as db_error:
-                logger.warning(f"Database save failed, using in-memory session: {db_error}")
-                session_id = session_data.get("session_id", "mem_" + str(hash(str(session_data))))
-        else:
-            # Use in-memory session ID if database not available
-            session_id = session_data.get("session_id", "mem_" + str(hash(str(session_data))))
+        # Use in-memory session ID
+        session_id = session_data.get("session_id", "mem_" + str(hash(str(session_data))))
         
         # Return prompt if it was provided, otherwise return persona for backward compatibility
         prompt_value = prompt if prompt else session_data.get("persona")
@@ -339,15 +381,14 @@ async def start_conversation(
     tags=["Conversation Management"]
 )
 async def process_conversation(
-    request: ConversationRequest,
-    db: Optional[Session] = Depends(get_db)
+    request: ConversationRequest
 ):
     """
     Process user input and generate appropriate response.
     
     **Example usage**:
     ```bash
-    curl -X POST "http://localhost:4000/conversation/process" \
+    curl -X POST "http://localhost:4002/conversation/process" \
          -H "Content-Type: application/json" \
          -d '{"text": "I want to order a pizza", "session_id": "session123"}'
     ```
@@ -355,41 +396,14 @@ async def process_conversation(
     try:
         # Get session data - use prompt if provided, otherwise persona (for backward compatibility)
         persona_name = request.prompt if request.prompt else request.persona
-        session_data = None
-
-        if request.session_id and db is not None:
-            try:
-                db_session = db.query(ConversationSession).filter(
-                    ConversationSession.id == request.session_id
-                ).first()
-                
-                if db_session:
-                    session_data = json.loads(db_session.session_data)
-                    if not persona_name:
-                        persona_name = session_data.get("persona")
-            except Exception as db_error:
-                logger.warning(f"Database lookup failed: {db_error}. Using in-memory session.")
         
-        # Create new session if none found or database unavailable
-        if not session_data:
-            session_data = conversation_tool.create_session(request.customer_id, persona_name)
+        # Create new session (in-memory only)
+        session_data = conversation_tool.create_session(request.customer_id, persona_name)
         
         # Process user input (general conversation) - streaming enabled for faster response
         result = await conversation_tool.generate_response(
             session_data, request.text, persona_name
         )
-        
-        # Update session in database if available (non-blocking for performance)
-        if request.session_id and db is not None:
-            try:
-                db_session = db.query(ConversationSession).filter(
-                    ConversationSession.id == request.session_id
-                ).first()
-                if db_session:
-                    db_session.session_data = json.dumps(result["session_data"])
-                    db.commit()
-            except Exception as db_error:
-                logger.warning(f"Database update failed: {db_error}")
         
         return ConversationResponse(
             response=result["response"],
@@ -448,11 +462,10 @@ async def toolkit_text_to_speech(request: VoiceOutputRequest):
 )
 async def toolkit_start_conversation(
     customer_id: Optional[str] = Query(None, description="Customer ID"),
-    persona: Optional[str] = Query(None, description="Persona identifier"),
-    db: Session = Depends(get_db)
+    persona: Optional[str] = Query(None, description="Persona identifier")
 ):
     """Expose conversation session creation for testing."""
-    return await start_conversation(customer_id=customer_id, persona=persona, db=db)
+    return await start_conversation(customer_id=customer_id, persona=persona)
 
 
 @app.post(
@@ -463,11 +476,10 @@ async def toolkit_start_conversation(
     tags=["Tools"]
 )
 async def toolkit_process_conversation(
-    request: ConversationRequest,
-    db: Session = Depends(get_db)
+    request: ConversationRequest
 ):
     """Expose the conversation response tool as a standalone endpoint."""
-    return await process_conversation(request, db)
+    return await process_conversation(request)
 
 
 # ============================================================================
@@ -485,8 +497,7 @@ async def process_voice_agent_input(
     audio_file: UploadFile = File(..., description="Audio file from customer"),
     session_id: Optional[str] = Form(None, description="Conversation session ID"),
     customer_id: Optional[str] = Form(None, description="Customer ID"),
-    persona: Optional[str] = Form(None, description="Persona identifier"),
-    db: Session = Depends(get_db)
+    persona: Optional[str] = Form(None, description="Persona identifier")
 ):
     """
     Complete voice agent processing pipeline.
@@ -824,13 +835,13 @@ async def twilio_media_stream(websocket: WebSocket):
             pass
 
 @app.get(
-    "/twilio/dashboard",
+    "/dashboard",
     summary="Twilio Phone Dashboard",
     description="HTML dashboard for monitoring Twilio phone calls",
     tags=["Twilio Phone Integration"],
     response_class=HTMLResponse
 )
-async def twilio_dashboard():
+async def dashboard():
     """Serve the Twilio phone dashboard UI."""
     import os
     dashboard_path = os.path.join(os.path.dirname(__file__), "ui", "twilio_phone_ui.html")
@@ -840,7 +851,23 @@ async def twilio_dashboard():
         raise HTTPException(status_code=404, detail="Dashboard not found")
 
 @app.get(
-    "/ui/chat",
+    "/twilio/dashboard",
+    summary="Twilio Phone Dashboard (Legacy)",
+    description="HTML dashboard for monitoring Twilio phone calls (legacy endpoint)",
+    tags=["Twilio Phone Integration"],
+    response_class=HTMLResponse
+)
+async def twilio_dashboard():
+    """Serve the Twilio phone dashboard UI (legacy endpoint)."""
+    import os
+    dashboard_path = os.path.join(os.path.dirname(__file__), "ui", "twilio_phone_ui.html")
+    if os.path.exists(dashboard_path):
+        return FileResponse(dashboard_path)
+    else:
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+
+@app.get(
+    "/chat",
     summary="Chat UI",
     description="Conversation chat UI with voice and text support",
     tags=["UI"],
@@ -848,6 +875,22 @@ async def twilio_dashboard():
 )
 async def chat_ui():
     """Serve the chat UI."""
+    import os
+    chat_path = os.path.join(os.path.dirname(__file__), "ui", "chat_ui.html")
+    if os.path.exists(chat_path):
+        return FileResponse(chat_path)
+    else:
+        raise HTTPException(status_code=404, detail="Chat UI not found")
+
+@app.get(
+    "/ui/chat",
+    summary="Chat UI (Legacy)",
+    description="Conversation chat UI with voice and text support (legacy endpoint)",
+    tags=["UI"],
+    response_class=HTMLResponse
+)
+async def chat_ui_legacy():
+    """Serve the chat UI (legacy endpoint - redirects to /chat)."""
     import os
     chat_path = os.path.join(os.path.dirname(__file__), "ui", "chat_ui.html")
     if os.path.exists(chat_path):
