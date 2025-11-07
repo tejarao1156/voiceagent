@@ -447,7 +447,7 @@
                 <span class="conversation-count" id="conversationCount">waiting</span>
             </div>
             <div id="conversationEmpty" class="conversation-empty">
-                Click "Start conversation" and begin speaking. The agent will wait for a 1 second pause before replying.
+                Click "Start conversation" and begin speaking. The agent will respond automatically after a brief pause (0.8s).
             </div>
             <div id="transcripts" class="transcripts" style="display: none;"></div>
         </div>
@@ -455,7 +455,7 @@
 
     <script>
         const API_BASE_URL = 'http://localhost:4002';
-        const RESPONSE_DELAY_MS = 1000;
+        const RESPONSE_DELAY_MS = 800; // Reduced from 1000ms for faster response
 
         const DEFAULT_PROMPT = "You are a friendly and helpful voice agent. Your role is to engage in natural, helpful conversations with users, provide useful information and assistance, and be conversational and natural.";
 
@@ -476,10 +476,12 @@
             this.shouldListen = false;
             this.pendingResponseTimer = null;
             this.accumulatedTranscript = '';
-                this.isSpeaking = false;
-                this.currentAudio = null;
-                this.isStartingSession = false;
-                this.audioUnlocked = false;
+            this.isSpeaking = false;
+            this.currentAudio = null;
+            this.isStartingSession = false;
+            this.audioUnlocked = false;
+            this.isProcessing = false; // Prevent duplicate processing
+            this.hasInterrupted = false; // Track if we just interrupted
                 
                 this.initializeElements();
                 this.checkBrowserSupport();
@@ -596,43 +598,14 @@
                 this.unlockAudio().catch(err => console.warn('Audio unlock failed:', err));
 
                 try {
-                    // Start listening immediately (don't wait for session)
+                    // Start listening immediately - no automatic greeting
                     this.startListening();
                     this.startBtn.disabled = true;
                     this.stopBtn.disabled = false;
-
-                    // Create session in background and send initial greeting
-                    this.ensureSession().then(async (sessionId) => {
-                        if (sessionId && this.shouldListen) {
-                            // Send empty message to trigger initial greeting
-                            try {
-                                const response = await fetch(`${API_BASE_URL}/conversation/process`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        text: "",
-                                        session_id: sessionId,
-                                        prompt: this.selectedPrompt
-                                    })
-                                });
-                                
-                                if (response.ok) {
-                                    const data = await response.json();
-                                    const greeting = data.response || "Hello! How can I help you today?";
-                                    
-                                    // Play greeting asynchronously
-                                    this.speakResponse(greeting).catch(err => {
-                                        console.warn('Greeting audio failed:', err);
-                                    });
-                                }
-                            } catch (err) {
-                                console.warn('Initial greeting failed:', err);
-                            }
-                        }
-                    }).catch(err => {
-                        console.error('Session creation failed:', err);
-                        // Don't show error unless user actually tries to speak
-                    });
+                    
+                    // Session will be created automatically when user first speaks
+                    console.log('🎤 Ready to listen - speak to start conversation');
+                    
                 } catch (err) {
                     console.error('Failed to start conversation:', err);
                     this.showError(err.message || 'Failed to start conversation');
@@ -694,10 +667,9 @@
                 recognition.onresult = (event) => this.handleRecognitionResult(event);
                 recognition.onstart = () => {
                     this.isRecognitionActive = true;
+                    // If recognition starts while AI is speaking, it's an interrupt
                     if (this.isSpeaking) {
-                        this.stopAudio();
-                        this.setStatus('listening');
-                        this.clearPendingTimer();
+                        this.handleInterruptDetected();
                     } else {
                         this.setStatus('listening');
                     }
@@ -705,16 +677,26 @@
 
                 recognition.onend = () => {
                     this.isRecognitionActive = false;
-                    const completeTranscript = this.accumulatedTranscript.trim();
-                    if (completeTranscript && this.shouldListen && !this.pendingResponseTimer) {
-                        this.accumulatedTranscript = '';
-                        this.liveUserTranscript = '';
-                        this.updateLiveDisplay();
-                        this.addTranscript({ role: 'user', text: completeTranscript, timestamp: new Date() });
-                        this.setStatus('processing');
-                        this.processTranscript(completeTranscript);
+                    
+                    // If we have a pending timer, let it handle the response
+                    // This prevents duplicate processing
+                    if (this.pendingResponseTimer) {
+                        // Restart listening for continuous mode
+                        if (this.shouldListen && !this.isSpeaking) {
+                            this.restartListening();
+                        }
+                        return;
                     }
-                    if (this.shouldListen) {
+                    
+                    // Only process if we have transcript and no timer scheduled
+                    const completeTranscript = this.accumulatedTranscript.trim();
+                    if (completeTranscript && this.shouldListen && !this.isProcessing) {
+                        // Schedule instead of processing immediately
+                        this.scheduleResponse();
+                    }
+                    
+                    // Restart listening for continuous mode
+                    if (this.shouldListen && !this.isSpeaking) {
                         this.restartListening();
                     }
                 };
@@ -748,74 +730,113 @@
             }
 
             restartListening() {
-                setTimeout(() => {
-                    if (this.shouldListen && !this.isRecognitionActive) {
-                        this.startListening();
-                    }
-                }, 200);
+                // Restart listening immediately for continuous conversation
+                if (this.shouldListen && !this.isRecognitionActive) {
+                    setTimeout(() => {
+                        if (this.shouldListen && !this.isRecognitionActive && !this.isSpeaking) {
+                            this.startListening();
+                        }
+                    }, 50);  // Very short delay for fastest restart
+                }
             }
 
             handleRecognitionResult(event) {
                 if (!event.results) return;
 
-                let hasAnySpeech = false;
-                let interruptDetected = false;
-
-                for (let i = event.resultIndex; i < event.results.length; i++) {
-                    const result = event.results[i];
-                    if (result[0]) {
-                        const transcriptText = result[0].transcript;
-                        if (transcriptText && transcriptText.trim().length > 0) {
-                            hasAnySpeech = true;
-                            if (this.isSpeaking) {
-                                interruptDetected = true;
-                                break;
-                            }
+                // Check for interrupt first (user speaking while AI is speaking)
+                if (this.isSpeaking && !this.hasInterrupted) {
+                    // Check if there's any speech content
+                    for (let i = event.resultIndex; i < event.results.length; i++) {
+                        const result = event.results[i];
+                        if (result[0] && result[0].transcript.trim().length > 0) {
+                            this.handleInterruptDetected();
+                            break;
                         }
                     }
                 }
 
-                if (interruptDetected) {
-                    this.stopAudio();
-                    this.setStatus('listening');
-                    this.clearPendingTimer();
-                    this.accumulatedTranscript = '';
-                    this.liveUserTranscript = '';
-                    this.updateLiveDisplay();
-                }
-
-                let currentTranscript = '';
+                // Process transcript results
                 let hasFinalTranscript = false;
+                let hasInterimSpeech = false;
 
                 for (let i = event.resultIndex; i < event.results.length; i++) {
                     const result = event.results[i];
-                    if (result[0]) {
-                        const transcriptText = result[0].transcript;
-                        if (result.isFinal) {
-                            currentTranscript += transcriptText;
-                            hasFinalTranscript = true;
+                    if (!result[0]) continue;
+
+                    const transcriptText = result[0].transcript;
+                    
+                    if (result.isFinal) {
+                        // Final transcript - accumulate it
+                        if (transcriptText.trim()) {
                             this.accumulatedTranscript += transcriptText + ' ';
-                        } else {
+                            hasFinalTranscript = true;
+                        }
+                    } else {
+                        // Interim transcript - show live
+                        if (transcriptText.trim()) {
                             this.liveUserTranscript = transcriptText;
                             this.updateLiveDisplay();
+                            hasInterimSpeech = true;
                         }
                     }
                 }
 
+                // Handle auto-response after pause
                 if (hasFinalTranscript && this.accumulatedTranscript.trim()) {
+                    this.scheduleResponse();
+                } else if (hasInterimSpeech) {
+                    // User is still speaking - cancel any pending response
                     this.clearPendingTimer();
-                    this.pendingResponseTimer = setTimeout(() => {
-                        this.pendingResponseTimer = null;
-                        if (!this.shouldListen) return;
-                        const completeTranscript = this.accumulatedTranscript.trim();
-                        if (completeTranscript) {
-                            this.accumulatedTranscript = '';
-                            this.liveUserTranscript = '';
-                            this.updateLiveDisplay();
-                            this.processTranscript(completeTranscript);
-                        }
-                    }, RESPONSE_DELAY_MS);
                 }
+            }
+
+            handleInterruptDetected() {
+                if (!this.isSpeaking) return;
+                
+                console.log('🔴 Interrupt detected - stopping AI');
+                this.hasInterrupted = true;
+                this.stopAudio();
+                this.setStatus('listening');
+                this.clearPendingTimer();
+                
+                // Clear accumulated transcript to start fresh after interrupt
+                this.accumulatedTranscript = '';
+                this.liveUserTranscript = '';
+                this.updateLiveDisplay();
+            }
+
+            scheduleResponse() {
+                // Clear any existing timer
+                this.clearPendingTimer();
+                
+                const completeTranscript = this.accumulatedTranscript.trim();
+                if (!completeTranscript) return;
+                
+                console.log(`⏱️ Scheduling response in ${RESPONSE_DELAY_MS}ms`);
+                
+                // Schedule response after pause
+                this.pendingResponseTimer = setTimeout(() => {
+                    this.pendingResponseTimer = null;
+                    
+                    // Double check we should still process
+                    if (!this.shouldListen || this.isProcessing || this.isSpeaking) return;
+                    
+                    const transcript = this.accumulatedTranscript.trim();
+                    if (transcript) {
+                        console.log('✅ Processing scheduled response:', transcript);
+                        
+                        // Add to transcript history
+                        this.addTranscript({ role: 'user', text: transcript, timestamp: new Date() });
+                        
+                        // Clear state
+                        this.accumulatedTranscript = '';
+                        this.liveUserTranscript = '';
+                        this.updateLiveDisplay();
+                        
+                        // Process the transcript
+                        this.processTranscript(transcript);
+                    }
+                }, RESPONSE_DELAY_MS);
             }
 
             clearPendingTimer() {
@@ -826,7 +847,10 @@
             }
 
             async processTranscript(transcript) {
-                if (!this.shouldListen) return;
+                if (!this.shouldListen || this.isProcessing) return;
+
+                // Prevent duplicate processing
+                this.isProcessing = true;
 
                 try {
                     this.setStatus('processing');
@@ -871,13 +895,20 @@
                     this.updateLiveDisplay();
                     
                     // Start TTS immediately in background (non-blocking)
-                    // TTS will process in parallel chunks for faster output
+                    // After audio finishes, listening will automatically restart
                     this.speakResponse(assistantText).catch(err => {
                         console.error('TTS error:', err);
                         this.showError(`Failed to generate speech: ${err.message}`);
+                        // Restart listening even if TTS fails
+                        if (this.shouldListen && !this.isRecognitionActive) {
+                            this.restartListening();
+                        }
                     });
                 } catch (err) {
-                    if (!this.shouldListen) return;
+                    if (!this.shouldListen) {
+                        this.isProcessing = false; // Clear flag before returning
+                        return;
+                    }
 
                     console.error('Failed to fetch agent response:', err);
                     const fallback = this.generateFallbackResponse(transcript, this.transcripts);
@@ -887,6 +918,9 @@
                     this.liveAssistantUtterance = fallback;
                     this.updateLiveDisplay();
                     await this.speakResponse(fallback);
+                } finally {
+                    // Always clear processing flag
+                    this.isProcessing = false;
                 }
             }
 
@@ -966,17 +1000,25 @@
                     audio.onplay = () => {
                         if (this.currentAudio === audio) {
                             this.isSpeaking = true;
+                            this.hasInterrupted = false; // Reset interrupt flag when starting to speak
                             this.setStatus('speaking');
                             this.interruptBtn.disabled = false;
-                            if (recognition && !this.isRecognitionActive && this.shouldListen) {
-                                this.startListening();
-                            }
+                            
+                            // Keep recognition active for interrupt detection
+                            // But with a short delay to avoid capturing AI's first words
+                            setTimeout(() => {
+                                if (this.isSpeaking && this.shouldListen && !this.isRecognitionActive) {
+                                    console.log('👂 Listening for interrupts...');
+                                    this.startListening();
+                                }
+                            }, 300); // 300ms delay to avoid capturing start of AI speech
                         }
                     };
 
                     audio.onended = () => {
                         if (this.currentAudio === audio) {
                             this.isSpeaking = false;
+                            this.hasInterrupted = false; // Reset interrupt flag
                             this.currentAudio = null;
                             this.liveAssistantUtterance = '';
                             this.updateLiveDisplay();
@@ -997,6 +1039,7 @@
                         console.error('Audio playback error', event);
                         if (this.currentAudio === audio) {
                             this.isSpeaking = false;
+                            this.hasInterrupted = false; // Reset interrupt flag
                             this.currentAudio = null;
                             this.liveAssistantUtterance = '';
                             this.updateLiveDisplay();
@@ -1047,6 +1090,7 @@
                     console.error('TTS error:', error);
                     this.showError(`Failed to generate speech: ${error instanceof Error ? error.message : 'Unknown error'}`);
                     this.isSpeaking = false;
+                    this.hasInterrupted = false; // Reset interrupt flag
                     this.currentAudio = null;
                     this.interruptBtn.disabled = true;
                     if (this.shouldListen) {
@@ -1072,14 +1116,22 @@
                     window.speechSynthesis.cancel();
                 }
                 this.isSpeaking = false;
+                this.hasInterrupted = false; // Reset interrupt flag when audio is stopped
                 this.liveAssistantUtterance = '';
                 this.updateLiveDisplay();
             }
 
             handleInterrupt() {
+                // Manual interrupt button - stop AI and start listening
                 if (this.isSpeaking) {
+                    console.log('Manual interrupt - stopping AI');
                     this.stopAudio();
                     this.setStatus('listening');
+                    this.clearPendingTimer();
+                    // Clear any pending transcripts to start fresh
+                    this.accumulatedTranscript = '';
+                    this.liveUserTranscript = '';
+                    this.updateLiveDisplay();
                     if (this.shouldListen) {
                         this.restartListening();
                     }
