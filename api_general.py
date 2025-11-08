@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from typing import Optional, Dict, Any, List
 import json
 import logging
+import asyncio
 from datetime import datetime
 
 # Import all models from the unified models file
@@ -783,6 +784,219 @@ async def twilio_call_status(request: Request):
         logger.error(f"Error handling status webhook: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post(
+    "/webhooks/twilio/recording",
+    summary="Twilio Recording Handler",
+    description="Handles recorded audio from caller",
+    tags=["Twilio Phone Integration"],
+    response_class=HTMLResponse
+)
+async def twilio_recording_handler(request: Request):
+    """
+    Handle recorded audio from the caller.
+    Process the recording: STT -> Conversation -> TTS -> Play back
+    """
+    try:
+        from twilio.twiml.voice_response import VoiceResponse
+        import urllib.request
+        
+        logger.info(f"[RECORDING] Handler called - START")
+        
+        form_data = await request.form()
+        call_sid = form_data.get("CallSid")
+        recording_url = form_data.get("RecordingUrl")
+        
+        logger.info(f"[RECORDING] Received recording for call {call_sid}")
+        logger.info(f"[RECORDING] Recording URL: {recording_url}")
+        logger.info(f"[RECORDING] Form data keys: {list(form_data.keys())}")
+        
+        response = VoiceResponse()
+        
+        if recording_url:
+            # Download and process the recording
+            try:
+                # Minimal wait for Twilio to process the recording
+                # Reduced from 1s to 500ms for faster latency
+                logger.info(f"[RECORDING] Waiting 500ms for Twilio to process recording...")
+                await asyncio.sleep(0.5)
+                
+                logger.info(f"[RECORDING] Downloading recording from {recording_url}")
+                
+                # Download the recording with Twilio authentication
+                import base64
+                from config import TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
+                
+                # Try downloading with .wav extension first
+                recording_url_wav = recording_url + ".wav"
+                
+                # Create basic auth header
+                auth_string = f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}"
+                auth_bytes = auth_string.encode("utf-8")
+                auth_b64 = base64.b64encode(auth_bytes).decode("utf-8")
+                
+                # Try downloading
+                audio_data = None
+                for url_to_try in [recording_url_wav, recording_url]:
+                    try:
+                        logger.info(f"[RECORDING] Attempting to download from: {url_to_try}")
+                        req = urllib.request.Request(url_to_try)
+                        req.add_header("Authorization", f"Basic {auth_b64}")
+                        
+                        http_response = urllib.request.urlopen(req)
+                        audio_data = http_response.read()
+                        logger.info(f"[RECORDING] Successfully downloaded {len(audio_data)} bytes from {url_to_try}")
+                        break
+                    except Exception as e:
+                        logger.warning(f"[RECORDING] Failed to download from {url_to_try}: {str(e)}")
+                        continue
+                
+                if not audio_data:
+                    logger.error(f"[RECORDING] Could not download recording from any URL")
+                    response.say("I'm sorry, there was an issue retrieving your recording.", voice="alice")
+                    return HTMLResponse(content=str(response))
+                
+                # Use audio directly without conversion - Twilio sends WAV, Whisper accepts WAV
+                # Skip format conversion to reduce latency
+                logger.info(f"[RECORDING] Skipping format conversion - using WAV directly from Twilio")
+                stt_result = await speech_tool.transcribe(audio_data, "wav")
+                
+                if stt_result.get("success"):
+                    user_text = stt_result.get("text", "").strip()
+                    logger.info(f"[RECORDING] STT Result: {user_text}")
+                    
+                    # Check if this is an interrupt (user spoke during gather phase)
+                    call_status = form_data.get("CallStatus", "")
+                    if call_status == "in-progress":
+                        # Check if we received audio during gather (potential interrupt)
+                        recording_duration = form_data.get("RecordingDuration", "0")
+                        if recording_duration and int(recording_duration) > 0:
+                            logger.info(f"[RECORDING] INTERRUPT DETECTED: User spoke during AI response (duration: {recording_duration}s)")
+                            logger.info(f"[RECORDING] Stopping AI response and processing new input: {user_text}")
+                    
+                    if user_text:
+                        # Get AI response
+                        session_id = twilio_phone_tool.active_calls.get(call_sid)
+                        if session_id:
+                            session_data = twilio_phone_tool.session_data.get(session_id, {})
+                            ai_response = await conversation_tool.generate_response(
+                                session_data, user_text, None
+                            )
+                            response_text = ai_response.get("response", "I'm sorry, I didn't understand that.")
+                        else:
+                            response_text = "I'm sorry, I couldn't process your request."
+                        
+                        logger.info(f"[RECORDING] AI Response: {response_text}")
+                        
+                        # Convert response to speech
+                        tts_result = await tts_tool.synthesize(response_text, voice="alloy", parallel=False)
+                        
+                        if tts_result.get("success"):
+                            # Use Say command for reliable audio playback on Twilio
+                            # Twilio's native Say is more reliable than Play with data URLs
+                            logger.info(f"[RECORDING] TTS succeeded, using Say for playback")
+                            logger.info(f"[RECORDING] Response text: {response_text[:100]}...")
+                            
+                            # Use Twilio's Say command for better reliability
+                            try:
+                                response.say(response_text, voice="alice")
+                                logger.info(f"[RECORDING] Successfully queued response via Say command")
+                                
+                                # Add interrupt handling: Gather to detect if user starts speaking
+                                # This allows the user to interrupt the AI response
+                                logger.info(f"[RECORDING] Setting up interrupt detection during response")
+                                from config import TWILIO_WEBHOOK_BASE_URL as WEBHOOK_BASE_INTERRUPT
+                                response.gather(
+                                    action=f"{WEBHOOK_BASE_INTERRUPT}/webhooks/twilio/recording?CallSid={call_sid}",
+                                    method="POST",
+                                    num_digits=0,  # No digits needed, just voice
+                                    timeout=0.5,   # Very short timeout to detect interrupts
+                                    speech_timeout="auto"  # Auto-detect when user speaks
+                                )
+                                logger.info(f"[RECORDING] Interrupt detection added - ready to listen")
+                                
+                            except Exception as e:
+                                logger.error(f"[RECORDING] Error with say command: {str(e)}", exc_info=True)
+                                response.say("I have a response for you.", voice="alice")
+                        else:
+                            logger.error(f"[RECORDING] TTS failed: {tts_result.get('error')}")
+                            response.say("I'm sorry, I had trouble generating a response.", voice="alice")
+                    else:
+                        response.say("I didn't hear any speech. Please try again.", voice="alice")
+                else:
+                    response.say("I couldn't understand the recording. Please try again.", voice="alice")
+                
+                # Set up continuous recording loop for next turn
+                # After AI response plays, immediately record user's next message
+                from config import TWILIO_WEBHOOK_BASE_URL as WEBHOOK_BASE
+                record_url = f"{WEBHOOK_BASE}/webhooks/twilio/recording?CallSid={call_sid}"
+                logger.info(f"[RECORDING] Setting up CONTINUOUS recording loop with URL: {record_url}")
+                
+                # Record next user message - this creates the conversation loop
+                response.record(
+                    action=record_url,  # Callback to this same handler
+                    method="POST",
+                    max_speech_time=30,  # Allow up to 30 seconds for response
+                    speech_timeout="auto",  # Auto-detect end of speech
+                    play_beep=False  # No beep to keep conversation natural
+                )
+                logger.info(f"[RECORDING] Added continuous record() to response for conversation loop")
+                
+            except Exception as e:
+                logger.error(f"[RECORDING] Error processing recording: {str(e)}", exc_info=True)
+                logger.error(f"[RECORDING] Error type: {type(e).__name__}")
+                response.say("I'm sorry, there was an error processing your message.", voice="alice")
+                
+                # IMPORTANT: Keep conversation loop active even on error
+                # User should be able to continue the conversation
+                from config import TWILIO_WEBHOOK_BASE_URL as WEBHOOK_BASE
+                record_url = f"{WEBHOOK_BASE}/webhooks/twilio/recording?CallSid={call_sid}"
+                response.record(
+                    action=record_url,
+                    method="POST",
+                    max_speech_time=30,
+                    speech_timeout="auto",
+                    play_beep=False
+                )
+                logger.info(f"[RECORDING] Error recovery: Added record() to continue conversation")
+        else:
+            logger.warning(f"[RECORDING] No recording URL provided")
+            response.say("No recording found. Please try again.", voice="alice")
+            
+            # Even with no recording, keep recording loop active
+            from config import TWILIO_WEBHOOK_BASE_URL as WEBHOOK_BASE
+            record_url = f"{WEBHOOK_BASE}/webhooks/twilio/recording?CallSid={call_sid}"
+            response.record(
+                action=record_url,
+                method="POST",
+                max_speech_time=30,
+                speech_timeout="auto",
+                play_beep=False
+            )
+        
+        logger.info(f"[RECORDING] Creating TwiML response: {str(response)[:200]}...")
+        twiml_response = str(response)
+        logger.info(f"[RECORDING] TwiML Response length: {len(twiml_response)} bytes")
+        logger.info(f"[RECORDING] Returning response to Twilio - END (conversation continues)")
+        return HTMLResponse(content=twiml_response)
+        
+    except Exception as e:
+        logger.error(f"[RECORDING] CRITICAL ERROR in recording handler: {str(e)}", exc_info=True)
+        import traceback
+        logger.error(f"[RECORDING] Full traceback:\n{traceback.format_exc()}")
+        try:
+            from twilio.twiml.voice_response import VoiceResponse
+            error_response = VoiceResponse()
+            error_response.say("Sorry, an error occurred. Goodbye.")
+            error_response.hangup()
+            logger.info(f"[RECORDING] Returning error TwiML response")
+            return HTMLResponse(content=str(error_response))
+        except Exception as inner_e:
+            logger.error(f"[RECORDING] Error creating error response: {str(inner_e)}")
+            # Fallback response
+            return HTMLResponse(
+                content='<?xml version="1.0" encoding="UTF-8"?><Response><Say>An error occurred.</Say><Hangup/></Response>'
+            )
+
 @app.websocket("/webhooks/twilio/stream")
 async def twilio_media_stream(websocket: WebSocket):
     """
@@ -920,6 +1134,47 @@ async def get_twilio_status():
 
 # ============================================================================
 # ERROR HANDLERS
+# ============================================================================
+# FALLBACK HANDLERS (if Media Stream fails)
+# ============================================================================
+
+@app.post(
+    "/webhooks/twilio/fallback",
+    summary="Twilio Fallback Voice Handler",
+    description="Fallback endpoint if Media Stream fails",
+    tags=["Twilio Phone Integration"],
+    response_class=HTMLResponse
+)
+async def twilio_fallback_handler(request: Request):
+    """
+    Fallback handler for when Media Stream doesn't work.
+    Uses simple TwiML with Say for more reliable operation.
+    """
+    try:
+        from twilio.twiml.voice_response import VoiceResponse
+        form_data = await request.form()
+        call_sid = form_data.get("CallSid")
+        from_number = form_data.get("From")
+        
+        logger.info(f"[FALLBACK] Incoming call from {from_number} with CallSid {call_sid}")
+        
+        response = VoiceResponse()
+        response.say("Hello! How can I help you today?", voice="alice")
+        response.pause(length=2)
+        response.say("Unfortunately, I am not able to process your call at this moment. Please try again later.", voice="alice")
+        response.hangup()
+        
+        logger.info(f"[FALLBACK] Sent greeting for call {call_sid}")
+        return HTMLResponse(content=str(response))
+        
+    except Exception as e:
+        logger.error(f"[FALLBACK] Error: {str(e)}")
+        from twilio.twiml.voice_response import VoiceResponse
+        error_response = VoiceResponse()
+        error_response.say("Sorry, an error occurred. Goodbye.")
+        error_response.hangup()
+        return HTMLResponse(content=str(error_response))
+
 # ============================================================================
 
 @app.exception_handler(HTTPException)

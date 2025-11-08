@@ -103,35 +103,26 @@ class TwilioPhoneTool:
             self.session_data[session_id] = session_data
             self.audio_buffers[call_sid] = []
 
-            # Create TwiML response to start Media Stream
+            # Use simple TwiML approach (More reliable than Media Stream)
+            # Media Stream has connectivity issues on some Twilio accounts
             response = VoiceResponse()
             
-            # Start Media Stream - this enables real-time bidirectional audio
-            # Include CallSid as parameter so we can map it to the session
-            # Use wss:// for WebSocket (required for Media Stream)
-            stream_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/stream?CallSid={call_sid}"
-            # Ensure WebSocket URL uses wss:// protocol
-            if stream_url.startswith("https://"):
-                stream_url = stream_url.replace("https://", "wss://", 1)
-            elif stream_url.startswith("http://"):
-                stream_url = stream_url.replace("http://", "ws://", 1)
+            # Send greeting and gather input
+            response.say("Hello! How can I help you today?", voice="alice")
             
-            response.start().stream(url=stream_url)
-
-            # Generate initial greeting
-            greeting_result = await self.conversation_tool.generate_response(
-                session_data,
-                "",  # Empty input for initial greeting
-                persona=None
+            # Record the caller's message
+            record_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/recording?CallSid={call_sid}"
+            response.record(
+                action=record_url,
+                method="POST",
+                max_speech_time=10,  # Max 10 seconds of speech
+                speech_timeout="auto"
             )
-            
-            greeting_text = greeting_result.get("response", "Hello! How can I help you today?")
-            
-            # Say initial greeting while Media Stream connects
-            response.say(greeting_text, voice="alice")
 
             twiml = str(response)
-            logger.info(f"Call {call_sid} connected, session {session_id} created")
+            logger.info(f"✅ Call {call_sid} TwiML Response Generated:")
+            logger.info(f"   TwiML:\n{twiml}")
+            logger.info(f"✅ Call {call_sid} connected, session {session_id} created. Playing greeting and recording input...")
             return twiml
 
         except Exception as e:
@@ -150,7 +141,7 @@ class TwilioPhoneTool:
             call_sid: Twilio call identifier (may be in query params or in stream messages)
         """
         await websocket.accept()
-        logger.info("Media Stream WebSocket connection accepted")
+        logger.info(f"✅ Media Stream WebSocket connection ACCEPTED. CallSid from params: {call_sid}")
         
         # CallSid may come from query params or from stream messages
         # Don't close connection if not provided - wait for "start" event
@@ -202,10 +193,22 @@ class TwilioPhoneTool:
                                 self.active_calls[call_sid] = session_id
                                 self.session_data[session_id] = session_data
                                 self.audio_buffers[call_sid] = []
+                                self.is_speaking[call_sid] = False
                             else:
                                 session_data = self.session_data.get(session_id, {})
                             
                             audio_buffer = self.audio_buffers.get(call_sid, [])
+                            
+                            # Check if we need to send initial greeting
+                            if audio_buffer and audio_buffer[0] == b'__SEND_GREETING__':
+                                audio_buffer.clear()
+                                logger.info(f"Call {call_sid}: Sending initial greeting through Media Stream")
+                                # Send greeting asynchronously
+                                asyncio.create_task(self._send_audio_response(
+                                    "Hello! How can I help you today?",
+                                    call_sid,
+                                    websocket
+                                ))
                         else:
                             logger.error("No CallSid found in start event")
                     
@@ -235,11 +238,14 @@ class TwilioPhoneTool:
                             # Add to buffer
                             audio_buffer.append(audio_bytes)
                             
-                            # Process when buffer reaches threshold (~2 seconds of audio)
-                            if len(audio_buffer) >= 16:  # ~2 seconds at 8000Hz
+                            # Process when buffer reaches threshold (~1 second of audio for faster response)
+                            # Reduced from 16 to 8 chunks for more responsive processing
+                            if len(audio_buffer) >= 8:  # ~1 second at 8000Hz (faster processing)
                                 # Combine audio chunks
                                 combined_audio = b''.join(audio_buffer)
                                 audio_buffer.clear()
+                                
+                                logger.debug(f"Call {call_sid}: Processing audio buffer ({len(combined_audio)} bytes)")
                                 
                                 # Process audio asynchronously
                                 asyncio.create_task(self._process_phone_audio(
@@ -271,67 +277,49 @@ class TwilioPhoneTool:
             except:
                 pass
 
-    async def _process_phone_audio(
+    async def _send_audio_response(
         self,
-        audio_data: bytes,
-        session_id: str,
+        text: str,
         call_sid: str,
         websocket: WebSocket
     ):
         """
-        Process audio from phone call using existing voice agent tools.
+        Helper method to convert text to speech and send through Media Stream.
         
-        Pipeline:
-        1. Convert Twilio audio (μ-law PCM) to WAV
-        2. Use SpeechToTextTool to transcribe
-        3. Use ConversationalResponseTool to generate response
-        4. Use TextToSpeechTool to generate audio
-        5. Convert audio back to Twilio format
-        6. Send back through Media Stream
+        Args:
+            text: Text to convert to speech
+            call_sid: Call identifier
+            websocket: WebSocket connection for Media Stream
         """
         try:
-            # Step 1: Convert Twilio audio to WAV format
-            wav_audio = twilio_to_wav(audio_data, sample_rate=8000)
-            
-            # Step 2: Speech-to-Text
-            stt_result = await self.speech_tool.transcribe(wav_audio, "wav")
-            
-            if not stt_result.get("success"):
-                logger.warning(f"STT failed for call {call_sid}: {stt_result.get('error')}")
+            if not text or not text.strip():
+                logger.warning(f"Empty text provided for TTS, call {call_sid}")
                 return
             
-            user_text = stt_result.get("text", "").strip()
-            
-            if not user_text:
-                logger.debug("Empty transcription, skipping")
-                return
-            
-            logger.info(f"Call {call_sid}: User said: {user_text[:100]}")
-            
-            # Step 3: Get conversation response
-            session_data = self.session_data.get(session_id, {})
-            conversation_result = await self.conversation_tool.generate_response(
-                session_data,
-                user_text,
-                persona=None
-            )
-            
-            # Update session data
-            self.session_data[session_id] = conversation_result.get("session_data", session_data)
-            
-            agent_text = conversation_result.get("response", "")
-            logger.info(f"Call {call_sid}: Agent responding: {agent_text[:100]}")
-            
-            # Step 4: Text-to-Speech
+            # Text-to-Speech
             tts_result = await self.tts_tool.synthesize(
-                agent_text,
+                text,
                 voice="alloy",  # Default voice
-                persona=None
+                persona=None,
+                parallel=False  # Disable parallel for phone calls (shorter responses)
             )
             
             if not tts_result.get("success"):
-                logger.error(f"TTS failed for call {call_sid}: {tts_result.get('error')}")
-                return
+                error_msg = tts_result.get('error', 'Unknown error')
+                logger.error(f"TTS failed for call {call_sid}: {error_msg}")
+                # Send a fallback message
+                fallback_text = "I'm sorry, I'm having trouble speaking right now. Please try again."
+                # Try one more time with fallback
+                fallback_tts = await self.tts_tool.synthesize(
+                    fallback_text,
+                    voice="alloy",
+                    persona=None,
+                    parallel=False
+                )
+                if not fallback_tts.get("success"):
+                    logger.error(f"Fallback TTS also failed for call {call_sid}")
+                    return
+                tts_result = fallback_tts
             
             # Get audio bytes
             audio_bytes = tts_result.get("audio_bytes")
@@ -341,13 +329,13 @@ class TwilioPhoneTool:
                 if audio_base64:
                     audio_bytes = base64.b64decode(audio_base64)
                 else:
-                    logger.error("No audio data in TTS result")
+                    logger.error(f"No audio data in TTS result for call {call_sid}")
                     return
             
-            # Step 5: Convert to Twilio format (μ-law PCM, 8000Hz)
+            # Convert to Twilio format (μ-law PCM, 8000Hz)
             twilio_audio = wav_to_twilio(audio_bytes, sample_rate=16000)
             
-            # Step 6: Send audio back through Media Stream
+            # Send audio back through Media Stream
             # Mark as speaking to prevent feedback loop
             self.is_speaking[call_sid] = True
             
@@ -368,7 +356,7 @@ class TwilioPhoneTool:
                 try:
                     await websocket.send_text(json.dumps(media_message))
                 except Exception as e:
-                    logger.error(f"Error sending audio chunk: {e}")
+                    logger.error(f"Error sending audio chunk for call {call_sid}: {e}")
                     break
             
             # Wait a short delay after sending audio before accepting input again
@@ -378,6 +366,82 @@ class TwilioPhoneTool:
             # Mark as done speaking
             self.is_speaking[call_sid] = False
             logger.debug(f"Call {call_sid}: Finished speaking, ready for user input")
+            
+        except Exception as e:
+            logger.error(f"Error in _send_audio_response for call {call_sid}: {e}")
+            # Reset speaking flag on error
+            self.is_speaking[call_sid] = False
+
+    async def _process_phone_audio(
+        self,
+        audio_data: bytes,
+        session_id: str,
+        call_sid: str,
+        websocket: WebSocket
+    ):
+        """
+        Process audio from phone call using existing voice agent tools.
+        
+        Pipeline:
+        1. Convert Twilio audio (μ-law PCM) to WAV
+        2. Use SpeechToTextTool to transcribe
+        3. Use ConversationalResponseTool to generate response
+        4. Use TextToSpeechTool to generate audio
+        5. Convert audio back to Twilio format
+        6. Send back through Media Stream
+        """
+        try:
+            # Step 1: Convert Twilio audio to WAV format
+            try:
+                wav_audio = twilio_to_wav(audio_data, sample_rate=8000)
+                logger.debug(f"Call {call_sid}: Converted {len(audio_data)} bytes to {len(wav_audio)} bytes WAV")
+            except Exception as e:
+                logger.error(f"Call {call_sid}: Audio conversion failed: {e}")
+                # Send helpful error message
+                await self._send_audio_response(
+                    "I'm sorry, there was an audio processing error. Please try speaking again.",
+                    call_sid,
+                    websocket
+                )
+                return
+            
+            # Step 2: Speech-to-Text
+            logger.debug(f"Call {call_sid}: Sending audio to STT ({len(wav_audio)} bytes)")
+            stt_result = await self.speech_tool.transcribe(wav_audio, "wav")
+            
+            if not stt_result.get("success"):
+                error_msg = stt_result.get('error', 'Unknown error')
+                logger.warning(f"STT failed for call {call_sid}: {error_msg}")
+                # Send a helpful response instead of just returning
+                fallback_text = "I'm sorry, I couldn't hear you clearly. Could you please speak a bit louder or repeat that?"
+                await self._send_audio_response(fallback_text, call_sid, websocket)
+                return
+            
+            user_text = stt_result.get("text", "").strip()
+            
+            if not user_text:
+                logger.debug("Empty transcription, skipping - likely silence or background noise")
+                # Don't respond to silence/noise - just return silently
+                return
+            
+            logger.info(f"Call {call_sid}: User said: {user_text[:100]}")
+            
+            # Step 3: Get conversation response
+            session_data = self.session_data.get(session_id, {})
+            conversation_result = await self.conversation_tool.generate_response(
+                session_data,
+                user_text,
+                persona=None
+            )
+            
+            # Update session data
+            self.session_data[session_id] = conversation_result.get("session_data", session_data)
+            
+            agent_text = conversation_result.get("response", "")
+            logger.info(f"Call {call_sid}: Agent responding: {agent_text[:100]}")
+            
+            # Step 4: Send audio response
+            await self._send_audio_response(agent_text, call_sid, websocket)
 
         except Exception as e:
             logger.error(f"Error processing phone audio for call {call_sid}: {e}")
