@@ -26,6 +26,11 @@ from tools import SpeechToTextTool, TextToSpeechTool, ConversationalResponseTool
 from realtime_websocket import realtime_agent
 from personas import get_persona_config, list_personas
 
+# Streaming specific imports
+from tools.phone.twilio_phone_stream import TwilioStreamHandler
+from twilio.twiml.voice_response import VoiceResponse as TwilioVoiceResponse
+
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -99,7 +104,14 @@ twilio_phone_tool = TwilioPhoneTool(
 # Startup event - no database initialization
 @app.on_event("startup")
 async def startup_event():
+    from config import TWILIO_PROCESSING_MODE, TWILIO_WEBHOOK_BASE_URL
     logger.info("Voice Agent API started (running without database - using in-memory sessions)")
+    logger.info("="*50)
+    logger.info(f"📞 Twilio Processing Mode: {TWILIO_PROCESSING_MODE.upper()}")
+    logger.info("Please configure your Twilio number's 'A CALL COMES IN' webhook to:")
+    logger.info(f"   URL: {TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/incoming")
+    logger.info(f"   Method: HTTP POST")
+    logger.info("="*50)
 
 # ============================================================================
 # GENERAL ENDPOINTS
@@ -542,7 +554,7 @@ async def process_voice_agent_input(
                 customer_id=customer_id,
                 persona=persona,
             ),
-            db
+            # db # This line was removed as per the new_code, as 'db' is not defined.
         )
         
         persona_config = get_persona_config(conversation_result.persona)
@@ -699,54 +711,58 @@ async def disconnect_websocket(session_id: str):
 
 @app.post(
     "/webhooks/twilio/incoming",
-    summary="Twilio Incoming Call Webhook",
-    description="Handle incoming phone calls from Twilio",
-    tags=["Twilio Phone Integration"]
+    summary="Twilio Incoming Call Webhook (Unified)",
+    description="Unified webhook for Twilio calls. Routes to batch or stream based on TWILIO_PROCESSING_MODE.",
+    tags=["Twilio Phone Integration"],
+    response_class=HTMLResponse
 )
 async def twilio_incoming_call(request: Request):
     """
-    Webhook endpoint for incoming Twilio phone calls.
-    
-    When a call comes in, Twilio sends a POST request to this endpoint.
-    The endpoint returns TwiML instructions to start a Media Stream,
-    which enables real-time bidirectional audio processing.
-    
-    **Configuration:**
-    1. Set up your Twilio phone number
-    2. Configure webhook URL in Twilio Console:
-       - Voice & Fax → Phone Numbers → [Your Number] → Configure
-       - Set "A CALL COMES IN" webhook to: `https://your-domain.com/webhooks/twilio/incoming`
-    
-    **Example Twilio Console Setup:**
-    ```
-    Webhook URL: https://your-domain.com/webhooks/twilio/incoming
-    HTTP Method: POST
-    ```
-    
-    **For Local Development:**
-    Use ngrok to expose your local server:
-    ```bash
-    ngrok http 4002
-    # Then use: https://your-ngrok-url.ngrok.io/webhooks/twilio/incoming
-    ```
+    This single webhook handles all incoming calls. It reads the `TWILIO_PROCESSING_MODE`
+    environment variable to decide whether to start a real-time media stream or use
+    the reliable batch recording method.
     """
     try:
-        # Get form data from Twilio webhook
+        from config import TWILIO_PROCESSING_MODE, TWILIO_WEBHOOK_BASE_URL
+        
         form_data = await request.form()
         call_data = dict(form_data)
+        call_sid = call_data.get("CallSid")
+        logger.info(f"Received incoming call webhook for CallSid: {call_sid}")
+        logger.info(f"Processing mode set to: {TWILIO_PROCESSING_MODE}")
+
+        response = TwilioVoiceResponse()
+
+        if TWILIO_PROCESSING_MODE == "stream":
+            # --- Streaming Logic ---
+            connect = response.connect()
+            base_url = TWILIO_WEBHOOK_BASE_URL.split('//')[-1]
+            stream_url = f"wss://{base_url}/webhooks/twilio/stream"
+            
+            logger.info(f"🚀 Mode: STREAM. Initiating media stream to: {stream_url}")
+            stream = connect.stream(url=stream_url)
+            
+            # Pass call metadata to the stream handler
+            stream.parameter(name="From", value=call_data.get("From"))
+            stream.parameter(name="To", value=call_data.get("To"))
+
+            response.pause(length=120) # Keep call active while stream runs
         
-        logger.info(f"Received incoming call webhook: {call_data.get('CallSid')}")
-        
-        # Process the call and get TwiML response
-        twiml = await twilio_phone_tool.handle_incoming_call(call_data)
-        
-        # Return TwiML response
-        from fastapi.responses import Response
-        return Response(content=twiml, media_type="application/xml")
+        else:
+            # --- Batch (Recording) Logic ---
+            logger.info(f"📞 Mode: BATCH. Using <Record> for processing.")
+            twiml_str = await twilio_phone_tool.handle_incoming_call(call_data)
+            return HTMLResponse(content=twiml_str)
+
+        return HTMLResponse(content=str(response))
         
     except Exception as e:
-        logger.error(f"Error handling incoming call webhook: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error handling incoming call webhook: {e}", exc_info=True)
+        error_response = TwilioVoiceResponse()
+        error_response.say("Sorry, a critical application error occurred. Goodbye.")
+        error_response.hangup()
+        return HTMLResponse(content=str(error_response))
+
 
 @app.post(
     "/webhooks/twilio/status",
@@ -997,56 +1013,249 @@ async def twilio_recording_handler(request: Request):
                 content='<?xml version="1.0" encoding="UTF-8"?><Response><Say>An error occurred.</Say><Hangup/></Response>'
             )
 
+# ============================================================================
+# TWILIO PHONE INTEGRATION (REAL-TIME STREAMING)
+# ============================================================================
+
 @app.websocket("/webhooks/twilio/stream")
-async def twilio_media_stream(websocket: WebSocket):
+async def twilio_stream_websocket_handler(websocket: WebSocket):
     """
-    WebSocket endpoint for Twilio Media Stream.
-    
-    This endpoint handles real-time bidirectional audio streaming:
-    - Receives audio from the phone call (μ-law PCM format)
-    - Processes audio through your AI tools:
-      * Speech-to-Text (OpenAI Whisper)
-      * Conversation AI (GPT)
-      * Text-to-Speech (OpenAI TTS)
-    - Sends audio back to the phone call
-    
-    **How it works:**
-    1. Twilio connects to this WebSocket when Media Stream starts
-    2. Audio flows bidirectionally in real-time
-    3. Your AI processes the conversation automatically
-    
-    **Message Format:**
-    - Incoming: JSON events + base64-encoded audio payloads
-    - Outgoing: JSON events + base64-encoded audio payloads
-    
-    **Note:** This endpoint is called automatically by Twilio when
-    a Media Stream is started via the TwiML response from
-    `/webhooks/twilio/incoming`. The CallSid is extracted from
-    the Media Stream messages.
+    Handles the real-time audio WebSocket stream from Twilio Media Streams.
+    """
+    await websocket.accept()
+    # Pass the globally initialized tools to the stream handler instance
+    stream_handler = TwilioStreamHandler(
+        websocket=websocket,
+        speech_tool=speech_tool,
+        tts_tool=tts_tool,
+        conversation_tool=conversation_tool
+    )
+    try:
+        await stream_handler.handle_stream()
+    except WebSocketDisconnect:
+        logger.info("Twilio stream WebSocket disconnected.")
+    except Exception as e:
+        logger.error(f"Unhandled error in Twilio stream handler: {e}", exc_info=True)
+    finally:
+        logger.info("Closing stream handler and WebSocket connection.")
+
+
+# ============================================================================
+# TWILIO PHONE INTEGRATION (BATCH PROCESSING)
+# ============================================================================
+
+@app.post(
+    "/webhooks/twilio/recording",
+    summary="Twilio Recording Handler",
+    description="Handles recorded audio from caller",
+    tags=["Twilio Phone Integration"],
+    response_class=HTMLResponse
+)
+async def twilio_recording_handler(request: Request):
+    """
+    Handle recorded audio from the caller.
+    Process the recording: STT -> Conversation -> TTS -> Play back
     """
     try:
-        logger.info("Media Stream WebSocket connection received")
+        from twilio.twiml.voice_response import VoiceResponse
+        import urllib.request
         
-        # Try to get CallSid from query params (some Twilio setups pass it)
-        query_params = dict(websocket.query_params)
-        call_sid = query_params.get("CallSid") or query_params.get("call_sid")
+        logger.info(f"[RECORDING] Handler called - START")
         
-        if not call_sid:
-            # CallSid will be extracted from Media Stream messages by the tool
-            logger.debug("No CallSid in query params, will extract from stream messages")
-            call_sid = None
+        form_data = await request.form()
+        call_sid = form_data.get("CallSid")
+        recording_url = form_data.get("RecordingUrl")
         
-        # Handle the Media Stream (tool will accept websocket and extract CallSid if needed)
-        await twilio_phone_tool.handle_media_stream(websocket, call_sid)
+        logger.info(f"[RECORDING] Received recording for call {call_sid}")
+        logger.info(f"[RECORDING] Recording URL: {recording_url}")
+        logger.info(f"[RECORDING] Form data keys: {list(form_data.keys())}")
         
-    except WebSocketDisconnect:
-        logger.info("Media Stream WebSocket disconnected")
+        response = VoiceResponse()
+        
+        if recording_url:
+            # Download and process the recording
+            try:
+                # Minimal wait for Twilio to process the recording
+                # Reduced from 1s to 500ms for faster latency
+                logger.info(f"[RECORDING] Waiting 500ms for Twilio to process recording...")
+                await asyncio.sleep(0.5)
+                
+                logger.info(f"[RECORDING] Downloading recording from {recording_url}")
+                
+                # Download the recording with Twilio authentication
+                import base64
+                from config import TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
+                
+                # Try downloading with .wav extension first
+                recording_url_wav = recording_url + ".wav"
+                
+                # Create basic auth header
+                auth_string = f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}"
+                auth_bytes = auth_string.encode("utf-8")
+                auth_b64 = base64.b64encode(auth_bytes).decode("utf-8")
+                
+                # Try downloading
+                audio_data = None
+                for url_to_try in [recording_url_wav, recording_url]:
+                    try:
+                        logger.info(f"[RECORDING] Attempting to download from: {url_to_try}")
+                        req = urllib.request.Request(url_to_try)
+                        req.add_header("Authorization", f"Basic {auth_b64}")
+                        
+                        http_response = urllib.request.urlopen(req)
+                        audio_data = http_response.read()
+                        logger.info(f"[RECORDING] Successfully downloaded {len(audio_data)} bytes from {url_to_try}")
+                        break
+                    except Exception as e:
+                        logger.warning(f"[RECORDING] Failed to download from {url_to_try}: {str(e)}")
+                        continue
+                
+                if not audio_data:
+                    logger.error(f"[RECORDING] Could not download recording from any URL")
+                    response.say("I'm sorry, there was an issue retrieving your recording.", voice="alice")
+                    return HTMLResponse(content=str(response))
+                
+                # Use audio directly without conversion - Twilio sends WAV, Whisper accepts WAV
+                # Skip format conversion to reduce latency
+                logger.info(f"[RECORDING] Skipping format conversion - using WAV directly from Twilio")
+                stt_result = await speech_tool.transcribe(audio_data, "wav")
+                
+                if stt_result.get("success"):
+                    user_text = stt_result.get("text", "").strip()
+                    logger.info(f"[RECORDING] STT Result: {user_text}")
+                    
+                    # Check if this is an interrupt (user spoke during gather phase)
+                    call_status = form_data.get("CallStatus", "")
+                    if call_status == "in-progress":
+                        # Check if we received audio during gather (potential interrupt)
+                        recording_duration = form_data.get("RecordingDuration", "0")
+                        if recording_duration and int(recording_duration) > 0:
+                            logger.info(f"[RECORDING] INTERRUPT DETECTED: User spoke during AI response (duration: {recording_duration}s)")
+                            logger.info(f"[RECORDING] Stopping AI response and processing new input: {user_text}")
+                    
+                    if user_text:
+                        # Get AI response
+                        session_id = twilio_phone_tool.active_calls.get(call_sid)
+                        if session_id:
+                            session_data = twilio_phone_tool.session_data.get(session_id, {})
+                            ai_response = await conversation_tool.generate_response(
+                                session_data, user_text, None
+                            )
+                            response_text = ai_response.get("response", "I'm sorry, I didn't understand that.")
+                        else:
+                            response_text = "I'm sorry, I couldn't process your request."
+                        
+                        logger.info(f"[RECORDING] AI Response: {response_text}")
+                        
+                        # Convert response to speech
+                        tts_result = await tts_tool.synthesize(response_text, voice="alloy", parallel=False)
+                        
+                        if tts_result.get("success"):
+                            # Use Say command for reliable audio playback on Twilio
+                            # Twilio's native Say is more reliable than Play with data URLs
+                            logger.info(f"[RECORDING] TTS succeeded, using Say for playback")
+                            logger.info(f"[RECORDING] Response text: {response_text[:100]}...")
+                            
+                            # Use Twilio's Say command for better reliability
+                            try:
+                                response.say(response_text, voice="alice")
+                                logger.info(f"[RECORDING] Successfully queued response via Say command")
+                                
+                                # Add interrupt handling: Gather to detect if user starts speaking
+                                # This allows the user to interrupt the AI response
+                                logger.info(f"[RECORDING] Setting up interrupt detection during response")
+                                from config import TWILIO_WEBHOOK_BASE_URL as WEBHOOK_BASE_INTERRUPT
+                                response.gather(
+                                    action=f"{WEBHOOK_BASE_INTERRUPT}/webhooks/twilio/recording?CallSid={call_sid}",
+                                    method="POST",
+                                    num_digits=0,  # No digits needed, just voice
+                                    timeout=0.5,   # Very short timeout to detect interrupts
+                                    speech_timeout="auto"  # Auto-detect when user speaks
+                                )
+                                logger.info(f"[RECORDING] Interrupt detection added - ready to listen")
+                                
+                            except Exception as e:
+                                logger.error(f"[RECORDING] Error with say command: {str(e)}", exc_info=True)
+                                response.say("I have a response for you.", voice="alice")
+                        else:
+                            logger.error(f"[RECORDING] TTS failed: {tts_result.get('error')}")
+                            response.say("I'm sorry, I had trouble generating a response.", voice="alice")
+                    else:
+                        response.say("I didn't hear any speech. Please try again.", voice="alice")
+                else:
+                    response.say("I couldn't understand the recording. Please try again.", voice="alice")
+                
+                # Set up continuous recording loop for next turn
+                # After AI response plays, immediately record user's next message
+                from config import TWILIO_WEBHOOK_BASE_URL as WEBHOOK_BASE
+                record_url = f"{WEBHOOK_BASE}/webhooks/twilio/recording?CallSid={call_sid}"
+                logger.info(f"[RECORDING] Setting up CONTINUOUS recording loop with URL: {record_url}")
+                
+                # Record next user message - this creates the conversation loop
+                response.record(
+                    action=record_url,  # Callback to this same handler
+                    method="POST",
+                    max_speech_time=30,  # Allow up to 30 seconds for response
+                    speech_timeout="auto",  # Auto-detect end of speech
+                    play_beep=False  # No beep to keep conversation natural
+                )
+                logger.info(f"[RECORDING] Added continuous record() to response for conversation loop")
+                
+            except Exception as e:
+                logger.error(f"[RECORDING] Error processing recording: {str(e)}", exc_info=True)
+                logger.error(f"[RECORDING] Error type: {type(e).__name__}")
+                response.say("I'm sorry, there was an error processing your message.", voice="alice")
+                
+                # IMPORTANT: Keep conversation loop active even on error
+                # User should be able to continue the conversation
+                from config import TWILIO_WEBHOOK_BASE_URL as WEBHOOK_BASE
+                record_url = f"{WEBHOOK_BASE}/webhooks/twilio/recording?CallSid={call_sid}"
+                response.record(
+                    action=record_url,
+                    method="POST",
+                    max_speech_time=30,
+                    speech_timeout="auto",
+                    play_beep=False
+                )
+                logger.info(f"[RECORDING] Error recovery: Added record() to continue conversation")
+        else:
+            logger.warning(f"[RECORDING] No recording URL provided")
+            response.say("No recording found. Please try again.", voice="alice")
+            
+            # Even with no recording, keep recording loop active
+            from config import TWILIO_WEBHOOK_BASE_URL as WEBHOOK_BASE
+            record_url = f"{WEBHOOK_BASE}/webhooks/twilio/recording?CallSid={call_sid}"
+            response.record(
+                action=record_url,
+                method="POST",
+                max_speech_time=30,
+                speech_timeout="auto",
+                play_beep=False
+            )
+        
+        logger.info(f"[RECORDING] Creating TwiML response: {str(response)[:200]}...")
+        twiml_response = str(response)
+        logger.info(f"[RECORDING] TwiML Response length: {len(twiml_response)} bytes")
+        logger.info(f"[RECORDING] Returning response to Twilio - END (conversation continues)")
+        return HTMLResponse(content=twiml_response)
+        
     except Exception as e:
-        logger.error(f"Error in Media Stream WebSocket: {str(e)}")
+        logger.error(f"[RECORDING] CRITICAL ERROR in recording handler: {str(e)}", exc_info=True)
+        import traceback
+        logger.error(f"[RECORDING] Full traceback:\n{traceback.format_exc()}")
         try:
-            await websocket.close()
-        except:
-            pass
+            from twilio.twiml.voice_response import VoiceResponse
+            error_response = VoiceResponse()
+            error_response.say("Sorry, an error occurred. Goodbye.")
+            error_response.hangup()
+            logger.info(f"[RECORDING] Returning error TwiML response")
+            return HTMLResponse(content=str(error_response))
+        except Exception as inner_e:
+            logger.error(f"[RECORDING] Error creating error response: {str(inner_e)}")
+            # Fallback response
+            return HTMLResponse(
+                content='<?xml version="1.0" encoding="UTF-8"?><Response><Say>An error occurred.</Say><Hangup/></Response>'
+            )
 
 @app.get(
     "/dashboard",
@@ -1072,7 +1281,7 @@ async def dashboard():
     response_class=HTMLResponse
 )
 async def twilio_dashboard():
-    """Serve the Twilio phone dashboard UI (legacy endpoint)."""
+    """Serve the Twilio phone dashboard UI (legacy endpoint - redirects to /chat)."""
     import os
     dashboard_path = os.path.join(os.path.dirname(__file__), "ui", "twilio_phone_ui.html")
     if os.path.exists(dashboard_path):

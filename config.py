@@ -77,3 +77,6 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 TWILIO_WEBHOOK_BASE_URL = os.getenv("TWILIO_WEBHOOK_BASE_URL", f"http://{API_HOST}:{API_PORT}")
+
+# Determines how to process calls: "batch" for <Record>, "stream" for Media Streams.
+TWILIO_PROCESSING_MODE = os.getenv("TWILIO_PROCESSING_MODE", "batch").lower()
