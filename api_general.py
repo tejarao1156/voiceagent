@@ -101,6 +101,9 @@ twilio_phone_tool = TwilioPhoneTool(
     conversation_tool=conversation_tool
 )
 
+# Registry to track active stream handlers for hangup functionality
+active_stream_handlers: Dict[str, "TwilioStreamHandler"] = {}
+
 # Startup event - no database initialization
 @app.on_event("startup")
 async def startup_event():
@@ -791,10 +794,23 @@ async def twilio_call_status(request: Request):
         form_data = await request.form()
         status_data = dict(form_data)
         
-        # Process status update
+        call_sid = status_data.get("CallSid")
+        status = status_data.get("CallStatus", "unknown")
+        
+        logger.info(f"📞 Call status update: {call_sid} -> {status}")
+        
+        # Clean up stream handlers if call is ending
+        if status in ["completed", "failed", "busy", "no-answer", "canceled"]:
+            if call_sid and call_sid in active_stream_handlers:
+                handler = active_stream_handlers[call_sid]
+                logger.info(f"🧹 Cleaning up stream handler for completed call {call_sid}")
+                # Remove from registry (handler will clean up its own resources)
+                del active_stream_handlers[call_sid]
+        
+        # Process status update for batch mode
         await twilio_phone_tool.handle_call_status(status_data)
         
-        return {"status": "ok", "message": "Status update processed"}
+        return {"status": "ok", "message": "Status update processed", "call_sid": call_sid, "call_status": status}
         
     except Exception as e:
         logger.error(f"Error handling status webhook: {str(e)}")
@@ -1030,14 +1046,25 @@ async def twilio_stream_websocket_handler(websocket: WebSocket):
         tts_tool=tts_tool,
         conversation_tool=conversation_tool
     )
+    call_sid = None
     try:
+        # Register handler after start event (will be set in _handle_start_event)
+        # The handler registers itself in _handle_start_event
         await stream_handler.handle_stream()
+        # Get call_sid from handler (set during start event)
+        call_sid = stream_handler.call_sid
     except WebSocketDisconnect:
         logger.info("Twilio stream WebSocket disconnected.")
+        call_sid = stream_handler.call_sid if hasattr(stream_handler, 'call_sid') else None
     except Exception as e:
         logger.error(f"Unhandled error in Twilio stream handler: {e}", exc_info=True)
+        call_sid = stream_handler.call_sid if hasattr(stream_handler, 'call_sid') else None
     finally:
         logger.info("Closing stream handler and WebSocket connection.")
+        # Clean up handler from registry (if not already cleaned up by stop event)
+        if call_sid and call_sid in active_stream_handlers:
+            logger.info(f"🧹 Final cleanup: Removing stream handler for call {call_sid}")
+            del active_stream_handlers[call_sid]
 
 
 # ============================================================================
@@ -1331,15 +1358,93 @@ async def get_twilio_status():
     """Get current status of Twilio integration."""
     from config import TWILIO_ACCOUNT_SID, TWILIO_PHONE_NUMBER, TWILIO_WEBHOOK_BASE_URL
     
+    # Combine active calls from both batch and stream modes
+    stream_call_sids = list(active_stream_handlers.keys())
+    batch_call_sids = list(twilio_phone_tool.active_calls.keys())
+    all_active_calls = list(set(stream_call_sids + batch_call_sids))
+    
     return {
         "configured": bool(TWILIO_ACCOUNT_SID and TWILIO_PHONE_NUMBER),
         "phone_number": TWILIO_PHONE_NUMBER,
         "account_sid": TWILIO_ACCOUNT_SID[:10] + "..." if TWILIO_ACCOUNT_SID else None,
         "webhook_base_url": TWILIO_WEBHOOK_BASE_URL,
-        "active_calls": len(twilio_phone_tool.active_calls),
-        "active_call_sids": list(twilio_phone_tool.active_calls.keys()),
+        "active_calls": len(all_active_calls),
+        "active_call_sids": all_active_calls,
+        "stream_mode_calls": len(stream_call_sids),
+        "batch_mode_calls": len(batch_call_sids),
         "server_status": "online"
     }
+
+@app.post(
+    "/twilio/hangup/{call_sid}",
+    summary="Hang Up Twilio Call",
+    description="Programmatically hang up an active Twilio call by CallSid",
+    tags=["Twilio Phone Integration"]
+)
+async def hangup_twilio_call(call_sid: str, reason: str = Query("Call ended by system", description="Reason for hanging up")):
+    """
+    Hang up an active Twilio call.
+    
+    This endpoint can hang up calls in both streaming and batch modes.
+    
+    **Example usage:**
+    ```bash
+    curl -X POST "http://localhost:4002/twilio/hangup/CA1234567890abcdef?reason=User%20requested%20end"
+    ```
+    """
+    try:
+        from config import TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
+        
+        # Try to hang up via stream handler first (for streaming mode)
+        if call_sid in active_stream_handlers:
+            handler = active_stream_handlers[call_sid]
+            success = await handler.hangup_call(reason=reason)
+            if success:
+                return {
+                    "status": "success",
+                    "message": f"Call {call_sid} hung up successfully",
+                    "method": "stream_handler",
+                    "reason": reason
+                }
+        
+        # Fallback: Use Twilio REST API to update call status
+        if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+            try:
+                from twilio.rest import Client
+                client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+                
+                # Update call status to completed (this will hang up the call)
+                call = client.calls(call_sid).update(status="completed")
+                logger.info(f"✅ Call {call_sid} hung up via REST API: {reason}")
+                
+                # Clean up from batch mode if exists
+                if call_sid in twilio_phone_tool.active_calls:
+                    twilio_phone_tool._cleanup_call(call_sid)
+                
+                return {
+                    "status": "success",
+                    "message": f"Call {call_sid} hung up successfully",
+                    "method": "rest_api",
+                    "reason": reason,
+                    "call_status": call.status
+                }
+            except Exception as e:
+                logger.error(f"Error hanging up call {call_sid} via REST API: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to hang up call via REST API: {str(e)}"
+                )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Twilio credentials not configured. Cannot hang up call via REST API."
+            )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error hanging up call {call_sid}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to hang up call: {str(e)}")
 
 # ============================================================================
 # ERROR HANDLERS
