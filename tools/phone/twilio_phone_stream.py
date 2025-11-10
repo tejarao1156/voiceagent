@@ -42,8 +42,10 @@ class TwilioStreamHandler:
         self.session_data: Dict[str, Any] = {}
         self.silence_frames_count = 0
         self.speech_frames_count = 0
+        self.interrupt_speech_frames = 0  # Track how many frames of speech during interrupt (to validate real interrupt)
         self.SILENCE_THRESHOLD_FRAMES = 25  # 25 frames * 20ms/frame = 500ms of silence to trigger processing
-        self.INTERRUPT_GRACE_PERIOD_MS = 800  # Wait 800ms after AI starts speaking before allowing interrupts (prevents feedback loop)
+        self.INTERRUPT_GRACE_PERIOD_MS = 1200  # Wait 1200ms after AI starts speaking before allowing interrupts (prevents feedback loop)
+        self.MIN_INTERRUPT_FRAMES = 10  # Require at least 10 frames (200ms) of sustained speech for valid interrupt
 
     async def handle_stream(self):
         """Main loop to receive and process audio from the Twilio media stream."""
@@ -67,9 +69,15 @@ class TwilioStreamHandler:
                 logger.info(f"Received mark event: {mark_name}")
                 # When AI finishes speaking, re-enable user audio processing
                 if mark_name == "end_of_ai_speech":
+                    was_interrupted = self.interrupt_detected
                     self.ai_is_speaking = False
                     self.ai_speech_start_time = None
+                    self.interrupt_speech_frames = 0  # Reset interrupt tracking
                     logger.info("✅ AI finished speaking, listening for user now.")
+                    # If there's waiting interrupt speech, process it now
+                    if was_interrupted and self.is_speaking and self.speech_buffer:
+                        logger.info("🔄 AI stopped, processing waiting interrupt speech...")
+                        asyncio.create_task(self._process_waiting_interrupt())
 
     def _handle_start_event(self, start_data: Dict):
         """Handles the 'start' event from Twilio stream."""
@@ -97,46 +105,84 @@ class TwilioStreamHandler:
 
         is_speech = self.vad.is_speech(payload, VAD_SAMPLE_RATE)
         
-        # INTERRUPT DETECTION: If AI is speaking and user starts talking, interrupt!
-        # BUT: Only allow interrupts after grace period to prevent AI feedback loop
-        if is_speech and self.ai_is_speaking and not self.interrupt_detected:
-            # Check if grace period has passed (prevents AI from hearing its own voice)
-            if self.ai_speech_start_time:
-                elapsed_ms = (time.time() - self.ai_speech_start_time) * 1000
-                if elapsed_ms < self.INTERRUPT_GRACE_PERIOD_MS:
-                    # Still in grace period - ignore this speech (likely AI feedback)
-                    return
-            
-            # Grace period passed - this is a real user interrupt!
-            logger.info("🚨 INTERRUPT DETECTED: User is speaking while AI is talking!")
-            self.interrupt_detected = True
-            # Stop TTS streaming immediately
-            if self.tts_streaming_task and not self.tts_streaming_task.done():
-                self.tts_streaming_task.cancel()
-                logger.info("🛑 Cancelled TTS streaming task due to interrupt.")
-            # Clear AI speaking flag to allow processing interrupt
-            self.ai_is_speaking = False
-            self.ai_speech_start_time = None
-            # Clear any existing speech buffer to start fresh
-            self.speech_buffer = bytearray()
-            self.speech_frames_count = 0
-            self.silence_frames_count = 0
-        
-        # If AI is speaking and no interrupt, ignore audio (prevent feedback loop)
+        # CRITICAL: If AI is speaking, block ALL audio processing to prevent feedback loop
+        # Exception: If interrupt is detected, allow capturing interrupt speech (but don't process until TTS stops)
         if self.ai_is_speaking and not self.interrupt_detected:
-            return
+            # Check if this could be an interrupt (user speaking while AI is talking)
+            if is_speech:
+                # Check if grace period has passed (prevents AI from hearing its own voice)
+                if self.ai_speech_start_time:
+                    elapsed_ms = (time.time() - self.ai_speech_start_time) * 1000
+                    if elapsed_ms < self.INTERRUPT_GRACE_PERIOD_MS:
+                        # Still in grace period - completely ignore (definitely AI feedback)
+                        return
+                
+                # Grace period passed - potential interrupt, start tracking
+                if self.interrupt_speech_frames == 0:
+                    logger.info("🔍 Potential interrupt detected, validating...")
+                
+                self.interrupt_speech_frames += 1
+                
+                # Only treat as real interrupt if speech is sustained (filters out brief AI feedback)
+                if self.interrupt_speech_frames >= self.MIN_INTERRUPT_FRAMES:
+                    # Validated interrupt - user is really speaking!
+                    logger.info(f"🚨 INTERRUPT VALIDATED: {self.interrupt_speech_frames} frames of sustained speech!")
+                    self.interrupt_detected = True
+                    # Stop TTS streaming immediately
+                    if self.tts_streaming_task and not self.tts_streaming_task.done():
+                        self.tts_streaming_task.cancel()
+                        logger.info("🛑 Cancelled TTS streaming task due to interrupt.")
+                    
+                    # IMPORTANT: Keep ai_is_speaking = True for now to block audio processing
+                    # The TTS function will set it to False when it actually stops
+                    # This ensures we don't process the interrupt until TTS has fully stopped
+                    self.ai_speech_start_time = None
+                    # Clear any existing speech buffer to start fresh
+                    self.speech_buffer = bytearray()
+                    self.speech_frames_count = 0
+                    self.silence_frames_count = 0
+                    # IMPORTANT: Start capturing the interrupt speech from this point
+                    # Note: We discard the validation frames (they were just to confirm it's a real interrupt)
+                    # We'll capture the full interrupt speech from now on
+                    self.speech_buffer.extend(payload)
+                    self.speech_frames_count = 1  # Start fresh count from validated interrupt
+                    self.is_speaking = True
+                    self.interrupt_speech_frames = 0  # Reset for next time
+                    logger.info("🎤 Started capturing interrupt speech (waiting for TTS to stop)...")
+                    return  # Don't process further in this frame, we've handled the interrupt
+                else:
+                    # Not enough frames yet - keep tracking but don't process
+                    return
+            else:
+                # No speech detected - reset interrupt tracking
+                self.interrupt_speech_frames = 0
+                return  # Still block all audio while AI is speaking
+        
+        # Reset interrupt tracking if we're not in interrupt detection mode
+        if not self.ai_is_speaking:
+            self.interrupt_speech_frames = 0
         
         # Normal speech detection and processing
+        # If interrupt is detected, allow capturing even if AI is still speaking (TTS is stopping)
         if is_speech:
             self.speech_buffer.extend(payload)
             self.speech_frames_count += 1
             self.silence_frames_count = 0
             if not self.is_speaking:
-                logger.info("Speech detected.")
+                if self.interrupt_detected:
+                    logger.info("🎤 Capturing interrupt speech (AI stopping)...")
+                else:
+                    logger.info("Speech detected.")
                 self.is_speaking = True
         elif self.is_speaking:  # Silence after speech
             self.silence_frames_count += 1
             if self.silence_frames_count >= self.SILENCE_THRESHOLD_FRAMES:
+                # Only process if AI has stopped speaking (or if it's not an interrupt)
+                if self.interrupt_detected and self.ai_is_speaking:
+                    # Interrupt detected but TTS hasn't stopped yet - wait
+                    logger.info("⏳ Interrupt speech captured, waiting for AI to stop...")
+                    return
+                
                 logger.info("Silence threshold reached after speech, processing utterance.")
                 self.is_speaking = False
                 self.silence_frames_count = 0
@@ -145,6 +191,24 @@ class TwilioStreamHandler:
                 self.interrupt_detected = False
                 asyncio.create_task(self._process_user_speech(was_interrupt=was_interrupt))
 
+    async def _process_waiting_interrupt(self):
+        """Process interrupt speech that was captured while waiting for TTS to stop."""
+        # Wait a tiny bit to ensure TTS has fully stopped
+        await asyncio.sleep(0.1)
+        
+        if not self.speech_buffer or self.speech_frames_count < 5:
+            logger.info("⏭️ Interrupt speech too short, ignoring.")
+            self.speech_buffer = bytearray()
+            self.speech_frames_count = 0
+            self.is_speaking = False
+            self.interrupt_detected = False
+            return
+        
+        logger.info(f"🔄 Processing waiting interrupt: {len(self.speech_buffer)} bytes")
+        was_interrupt = self.interrupt_detected
+        self.interrupt_detected = False
+        await self._process_user_speech(was_interrupt=True)
+    
     async def _process_user_speech(self, was_interrupt: bool = False):
         """Transcribes the buffered speech, gets an AI response, and streams TTS back."""
         if not self.speech_buffer or self.speech_frames_count < 5: # Ignore very short utterances
@@ -159,7 +223,8 @@ class TwilioStreamHandler:
         self.speech_frames_count = 0
         
         if was_interrupt:
-            logger.info(f"🔄 Processing INTERRUPT speech: {len(audio_to_process)} bytes")
+            logger.info(f"🔄 Processing INTERRUPT: {len(audio_to_process)} bytes captured")
+            logger.info("🛑 AI stopped. 👂 Listening to interrupt...")
         else:
             logger.info(f"Processing {len(audio_to_process)} bytes of speech.")
 
@@ -179,7 +244,11 @@ class TwilioStreamHandler:
             
             ai_response = await self.conversation_tool.generate_response(self.session_data, user_text, None)
             response_text = ai_response.get("response", "I'm sorry, I'm having trouble with that.")
-            logger.info(f"AI response: '{response_text[:70]}...'")
+            
+            if was_interrupt:
+                logger.info(f"💬 AI responding to interrupt: '{response_text[:70]}...'")
+            else:
+                logger.info(f"AI response: '{response_text[:70]}...'")
             
             # Store TTS task so it can be cancelled if interrupted
             self.tts_streaming_task = asyncio.create_task(self._synthesize_and_stream_tts(response_text))
@@ -230,10 +299,22 @@ class TwilioStreamHandler:
                     return
                 
                 if tts_result.get("success"):
+                    # CRITICAL: Check for interrupt BEFORE sending audio chunk
+                    if self.interrupt_detected:
+                        logger.info("🛑 Interrupt detected before sending audio chunk, stopping immediately.")
+                        self.ai_is_speaking = False
+                        return
+                    
                     pcm_bytes = tts_result["audio_bytes"]
                     # Fast conversion: PCM -> mu-law using only Python audioop (no ffmpeg)
                     mulaw_bytes = convert_pcm_to_mulaw(pcm_bytes, input_rate=24000, input_width=2)
                     if mulaw_bytes:
+                        # Check AGAIN right before sending (interrupt might have happened during conversion)
+                        if self.interrupt_detected:
+                            logger.info("🛑 Interrupt detected right before sending, aborting audio chunk.")
+                            self.ai_is_speaking = False
+                            return
+                        
                         payload = base64.b64encode(mulaw_bytes).decode('utf-8')
                         await self.websocket.send_json({
                             "event": "media",
@@ -256,17 +337,28 @@ class TwilioStreamHandler:
                 # If interrupted, manually clear the flag
                 self.ai_is_speaking = False
                 self.ai_speech_start_time = None
+                self.interrupt_speech_frames = 0
                 logger.info("✅ TTS stream interrupted, ready for user input.")
+                # Trigger processing of waiting interrupt speech
+                if self.is_speaking and self.speech_buffer:
+                    logger.info("🔄 TTS stopped, processing waiting interrupt speech...")
+                    asyncio.create_task(self._process_waiting_interrupt())
         except asyncio.CancelledError:
             logger.info("🛑 TTS streaming task was cancelled (interrupt).")
             self.ai_is_speaking = False
             self.ai_speech_start_time = None
+            self.interrupt_speech_frames = 0
+            # Trigger processing of waiting interrupt speech
+            if self.is_speaking and self.speech_buffer:
+                logger.info("🔄 TTS cancelled, processing waiting interrupt speech...")
+                asyncio.create_task(self._process_waiting_interrupt())
             raise
         except Exception as e:
             logger.error(f"Error in TTS streaming: {e}", exc_info=True)
             # Make sure to re-enable listening even if TTS fails
             self.ai_is_speaking = False
             self.ai_speech_start_time = None
+            self.interrupt_speech_frames = 0
             logger.info("✅ AI speech error, re-enabling user audio.")
     
     async def _synthesize_pcm(self, text: str) -> Dict[str, Any]:
