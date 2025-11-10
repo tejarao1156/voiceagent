@@ -46,6 +46,9 @@ class TwilioStreamHandler:
         self.SILENCE_THRESHOLD_FRAMES = 25  # 25 frames * 20ms/frame = 500ms of silence to trigger processing
         self.INTERRUPT_GRACE_PERIOD_MS = 1200  # Wait 1200ms after AI starts speaking before allowing interrupts (prevents feedback loop)
         self.MIN_INTERRUPT_FRAMES = 10  # Require at least 10 frames (200ms) of sustained speech for valid interrupt
+        self.speech_processing_lock = asyncio.Lock()  # Prevent concurrent speech processing
+        self.speech_processing_task = None  # Track active speech processing task for cancellation
+        self.query_sequence = 0  # Track query sequence to ensure we process the most recent
 
     async def handle_stream(self):
         """Main loop to receive and process audio from the Twilio media stream."""
@@ -77,7 +80,12 @@ class TwilioStreamHandler:
                     # If there's waiting interrupt speech, process it now
                     if was_interrupted and self.is_speaking and self.speech_buffer:
                         logger.info("🔄 AI stopped, processing waiting interrupt speech...")
-                        asyncio.create_task(self._process_waiting_interrupt())
+                        # Increment query sequence and cancel any existing speech processing task
+                        self.query_sequence += 1
+                        if self.speech_processing_task and not self.speech_processing_task.done():
+                            logger.info("🛑 Cancelling previous speech processing task (interrupt received)")
+                            self.speech_processing_task.cancel()
+                        self.speech_processing_task = asyncio.create_task(self._process_waiting_interrupt())
 
     def _handle_start_event(self, start_data: Dict):
         """Handles the 'start' event from Twilio stream."""
@@ -93,6 +101,16 @@ class TwilioStreamHandler:
         session_info = self.conversation_tool.create_session(customer_id=f"phone_{from_number}")
         self.session_id = session_info.get("session_id")
         self.session_data = session_info
+        
+        # Register this handler in the global registry for hangup functionality
+        # Import here to avoid circular dependency
+        try:
+            import api_general
+            if hasattr(api_general, 'active_stream_handlers'):
+                api_general.active_stream_handlers[self.call_sid] = self
+                logger.info(f"✅ Registered stream handler for call {self.call_sid}")
+        except Exception as e:
+            logger.warning(f"Could not register stream handler in global registry: {e}")
 
     def _process_media_event(self, media_data: Dict):
         """Processes incoming 'media' events using VAD. Supports interrupt detection."""
@@ -189,7 +207,12 @@ class TwilioStreamHandler:
                 # Reset interrupt flag after processing
                 was_interrupt = self.interrupt_detected
                 self.interrupt_detected = False
-                asyncio.create_task(self._process_user_speech(was_interrupt=was_interrupt))
+                # Increment query sequence and cancel any existing speech processing task
+                self.query_sequence += 1
+                if self.speech_processing_task and not self.speech_processing_task.done():
+                    logger.info("🛑 Cancelling previous speech processing task (new query received)")
+                    self.speech_processing_task.cancel()
+                self.speech_processing_task = asyncio.create_task(self._process_user_speech(was_interrupt=was_interrupt))
 
     async def _process_waiting_interrupt(self):
         """Process interrupt speech that was captured while waiting for TTS to stop."""
@@ -207,57 +230,91 @@ class TwilioStreamHandler:
         logger.info(f"🔄 Processing waiting interrupt: {len(self.speech_buffer)} bytes")
         was_interrupt = self.interrupt_detected
         self.interrupt_detected = False
+        # _process_user_speech already has the lock, so we can call it directly
         await self._process_user_speech(was_interrupt=True)
     
     async def _process_user_speech(self, was_interrupt: bool = False):
         """Transcribes the buffered speech, gets an AI response, and streams TTS back."""
-        if not self.speech_buffer or self.speech_frames_count < 5: # Ignore very short utterances
+        # Use lock to ensure only one processing happens at a time
+        async with self.speech_processing_lock:
+            # Capture the current query sequence at the start
+            current_query_id = self.query_sequence
+            
+            # Get audio buffer snapshot (might be empty if already processed)
+            if not self.speech_buffer or self.speech_frames_count < 5: # Ignore very short utterances
+                if self.is_speaking: logger.info("Ignoring short utterance.")
+                self.is_speaking = False
+                return
+
+            audio_to_process = self.speech_buffer.copy()
             self.speech_buffer = bytearray()
             self.speech_frames_count = 0
-            if self.is_speaking: logger.info("Ignoring short utterance.")
-            self.is_speaking = False
-            return
-
-        audio_to_process = self.speech_buffer
-        self.speech_buffer = bytearray()
-        self.speech_frames_count = 0
-        
-        if was_interrupt:
-            logger.info(f"🔄 Processing INTERRUPT: {len(audio_to_process)} bytes captured")
-            logger.info("🛑 AI stopped. 👂 Listening to interrupt...")
-        else:
-            logger.info(f"Processing {len(audio_to_process)} bytes of speech.")
-
-        try:
-            wav_audio_data = convert_mulaw_to_wav_bytes(audio_to_process)
-            stt_result = await self.speech_tool.transcribe(wav_audio_data, "wav")
-            user_text = stt_result.get("text", "").strip()
-
-            if not user_text:
-                logger.info("STT result is empty, skipping AI response.")
-                return
             
             if was_interrupt:
-                logger.info(f"🔄 Interrupt transcription: '{user_text}'")
+                logger.info(f"🔄 Processing INTERRUPT (Query #{current_query_id}): {len(audio_to_process)} bytes captured")
+                logger.info(f"📚 Current conversation history: {len(self.session_data.get('conversation_history', []))} interactions")
+                logger.info("🛑 AI stopped. 👂 Listening to interrupt...")
             else:
-                logger.info(f"User said: '{user_text}'")
-            
-            ai_response = await self.conversation_tool.generate_response(self.session_data, user_text, None)
-            response_text = ai_response.get("response", "I'm sorry, I'm having trouble with that.")
-            
-            if was_interrupt:
-                logger.info(f"💬 AI responding to interrupt: '{response_text[:70]}...'")
-            else:
-                logger.info(f"AI response: '{response_text[:70]}...'")
-            
-            # Store TTS task so it can be cancelled if interrupted
-            self.tts_streaming_task = asyncio.create_task(self._synthesize_and_stream_tts(response_text))
+                logger.info(f"Processing Query #{current_query_id}: {len(audio_to_process)} bytes of speech.")
+                logger.info(f"📚 Current conversation history: {len(self.session_data.get('conversation_history', []))} interactions")
+
             try:
-                await self.tts_streaming_task
+                wav_audio_data = convert_mulaw_to_wav_bytes(audio_to_process)
+                stt_result = await self.speech_tool.transcribe(wav_audio_data, "wav")
+                user_text = stt_result.get("text", "").strip()
+
+                if not user_text:
+                    logger.info("STT result is empty, skipping AI response.")
+                    return
+                
+                # Verify this is still the current query (lock should prevent this, but double-check)
+                if current_query_id != self.query_sequence:
+                    logger.info(f"⏭️ Skipping outdated query #{current_query_id} after STT (current: #{self.query_sequence})")
+                    return
+                
+                if was_interrupt:
+                    logger.info(f"🔄 Interrupt transcription (Query #{current_query_id}): '{user_text}'")
+                else:
+                    logger.info(f"User said (Query #{current_query_id}): '{user_text}'")
+                
+                # Get the latest session_data right before generating response
+                # This ensures we have the most up-to-date conversation history
+                ai_response = await self.conversation_tool.generate_response(self.session_data, user_text, None)
+                response_text = ai_response.get("response", "I'm sorry, I'm having trouble with that.")
+                
+                # Verify this is still the current query before updating session
+                if current_query_id != self.query_sequence:
+                    logger.info(f"⏭️ Skipping outdated query #{current_query_id} after AI response (current: #{self.query_sequence})")
+                    return
+                
+                # CRITICAL: Update session_data with the latest conversation state
+                # This ensures interrupts have access to the full conversation history
+                updated_session_data = ai_response.get("session_data")
+                if updated_session_data:
+                    self.session_data = updated_session_data
+                    logger.info(f"✅ Updated session_data (Query #{current_query_id}): {len(self.session_data.get('conversation_history', []))} interactions")
+                
+                if was_interrupt:
+                    logger.info(f"💬 AI responding to interrupt (Query #{current_query_id}): '{response_text[:70]}...'")
+                else:
+                    logger.info(f"AI response (Query #{current_query_id}): '{response_text[:70]}...'")
+                
+                # Final check before starting TTS
+                if current_query_id != self.query_sequence:
+                    logger.info(f"⏭️ Skipping outdated query #{current_query_id} before TTS (current: #{self.query_sequence})")
+                    return
+                
+                # Store TTS task so it can be cancelled if interrupted
+                self.tts_streaming_task = asyncio.create_task(self._synthesize_and_stream_tts(response_text))
+                try:
+                    await self.tts_streaming_task
+                except asyncio.CancelledError:
+                    logger.info("🛑 TTS task was cancelled (interrupt handled).")
             except asyncio.CancelledError:
-                logger.info("🛑 TTS task was cancelled (interrupt handled).")
-        except Exception as e:
-            logger.error(f"Error processing user speech: {e}", exc_info=True)
+                logger.info(f"🛑 Speech processing task #{current_query_id} was cancelled.")
+                raise
+            except Exception as e:
+                logger.error(f"Error processing user speech (Query #{current_query_id}): {e}", exc_info=True)
 
     async def _send_greeting(self):
         """Generates and streams a greeting message to the caller."""
@@ -378,7 +435,69 @@ class TwilioStreamHandler:
             logger.error(f"PCM TTS synthesis failed: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
 
+    async def hangup_call(self, reason: str = "Call ended by system"):
+        """Hang up the call by sending a clear command to Twilio."""
+        try:
+            logger.info(f"📞 Hanging up call {self.call_sid}: {reason}")
+            
+            # Unregister from global registry
+            try:
+                import api_general
+                if hasattr(api_general, 'active_stream_handlers') and self.call_sid in api_general.active_stream_handlers:
+                    del api_general.active_stream_handlers[self.call_sid]
+                    logger.info(f"✅ Unregistered stream handler for call {self.call_sid}")
+            except Exception as e:
+                logger.warning(f"Could not unregister stream handler: {e}")
+            
+            # Send clear command to Twilio to hang up the call
+            try:
+                await self.websocket.send_json({
+                    "event": "clear",
+                    "streamSid": self.stream_sid
+                })
+            except Exception as e:
+                logger.warning(f"Could not send clear command via WebSocket: {e}")
+            
+            # Also try to update call status via REST API if available
+            try:
+                from config import TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
+                if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+                    from twilio.rest import Client
+                    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+                    call = client.calls(self.call_sid).update(status="completed")
+                    logger.info(f"✅ Call {self.call_sid} status updated to completed via REST API")
+            except Exception as e:
+                logger.warning(f"Could not update call status via REST API: {e}")
+            
+            # Close the WebSocket connection
+            try:
+                await self.websocket.close()
+            except Exception as e:
+                logger.warning(f"Error closing WebSocket: {e}")
+            
+            logger.info(f"✅ Call {self.call_sid} hung up successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error hanging up call {self.call_sid}: {e}", exc_info=True)
+            return False
+
     def _handle_stop_event(self, stop_data: Dict):
         """Handles the 'stop' event from Twilio stream."""
         logger.info(f"Stream stopped for call SID: {self.call_sid}. Cleaning up.")
-        # Any final cleanup can go here.
+        
+        # Clean up from global registry
+        try:
+            import api_general
+            if hasattr(api_general, 'active_stream_handlers') and self.call_sid in api_general.active_stream_handlers:
+                del api_general.active_stream_handlers[self.call_sid]
+                logger.info(f"✅ Unregistered stream handler for call {self.call_sid} (stop event)")
+        except Exception as e:
+            logger.warning(f"Could not unregister stream handler: {e}")
+        
+        # Cancel any active tasks
+        if self.tts_streaming_task and not self.tts_streaming_task.done():
+            self.tts_streaming_task.cancel()
+        if self.speech_processing_task and not self.speech_processing_task.done():
+            self.speech_processing_task.cancel()
+        
+        logger.info(f"✅ Call {self.call_sid} cleanup completed")

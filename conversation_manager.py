@@ -35,14 +35,17 @@ class ConversationManager:
 7. Always be polite and helpful
 8. Keep responses concise but informative
 
+CRITICAL: Always respond to the MOST RECENT user query. The conversation history is provided for context, but you must prioritize and directly address the user's current/latest question or statement. Do not respond to questions from earlier in the conversation unless the user explicitly references them.
+
 Guidelines:
 - Be conversational and natural, not robotic
 - Ask one question at a time to avoid confusion
-- Handle interruptions gracefully
+- Handle interruptions gracefully - when interrupted, respond to the NEW question, not the previous one
 - Be patient with users who may be unclear
 - Always be polite and helpful
 - If you don't understand something, ask for clarification
 - Keep responses concise but informative
+- ALWAYS respond to the most recent user input - ignore older queries unless explicitly referenced
 
 Current conversation state will be provided to help you understand context."""
     
