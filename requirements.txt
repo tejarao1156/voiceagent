@@ -18,5 +18,8 @@ transformers>=4.35.0
 torch>=2.0.0
 soundfile>=0.12.1
 twilio>=8.0.0
+# MongoDB for conversation storage
+pymongo>=4.6.0
+motor>=3.3.0
 # Voice Agent specific dependencies
 webrtcvad-wheels

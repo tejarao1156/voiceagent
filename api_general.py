@@ -104,11 +104,17 @@ twilio_phone_tool = TwilioPhoneTool(
 # Registry to track active stream handlers for hangup functionality
 active_stream_handlers: Dict[str, "TwilioStreamHandler"] = {}
 
-# Startup event - no database initialization
+# Startup event - initialize MongoDB
 @app.on_event("startup")
 async def startup_event():
     from config import TWILIO_PROCESSING_MODE, TWILIO_WEBHOOK_BASE_URL
-    logger.info("Voice Agent API started (running without database - using in-memory sessions)")
+    from databases.mongodb_db import initialize_mongodb, test_connection
+    
+    # Initialize MongoDB for conversation storage
+    initialize_mongodb()
+    await test_connection()
+    
+    logger.info("Voice Agent API started")
     logger.info("="*50)
     logger.info(f"📞 Twilio Processing Mode: {TWILIO_PROCESSING_MODE.upper()}")
     logger.info("Please configure your Twilio number's 'A CALL COMES IN' webhook to:")
@@ -196,6 +202,7 @@ async def root():
             <h1>🎧 Voice Agent</h1>
             <p class="subtitle">AI-powered voice conversation system</p>
             <div class="links">
+                <a href="/saas-dashboard" class="link">🚀 SaaS Dashboard - Voice Agent Management</a>
                 <a href="/chat" class="link">🎤 Chat UI - Voice Conversation</a>
                 <a href="/dashboard" class="link">📞 Twilio Dashboard</a>
                 <a href="/docs" class="link link-docs">📚 API Documentation (Swagger)</a>
@@ -221,6 +228,83 @@ async def health_check():
         timestamp=datetime.utcnow().isoformat(),
         version="1.0.0"
     )
+
+@app.get(
+    "/health/mongodb",
+    summary="MongoDB Health Check",
+    description="Check MongoDB connection status and health. Returns connection status, availability, and any errors.",
+    tags=["General"],
+    responses={
+        200: {
+            "description": "MongoDB health status",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": "healthy",
+                        "mongodb": {
+                            "connected": True,
+                            "status": "available"
+                        },
+                        "service": "voice-agent-api"
+                    }
+                }
+            }
+        }
+    }
+)
+async def mongodb_health_check():
+    """MongoDB health check endpoint - verifies connection and availability"""
+    try:
+        from databases.mongodb_db import is_mongodb_available, test_connection
+        
+        is_available = is_mongodb_available()
+        connection_status = False
+        
+        if is_available:
+            connection_status = await test_connection()
+            if connection_status:
+                return {
+                    "status": "healthy",
+                    "mongodb": {
+                        "connected": True,
+                        "status": "available",
+                        "database": "voiceagent"
+                    },
+                    "service": "voice-agent-api",
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            else:
+                return {
+                    "status": "degraded",
+                    "mongodb": {
+                        "connected": False,
+                        "status": "connection_failed"
+                    },
+                    "service": "voice-agent-api",
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+        else:
+            return {
+                "status": "degraded",
+                "mongodb": {
+                    "connected": False,
+                    "status": "not_initialized"
+                },
+                "service": "voice-agent-api",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+    except Exception as e:
+        logger.error(f"MongoDB health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "mongodb": {
+                "connected": False,
+                "status": "error",
+                "error": str(e)
+            },
+            "service": "voice-agent-api",
+            "timestamp": datetime.utcnow().isoformat()
+        }
 
 
 @app.get(
@@ -369,12 +453,32 @@ async def start_conversation(
     ```
     """
     try:
+        # Ensure persona and prompt are strings or None (not Query objects)
+        persona_str = None
+        if persona is not None and isinstance(persona, str):
+            persona_str = persona
+        elif persona is not None:
+            persona_str = str(persona) if persona else None
+            
+        prompt_str = None
+        if prompt is not None and isinstance(prompt, str):
+            prompt_str = prompt
+        elif prompt is not None:
+            prompt_str = str(prompt) if prompt else None
+        
         # Use prompt if provided, otherwise fall back to persona for backward compatibility
-        persona_to_use = prompt if prompt else persona
+        persona_to_use = prompt_str if prompt_str else persona_str
         session_data = conversation_tool.create_session(customer_id, persona_to_use)
         
-        # Use in-memory session ID
-        session_id = session_data.get("session_id", "mem_" + str(hash(str(session_data))))
+        # Generate session ID
+        import uuid
+        session_id = session_data.get("session_id", str(uuid.uuid4()))
+        session_data["session_id"] = session_id
+        
+        # Save to MongoDB
+        from databases.mongodb_conversation_store import MongoDBConversationStore
+        mongo_store = MongoDBConversationStore()
+        await mongo_store.save_session(session_id, session_data)
         
         # Return prompt if it was provided, otherwise return persona for backward compatibility
         prompt_value = prompt if prompt else session_data.get("persona")
@@ -413,13 +517,32 @@ async def process_conversation(
         # Get session data - use prompt if provided, otherwise persona (for backward compatibility)
         persona_name = request.prompt if request.prompt else request.persona
         
-        # Create new session (in-memory only)
-        session_data = conversation_tool.create_session(request.customer_id, persona_name)
+        # Load session from MongoDB if session_id provided, otherwise create new
+        from databases.mongodb_conversation_store import MongoDBConversationStore
+        mongo_store = MongoDBConversationStore()
+        
+        if request.session_id:
+            session_data = await mongo_store.load_session(request.session_id)
+            if session_data is None:
+                # Session not found, create new one
+                session_data = conversation_tool.create_session(request.customer_id, persona_name)
+                import uuid
+                session_id = str(uuid.uuid4())
+                session_data["session_id"] = session_id
+        else:
+            # Create new session
+            session_data = conversation_tool.create_session(request.customer_id, persona_name)
+            import uuid
+            session_id = str(uuid.uuid4())
+            session_data["session_id"] = session_id
         
         # Process user input (general conversation) - streaming enabled for faster response
         result = await conversation_tool.generate_response(
             session_data, request.text, persona_name
         )
+        
+        # Save updated session to MongoDB
+        await mongo_store.save_session(result["session_data"]["session_id"], result["session_data"])
         
         return ConversationResponse(
             response=result["response"],
@@ -481,7 +604,16 @@ async def toolkit_start_conversation(
     persona: Optional[str] = Query(None, description="Persona identifier")
 ):
     """Expose conversation session creation for testing."""
-    return await start_conversation(customer_id=customer_id, persona=persona)
+    # Ensure persona is a string or None (not a Query object)
+    # FastAPI Query parameters should already be strings, but handle edge cases
+    if persona is None:
+        persona_str = None
+    elif isinstance(persona, str):
+        persona_str = persona
+    else:
+        # Convert to string if it's not already (shouldn't happen with FastAPI)
+        persona_str = str(persona) if persona else None
+    return await start_conversation(customer_id=customer_id, persona=persona_str)
 
 
 @app.post(
@@ -1317,6 +1449,72 @@ async def twilio_dashboard():
         raise HTTPException(status_code=404, detail="Dashboard not found")
 
 @app.get(
+    "/saas-dashboard",
+    summary="SaaS Dashboard",
+    description="Professional SaaS-style Voice Agent Dashboard for managing AI agents",
+    tags=["UI"],
+    response_class=HTMLResponse
+)
+async def saas_dashboard():
+    """Serve the SaaS Voice Agent Dashboard."""
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>SaaS Voice Agent Dashboard</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            html, body {
+                height: 100%;
+                overflow: hidden;
+            }
+            iframe {
+                width: 100%;
+                height: 100vh;
+                border: none;
+            }
+            .loading {
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                color: #666;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="loading" id="loading">Loading SaaS Dashboard...</div>
+        <iframe 
+            src="http://localhost:9000/saas-dashboard" 
+            id="dashboard-frame"
+            onload="document.getElementById('loading').style.display='none'"
+            allow="fullscreen"
+        ></iframe>
+        <script>
+            // Fallback if Next.js server is not running
+            setTimeout(function() {
+                var iframe = document.getElementById('dashboard-frame');
+                if (iframe.contentWindow.location.href === 'about:blank' || 
+                    iframe.contentDocument === null) {
+                    document.getElementById('loading').innerHTML = 
+                        '⚠️ Next.js server not running. Please start it with: cd ui && npm run dev';
+                    document.getElementById('loading').style.color = '#dc2626';
+                }
+            }, 3000);
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+@app.get(
     "/chat",
     summary="Chat UI",
     description="Conversation chat UI with voice and text support",
@@ -1331,6 +1529,354 @@ async def chat_ui():
         return FileResponse(chat_path)
     else:
         raise HTTPException(status_code=404, detail="Chat UI not found")
+
+# ============================================================================
+# AGENT MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@app.post(
+    "/agents",
+    summary="Create Agent",
+    description="Create a new voice agent with configuration. Stores agent in MongoDB 'agents' collection. All configuration fields are stored including STT model, TTS model, inference model, prompts, and Twilio credentials.",
+    tags=["Agents"],
+    responses={
+        200: {
+            "description": "Agent created successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "agent_id": "507f1f77bcf86cd799439011",
+                        "message": "Agent created successfully"
+                    }
+                }
+            }
+        },
+        500: {
+            "description": "Failed to create agent",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Failed to create agent"}
+                }
+            }
+        }
+    }
+)
+async def create_agent(request: Request):
+    """
+    Create a new agent with full configuration.
+    
+    **Request Body Fields:**
+    - `name` (string, required): Agent name
+    - `direction` (string, required): "inbound" 
+    - `phoneNumber` (string, required): Phone number (e.g., "+1 555 123 4567")
+    - `provider` (string, required): "twilio" or "custom"
+    - `sttModel` (string): Speech-to-text model (default: "whisper-1")
+    - `inferenceModel` (string): LLM model (default: "gpt-4o-mini")
+    - `ttsModel` (string): Text-to-speech model (default: "tts-1")
+    - `ttsVoice` (string): TTS voice (default: "alloy")
+    - `systemPrompt` (string): System prompt for the agent
+    - `greeting` (string): Initial greeting message
+    - `temperature` (number): LLM temperature (0-2, default: 0.7)
+    - `maxTokens` (number): Max response tokens (default: 500)
+    - `active` (boolean): Enable agent to receive calls (default: true)
+    - `twilioAccountSid` (string, optional): Twilio Account SID override
+    - `twilioAuthToken` (string, optional): Twilio Auth Token override
+    
+    **Stores in MongoDB:**
+    - Database: `voiceagent` (from MONGODB_DATABASE config)
+    - Collection: `agents`
+    - All configuration fields are persisted
+    """
+    try:
+        agent_data = await request.json()
+        logger.info(f"Received agent creation request: {agent_data.get('name')} ({agent_data.get('phoneNumber')})")
+        
+        from databases.mongodb_agent_store import MongoDBAgentStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        # Check MongoDB availability
+        if not is_mongodb_available():
+            logger.error("MongoDB is not available for agent storage")
+            raise HTTPException(status_code=503, detail="MongoDB is not available. Please check MongoDB connection.")
+        
+        agent_store = MongoDBAgentStore()
+        agent_id = await agent_store.create_agent(agent_data)
+        
+        if agent_id:
+            logger.info(f"✅ Agent created successfully with ID: {agent_id}")
+            return {
+                "success": True, 
+                "agent_id": agent_id, 
+                "message": "Agent created successfully and stored in MongoDB",
+                "database": "voiceagent",
+                "collection": "agents"
+            }
+        else:
+            logger.error("Failed to create agent - agent_store.create_agent returned None")
+            raise HTTPException(status_code=500, detail="Failed to create agent in MongoDB")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating agent: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error creating agent: {str(e)}")
+
+@app.get(
+    "/agents",
+    summary="List Agents",
+    description="Get all agents from MongoDB. Returns list of all agents with their configurations. Can filter to show only active agents.",
+    tags=["Agents"],
+    responses={
+        200: {
+            "description": "List of agents",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "agents": [
+                            {
+                                "id": "507f1f77bcf86cd799439011",
+                                "name": "gman",
+                                "direction": "inbound",
+                                "phoneNumber": "+1 555 202 2030",
+                                "active": True,
+                                "sttModel": "whisper-1",
+                                "inferenceModel": "gpt-4o-mini",
+                                "ttsModel": "tts-1",
+                                "ttsVoice": "alloy"
+                            }
+                        ],
+                        "count": 1
+                    }
+                }
+            }
+        }
+    }
+)
+async def list_agents(active_only: Optional[bool] = Query(False, description="Only return active agents (active=true)")):
+    """
+    List all agents from MongoDB.
+    
+    **Query Parameters:**
+    - `active_only` (boolean, optional): If true, only returns agents where active=true
+    
+    **Returns:**
+    - List of agent objects with all configuration fields
+    """
+    try:
+        from databases.mongodb_agent_store import MongoDBAgentStore
+        
+        agent_store = MongoDBAgentStore()
+        agents = await agent_store.list_agents(active_only=active_only)
+        
+        return {"success": True, "agents": agents, "count": len(agents)}
+        
+    except Exception as e:
+        logger.error(f"Error listing agents: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/agents/{agent_id}",
+    summary="Get Agent",
+    description="Get a specific agent by MongoDB ID. Returns full agent configuration including all settings.",
+    tags=["Agents"],
+    responses={
+        200: {
+            "description": "Agent found",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "agent": {
+                            "id": "507f1f77bcf86cd799439011",
+                            "name": "gman",
+                            "direction": "inbound",
+                            "phoneNumber": "+1 555 202 2030",
+                            "active": True,
+                            "sttModel": "whisper-1",
+                            "inferenceModel": "gpt-4o-mini",
+                            "ttsModel": "tts-1",
+                            "ttsVoice": "alloy",
+                            "systemPrompt": "You are a helpful assistant",
+                            "greeting": "Hello! How can I help you?",
+                            "temperature": 0.7,
+                            "maxTokens": 500,
+                            "provider": "twilio",
+                            "created_at": "2025-01-15T10:30:00",
+                            "updated_at": "2025-01-15T10:30:00"
+                        }
+                    }
+                }
+            }
+        },
+        404: {
+            "description": "Agent not found",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Agent not found"}
+                }
+            }
+        }
+    }
+)
+async def get_agent(agent_id: str = Path(..., description="MongoDB Agent ID")):
+    """
+    Get a specific agent by ID.
+    
+    **Path Parameters:**
+    - `agent_id` (string, required): MongoDB ObjectID of the agent
+    
+    **Returns:**
+    - Full agent object with all configuration fields
+    """
+    try:
+        from databases.mongodb_agent_store import MongoDBAgentStore
+        
+        agent_store = MongoDBAgentStore()
+        agent = await agent_store.get_agent(agent_id)
+        
+        if agent:
+            return {"success": True, "agent": agent}
+        else:
+            raise HTTPException(status_code=404, detail="Agent not found")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting agent: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put(
+    "/agents/{agent_id}",
+    summary="Update Agent",
+    description="Update an existing agent. Only provided fields will be updated. Updates are stored in MongoDB.",
+    tags=["Agents"],
+    responses={
+        200: {
+            "description": "Agent updated successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "message": "Agent updated successfully"
+                    }
+                }
+            }
+        },
+        404: {
+            "description": "Agent not found",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Agent not found or update failed"}
+                }
+            }
+        }
+    }
+)
+async def update_agent(agent_id: str = Path(..., description="MongoDB Agent ID"), request: Request = ...):
+    """
+    Update an existing agent.
+    
+    **Path Parameters:**
+    - `agent_id` (string, required): MongoDB ObjectID of the agent
+    
+    **Request Body:**
+    - Any agent fields to update (partial updates supported)
+    - Common fields: `name`, `active`, `systemPrompt`, `greeting`, `temperature`, `maxTokens`, etc.
+    
+    **Validation:**
+    - Phone numbers CANNOT be edited - they are immutable after creation
+    - If phoneNumber is included in the request body, it will be ignored
+    - Only other fields (name, prompts, models, etc.) can be updated
+    
+    **Example Request Body:**
+    ```json
+    {
+        "active": false,
+        "systemPrompt": "Updated prompt",
+        "temperature": 0.8
+    }
+    ```
+    
+    **Note:** `phoneNumber` field is ignored if provided - phone numbers cannot be changed after creation.
+    """
+    try:
+        updates = await request.json()
+        from databases.mongodb_agent_store import MongoDBAgentStore
+        
+        agent_store = MongoDBAgentStore()
+        
+        # Remove phoneNumber from updates - phone numbers cannot be edited
+        if "phoneNumber" in updates:
+            logger.warning(f"Attempted to update phone number for agent {agent_id} - phone numbers cannot be edited")
+            del updates["phoneNumber"]
+        
+        success = await agent_store.update_agent(agent_id, updates)
+        
+        if success:
+            return {"success": True, "message": "Agent updated successfully"}
+        else:
+            raise HTTPException(status_code=404, detail="Agent not found or update failed")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating agent: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete(
+    "/agents/{agent_id}",
+    summary="Delete Agent (Soft Delete)",
+    description="Soft delete an agent by setting isDeleted=true. The agent will not appear in the UI but remains in MongoDB for audit purposes.",
+    tags=["Agents"],
+    responses={
+        200: {
+            "description": "Agent deleted successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "message": "Agent deleted successfully"
+                    }
+                }
+            }
+        },
+        404: {
+            "description": "Agent not found",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Agent not found"}
+                }
+            }
+        }
+    }
+)
+async def delete_agent(agent_id: str = Path(..., description="MongoDB Agent ID")):
+    """
+    Delete an agent from MongoDB.
+    
+    **Path Parameters:**
+    - `agent_id` (string, required): MongoDB ObjectID of the agent
+    
+    **Warning:** This action is permanent and cannot be undone.
+    """
+    try:
+        from databases.mongodb_agent_store import MongoDBAgentStore
+        
+        agent_store = MongoDBAgentStore()
+        success = await agent_store.delete_agent(agent_id)
+        
+        if success:
+            return {"success": True, "message": "Agent deleted successfully"}
+        else:
+            raise HTTPException(status_code=404, detail="Agent not found")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting agent: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get(
     "/ui/chat",
@@ -1488,6 +2034,235 @@ async def twilio_fallback_handler(request: Request):
         error_response.say("Sorry, an error occurred. Goodbye.")
         error_response.hangup()
         return HTMLResponse(content=str(error_response))
+
+# ============================================================================
+# ANALYTICS ENDPOINTS
+# ============================================================================
+
+@app.get(
+    "/analytics/call-statistics",
+    summary="Get Call Statistics",
+    description="Get overall call statistics from MongoDB including total calls, durations (min/max/avg), and call status counts. Used by the dashboard UI.",
+    tags=["Analytics"],
+    responses={
+        200: {
+            "description": "Call statistics",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "total_calls": 247,
+                        "total_duration_seconds": 18450.5,
+                        "average_duration_seconds": 74.7,
+                        "min_duration_seconds": 12.0,
+                        "max_duration_seconds": 343.0,
+                        "active_calls": 3,
+                        "completed_calls": 244
+                    }
+                }
+            }
+        }
+    }
+)
+async def get_call_statistics(
+    agent_id: Optional[str] = Query(None, description="Filter by agent ID (phone number)"),
+    start_date: Optional[str] = Query(None, description="Start date filter (ISO format: YYYY-MM-DDTHH:MM:SS)"),
+    end_date: Optional[str] = Query(None, description="End date filter (ISO format: YYYY-MM-DDTHH:MM:SS)")
+):
+    """
+    Get call statistics from MongoDB conversations collection.
+    
+    **Query Parameters:**
+    - `agent_id` (string, optional): Filter statistics by agent/phone number
+    - `start_date` (string, optional): Start date in ISO format (e.g., "2025-01-01T00:00:00")
+    - `end_date` (string, optional): End date in ISO format (e.g., "2025-01-31T23:59:59")
+    
+    **Returns:**
+    - Total calls count
+    - Duration statistics (total, average, min, max)
+    - Call status counts (active, completed)
+    """
+    try:
+        from databases.mongodb_analytics import MongoDBAnalytics
+        from datetime import datetime
+        
+        analytics = MongoDBAnalytics()
+        
+        start_dt = datetime.fromisoformat(start_date) if start_date else None
+        end_dt = datetime.fromisoformat(end_date) if end_date else None
+        
+        stats = await analytics.get_call_statistics(
+            agent_id=agent_id,
+            start_date=start_dt,
+            end_date=end_dt
+        )
+        
+        return stats
+        
+    except Exception as e:
+        logger.error(f"Error getting call statistics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/analytics/calls-by-date",
+    summary="Get Calls by Date",
+    description="Get call counts grouped by date from MongoDB. Used by the dashboard UI to display call trends over time.",
+    tags=["Analytics"],
+    responses={
+        200: {
+            "description": "Calls grouped by date",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "data": [
+                            {
+                                "date": "2025-11-03",
+                                "count": 12,
+                                "total_duration_seconds": 900
+                            },
+                            {
+                                "date": "2025-11-04",
+                                "count": 18,
+                                "total_duration_seconds": 1350
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+)
+async def get_calls_by_date(
+    days: int = Query(7, description="Number of days to look back (default: 7)", ge=1, le=365),
+    agent_id: Optional[str] = Query(None, description="Filter by agent ID (phone number)")
+):
+    """
+    Get calls grouped by date from MongoDB.
+    
+    **Query Parameters:**
+    - `days` (integer, required): Number of days to look back (1-365, default: 7)
+    - `agent_id` (string, optional): Filter by agent/phone number
+    
+    **Returns:**
+    - Array of objects with date, count, and total_duration_seconds
+    - Used by dashboard UI for date-based charts
+    """
+    try:
+        from databases.mongodb_analytics import MongoDBAnalytics
+        
+        analytics = MongoDBAnalytics()
+        results = await analytics.get_calls_by_date(days=days, agent_id=agent_id)
+        
+        return {"data": results}
+        
+    except Exception as e:
+        logger.error(f"Error getting calls by date: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/analytics/calls-by-agent",
+    summary="Get Calls by Agent",
+    description="Get call statistics grouped by agent/phone number from MongoDB. Used by the dashboard UI to display agent performance.",
+    tags=["Analytics"],
+    responses={
+        200: {
+            "description": "Calls grouped by agent",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "data": [
+                            {
+                                "agent_id": "+1 555 202 2030",
+                                "call_count": 142,
+                                "total_duration_seconds": 10590,
+                                "average_duration_seconds": 74.6
+                            },
+                            {
+                                "agent_id": "+1 555 204 0090",
+                                "call_count": 89,
+                                "total_duration_seconds": 6645,
+                                "average_duration_seconds": 74.7
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+)
+async def get_calls_by_agent():
+    """
+    Get calls grouped by agent/phone number from MongoDB.
+    
+    **Returns:**
+    - Array of objects with agent_id, call_count, total_duration_seconds, and average_duration_seconds
+    - Sorted by call_count (descending)
+    - Used by dashboard UI for agent performance table
+    """
+    try:
+        from databases.mongodb_analytics import MongoDBAnalytics
+        
+        analytics = MongoDBAnalytics()
+        results = await analytics.get_calls_by_agent()
+        
+        return {"data": results}
+        
+    except Exception as e:
+        logger.error(f"Error getting calls by agent: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/analytics/recent-calls",
+    summary="Get Recent Calls",
+    description="Get recent calls with details from MongoDB. Returns the most recent calls sorted by creation date.",
+    tags=["Analytics"],
+    responses={
+        200: {
+            "description": "Recent calls",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "data": [
+                            {
+                                "session_id": "abc123",
+                                "agent_id": "+1 555 202 2030",
+                                "customer_id": "customer_123",
+                                "status": "completed",
+                                "message_count": 10,
+                                "duration_seconds": 75.5,
+                                "created_at": "2025-11-10T15:30:00",
+                                "updated_at": "2025-11-10T15:31:15"
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+)
+async def get_recent_calls(
+    limit: int = Query(10, description="Number of recent calls to return (default: 10)", ge=1, le=100)
+):
+    """
+    Get recent calls from MongoDB.
+    
+    **Query Parameters:**
+    - `limit` (integer, optional): Number of recent calls to return (1-100, default: 10)
+    
+    **Returns:**
+    - Array of recent call objects with session_id, agent_id, status, duration, timestamps
+    - Sorted by created_at (most recent first)
+    """
+    try:
+        from databases.mongodb_analytics import MongoDBAnalytics
+        
+        analytics = MongoDBAnalytics()
+        results = await analytics.get_recent_calls(limit=limit)
+        
+        return {"data": results}
+        
+    except Exception as e:
+        logger.error(f"Error getting recent calls: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
 
