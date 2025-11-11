@@ -12,7 +12,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@localho
 # ============================================================================
 # MONGODB CONFIGURATION (for conversation storage)
 # ============================================================================
-MONGODB_URL = os.getenv("MONGODB_URL", "mongodb+srv://gandrateja_db_user:7RWRoo2ktDV6SWDv@voiceagents.11zifn8.mongodb.net/")
+MONGODB_URL = os.getenv("MONGODB_URL", "")
 MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "voiceagent")
 MONGODB_CONVERSATIONS_COLLECTION = os.getenv("MONGODB_CONVERSATIONS_COLLECTION", "conversations")
 
