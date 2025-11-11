@@ -63,6 +63,8 @@ class TwilioPhoneTool:
         self.audio_buffers: Dict[str, list] = {}
         # Track if AI is speaking: {call_sid: bool} - prevents feedback loop
         self.is_speaking: Dict[str, bool] = {}
+        # Track agent configs for each call: {call_sid: agent_config}
+        self.call_agent_configs: Dict[str, Dict[str, Any]] = {}
 
         logger.info("TwilioPhoneTool initialized")
 
@@ -74,7 +76,7 @@ class TwilioPhoneTool:
             call_data: Dictionary containing call information from Twilio webhook
                 - CallSid: Unique call identifier
                 - From: Caller's phone number
-                - To: Called number
+                - To: Called number (phone number being called)
                 - CallStatus: Call status
         
         Returns:
@@ -82,18 +84,43 @@ class TwilioPhoneTool:
         """
         call_sid = call_data.get("CallSid")
         from_number = call_data.get("From", "unknown")
+        to_number = call_data.get("To", "unknown")
         
         if not call_sid:
             logger.error("No CallSid in incoming call webhook")
             return self._create_error_twiml("Invalid call data")
 
-        logger.info(f"Incoming call: {call_sid} from {from_number}")
+        logger.info(f"Incoming call: {call_sid} from {from_number} to {to_number}")
 
         try:
-            # Create conversation session
+            # Load active agent configuration for this phone number
+            agent_config = await self._load_agent_config(to_number)
+            
+            if not agent_config:
+                logger.warning(f"No active agent found for phone number {to_number}, using defaults")
+                # Use default configuration
+                agent_config = {
+                    "sttModel": "whisper-1",
+                    "inferenceModel": "gpt-4o-mini",
+                    "ttsModel": "tts-1",
+                    "ttsVoice": "alloy",
+                    "systemPrompt": None,
+                    "greeting": "Hello! How can I help you today?",
+                    "temperature": 0.7,
+                    "maxTokens": 500,
+                }
+            else:
+                logger.info(f"✅ Using agent config for {to_number}: {agent_config.get('name', 'Unknown')}")
+                logger.info(f"   STT: {agent_config.get('sttModel')}, TTS: {agent_config.get('ttsModel')} ({agent_config.get('ttsVoice')}), LLM: {agent_config.get('inferenceModel')}")
+            
+            # Store agent config for this call
+            self.call_agent_configs[call_sid] = agent_config
+            
+            # Create conversation session with agent's system prompt
             session_data = self.conversation_tool.create_session(
                 customer_id=f"phone_{from_number}",
-                persona=None  # Use default persona
+                persona=None,
+                prompt=agent_config.get("systemPrompt")  # Use agent's system prompt
             )
             
             session_id = session_data.get("session_id", call_sid)
@@ -107,8 +134,9 @@ class TwilioPhoneTool:
             # Media Stream has connectivity issues on some Twilio accounts
             response = VoiceResponse()
             
-            # Send greeting and gather input
-            response.say("Hello! How can I help you today?", voice="alice")
+            # Use agent's greeting or default
+            greeting = agent_config.get("greeting", "Hello! How can I help you today?")
+            response.say(greeting, voice="alice")
             
             # Record the caller's message
             record_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/recording?CallSid={call_sid}"
@@ -126,8 +154,42 @@ class TwilioPhoneTool:
             return twiml
 
         except Exception as e:
-            logger.error(f"Error handling incoming call {call_sid}: {e}")
+            logger.error(f"Error handling incoming call {call_sid}: {e}", exc_info=True)
             return self._create_error_twiml(str(e))
+    
+    async def _load_agent_config(self, phone_number: str) -> Optional[Dict[str, Any]]:
+        """
+        Load active agent configuration for a phone number from MongoDB.
+        
+        Args:
+            phone_number: Phone number to look up (e.g., "+15551234567" or "5551234567")
+        
+        Returns:
+            Agent configuration dict or None if not found
+        """
+        try:
+            from databases.mongodb_agent_store import MongoDBAgentStore
+            
+            agent_store = MongoDBAgentStore()
+            
+            # Normalize phone number (remove +1, spaces, dashes, etc.)
+            normalized_phone = phone_number.replace("+1", "").replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
+            
+            # Try to find active agent with this phone number
+            agents = await agent_store.list_agents(active_only=True)
+            
+            for agent in agents:
+                agent_phone = agent.get("phoneNumber", "").replace("+1", "").replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
+                if agent_phone == normalized_phone:
+                    logger.info(f"Found active agent for {phone_number}: {agent.get('name')}")
+                    return agent
+            
+            logger.warning(f"No active agent found for phone number {phone_number}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error loading agent config for {phone_number}: {e}", exc_info=True)
+            return None
 
     async def handle_media_stream(self, websocket: WebSocket, call_sid: Optional[str] = None):
         """
@@ -481,6 +543,9 @@ class TwilioPhoneTool:
             
             if call_sid in self.is_speaking:
                 del self.is_speaking[call_sid]
+            
+            if call_sid in self.call_agent_configs:
+                del self.call_agent_configs[call_sid]
             
             logger.info(f"Cleaned up resources for call {call_sid}")
 

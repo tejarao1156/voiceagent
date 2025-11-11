@@ -77,7 +77,9 @@ def get_persona_config(persona_name: Optional[str]) -> Dict[str, Any]:
     """Return persona configuration for the given name (fallback to default)."""
 
     if persona_name:
-        key = persona_name.lower().strip()
+        # Ensure persona_name is a string before calling string methods
+        persona_str = str(persona_name) if not isinstance(persona_name, str) else persona_name
+        key = persona_str.lower().strip()
         if key in _PERSONAS:
             return _PERSONAS[key]
 
