@@ -39,10 +39,10 @@ pip install -r requirements.txt
 
 ### 2. Configure Environment
 
-Copy `dev.env` to `.env` for development:
+Copy `env.example` to `.env` for development:
 
 ```bash
-cp dev.env .env
+cp env.example .env
 ```
 
 Then edit `.env` and fill in your actual configuration values:
@@ -982,8 +982,7 @@ voiceagent/
 │   ├── chat_ui.html      # Standalone chat UI page
 │   └── realtime_client.html # Realtime HTML demo client
 ├── config.py             # Configuration management
-├── dev.env               # Complete development environment configuration
-├── env.example           # Environment configuration template
+├── env.example           # Environment variables template (copy to .env)
 └── requirements.txt      # Python dependencies
 ```
 
