@@ -175,8 +175,11 @@ class MongoDBAgentStore:
                 return []
             
             # Always exclude deleted agents
+            # MongoDB query: isDeleted is not True (handles missing field, False, null, etc.)
+            # This is equivalent to: isDeleted != True OR isDeleted doesn't exist
             query = {"isDeleted": {"$ne": True}}
             if active_only:
+                # For active_only, also require active field to be True
                 query["active"] = True
             
             cursor = collection.find(query).sort("created_at", -1)
@@ -195,6 +198,12 @@ class MongoDBAgentStore:
                 elif "is_active" in doc and "active" in doc:
                     # Keep active, remove is_active
                     del doc["is_active"]
+                
+                # Ensure active field exists and is boolean (default to True if missing)
+                if "active" not in doc:
+                    doc["active"] = True  # Default to active if field is missing
+                elif doc.get("active") is None:
+                    doc["active"] = True  # Default to active if None
                 
                 agents.append(doc)
             

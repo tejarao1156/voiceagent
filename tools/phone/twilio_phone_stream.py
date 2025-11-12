@@ -4,7 +4,7 @@ import base64
 import logging
 import time
 from fastapi import WebSocket
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 import webrtcvad
 
@@ -23,11 +23,12 @@ VAD_FRAME_BYTES = (VAD_SAMPLE_RATE * VAD_FRAME_DURATION_MS // 1000)
 class TwilioStreamHandler:
     """Handles the real-time Twilio media stream for a single phone call."""
 
-    def __init__(self, websocket: WebSocket, speech_tool: SpeechToTextTool, tts_tool: TextToSpeechTool, conversation_tool: ConversationalResponseTool):
+    def __init__(self, websocket: WebSocket, speech_tool: SpeechToTextTool, tts_tool: TextToSpeechTool, conversation_tool: ConversationalResponseTool, agent_config: Optional[Dict[str, Any]] = None):
         self.websocket = websocket
         self.speech_tool = speech_tool
         self.tts_tool = tts_tool
         self.conversation_tool = conversation_tool
+        self.agent_config = agent_config  # Store agent configuration
         
         self.vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
         self.speech_buffer = bytearray()
@@ -59,7 +60,7 @@ class TwilioStreamHandler:
 
             event = data.get('event')
             if event == 'start':
-                self._handle_start_event(data['start'])
+                await self._handle_start_event(data['start'])
                 # Asynchronously send the greeting message
                 asyncio.create_task(self._send_greeting())
             elif event == 'media':
@@ -87,7 +88,7 @@ class TwilioStreamHandler:
                             self.speech_processing_task.cancel()
                         self.speech_processing_task = asyncio.create_task(self._process_waiting_interrupt())
 
-    def _handle_start_event(self, start_data: Dict):
+    async def _handle_start_event(self, start_data: Dict):
         """Handles the 'start' event from Twilio stream."""
         self.stream_sid = start_data['streamSid']
         self.call_sid = start_data['callSid']
@@ -96,9 +97,65 @@ class TwilioStreamHandler:
         
         logger.info(f"Stream started: call_sid={self.call_sid}, stream_sid={self.stream_sid}")
         logger.info(f"Call from: {from_number} to: {to_number}")
+        
+        # Load agent config by phone number if not already provided
+        if not self.agent_config and to_number:
+            try:
+                from databases.mongodb_agent_store import MongoDBAgentStore
+                agent_store = MongoDBAgentStore()
+                
+                # Normalize phone number (remove +1, spaces, dashes, etc.)
+                normalized_phone = to_number.replace("+1", "").replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
+                
+                # Try to find active agent with this phone number
+                agents = await agent_store.list_agents(active_only=True)
+                
+                for agent in agents:
+                    agent_phone = agent.get("phoneNumber", "").replace("+1", "").replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
+                    if agent_phone == normalized_phone:
+                        self.agent_config = agent
+                        logger.info(f"✅ Loaded agent config by phone number: {agent.get('name')} (STT: {agent.get('sttModel')}, TTS: {agent.get('ttsModel')}, LLM: {agent.get('inferenceModel')})")
+                        break
+                
+                if not self.agent_config:
+                    logger.warning(f"❌ No active agent found for phone number {to_number}")
+            except Exception as e:
+                logger.error(f"Error loading agent config by phone number: {e}", exc_info=True)
+        
+        # If no agent config found, send error message and close stream
+        if not self.agent_config:
+            logger.error(f"Call {self.call_sid} rejected: Number {to_number} not found in agents collection")
+            error_message = "Sorry, this number does not exist. Please check the number and try again. Goodbye."
+            try:
+                # Use default TTS config for error message (agent_config is None)
+                # Send error message via TTS using defaults
+                await self._synthesize_and_stream_tts(error_message)
+                # Close the stream after message plays
+                await asyncio.sleep(2)  # Give time for message to play
+                await self.websocket.close()
+                logger.info(f"Stream closed for unregistered number: {to_number}")
+            except Exception as e:
+                logger.error(f"Error sending rejection message: {e}", exc_info=True)
+                # Close stream even if TTS fails
+                try:
+                    await self.websocket.close()
+                except:
+                    pass
+            return
+        
+        # Use agent config if available
+        if self.agent_config:
+            logger.info(f"✅ Using agent config: {self.agent_config.get('name')} (STT: {self.agent_config.get('sttModel')}, TTS: {self.agent_config.get('ttsModel')}, LLM: {self.agent_config.get('inferenceModel')})")
 
         # Create a session for the call
-        session_info = self.conversation_tool.create_session(customer_id=f"phone_{from_number}")
+        session_info = self.conversation_tool.create_session(
+            customer_id=f"phone_{from_number}",
+            persona=None
+        )
+        # Set system prompt in session data if agent config has one
+        if self.agent_config and self.agent_config.get("systemPrompt"):
+            session_info["systemPrompt"] = self.agent_config.get("systemPrompt")
+        
         self.session_id = session_info.get("session_id")
         self.session_data = session_info
         
@@ -260,7 +317,10 @@ class TwilioStreamHandler:
 
             try:
                 wav_audio_data = convert_mulaw_to_wav_bytes(audio_to_process)
-                stt_result = await self.speech_tool.transcribe(wav_audio_data, "wav")
+                
+                # Use agent config for STT if available
+                stt_model = self.agent_config.get("sttModel") if self.agent_config else None
+                stt_result = await self.speech_tool.transcribe(wav_audio_data, "wav", model=stt_model)
                 user_text = stt_result.get("text", "").strip()
 
                 if not user_text:
@@ -279,7 +339,17 @@ class TwilioStreamHandler:
                 
                 # Get the latest session_data right before generating response
                 # This ensures we have the most up-to-date conversation history
-                ai_response = await self.conversation_tool.generate_response(self.session_data, user_text, None)
+                # Use agent config for LLM if available
+                llm_model = self.agent_config.get("inferenceModel") if self.agent_config else None
+                temperature = self.agent_config.get("temperature") if self.agent_config else None
+                max_tokens = self.agent_config.get("maxTokens") if self.agent_config else None
+                
+                ai_response = await self.conversation_tool.generate_response(
+                    self.session_data, user_text, None,
+                    model=llm_model,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
                 response_text = ai_response.get("response", "I'm sorry, I'm having trouble with that.")
                 
                 # Verify this is still the current query before updating session
@@ -318,7 +388,8 @@ class TwilioStreamHandler:
 
     async def _send_greeting(self):
         """Generates and streams a greeting message to the caller."""
-        greeting_text = "Hello! How can I help you today?"
+        # Use agent's greeting if available, otherwise default
+        greeting_text = self.agent_config.get("greeting", "Hello! How can I help you today?") if self.agent_config else "Hello! How can I help you today?"
         logger.info(f"Sending greeting: '{greeting_text}'")
         # Store TTS task for potential cancellation
         self.tts_streaming_task = asyncio.create_task(self._synthesize_and_stream_tts(greeting_text))
@@ -334,6 +405,10 @@ class TwilioStreamHandler:
         self.ai_speech_start_time = time.time()  # Record when AI started speaking (for grace period)
         logger.info("🔇 AI started speaking, muting user audio input (grace period active).")
         
+        # Get agent config for TTS if available
+        tts_voice = self.agent_config.get("ttsVoice", "alloy") if self.agent_config else "alloy"
+        tts_model = self.agent_config.get("ttsModel") if self.agent_config else None
+        
         try:
             sentences = self.tts_tool._split_into_sentences(text)
             for sentence in sentences:
@@ -347,7 +422,8 @@ class TwilioStreamHandler:
                     continue
                 
                 # Get TTS in PCM format for fast conversion (no ffmpeg needed!)
-                tts_result = await self._synthesize_pcm(sentence)
+                # Use agent config for TTS voice and model
+                tts_result = await self._synthesize_pcm(sentence, voice=tts_voice, model=tts_model)
                 
                 # Check again after TTS generation (user might have interrupted during generation)
                 if self.interrupt_detected:
@@ -418,12 +494,16 @@ class TwilioStreamHandler:
             self.interrupt_speech_frames = 0
             logger.info("✅ AI speech error, re-enabling user audio.")
     
-    async def _synthesize_pcm(self, text: str) -> Dict[str, Any]:
+    async def _synthesize_pcm(self, text: str, voice: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:
         """Generate TTS in PCM format for fast streaming (no conversion overhead)."""
         try:
+            # Use provided voice/model or fall back to agent config or defaults
+            tts_voice = voice or (self.agent_config.get("ttsVoice", "alloy") if self.agent_config else "alloy")
+            tts_model = model or (self.agent_config.get("ttsModel") if self.agent_config else self.tts_tool.model)
+            
             response = self.tts_tool.client.audio.speech.create(
-                model=self.tts_tool.model,
-                voice="alloy",
+                model=tts_model,
+                voice=tts_voice,
                 input=text,
                 response_format="pcm"  # Raw PCM - fastest, no decoding needed
             )

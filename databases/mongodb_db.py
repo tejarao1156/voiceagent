@@ -24,6 +24,12 @@ def initialize_mongodb():
     try:
         from config import MONGODB_URL, MONGODB_DATABASE
         
+        # Check if MongoDB URL is provided
+        if not MONGODB_URL or MONGODB_URL.strip() == "":
+            logger.warning("MongoDB URL is not set. Set MONGODB_URL in .env file to enable MongoDB.")
+            _mongo_available = False
+            return False
+        
         # Create MongoDB client
         _mongo_client = AsyncIOMotorClient(
             MONGODB_URL,
@@ -37,10 +43,11 @@ def initialize_mongodb():
         _mongo_available = True  # Assume available, will fail gracefully if not
         
         logger.info(f"MongoDB connection initialized successfully (database: {MONGODB_DATABASE})")
+        logger.info(f"MongoDB URL: {MONGODB_URL[:50]}..." if len(MONGODB_URL) > 50 else f"MongoDB URL: {MONGODB_URL}")
         return True
         
     except Exception as e:
-        logger.warning(f"MongoDB initialization failed: {e}. Running without MongoDB persistence.")
+        logger.error(f"MongoDB initialization failed: {e}. Running without MongoDB persistence.", exc_info=True)
         _mongo_available = False
         return False
 

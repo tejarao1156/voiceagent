@@ -52,8 +52,20 @@ class ConversationalResponseTool:
         session_data: Dict[str, Any],
         user_input: str,
         persona: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Process user input through the conversation manager."""
+        """Process user input through the conversation manager.
+        
+        Args:
+            session_data: Current conversation session data
+            user_input: User's input text
+            persona: Optional persona identifier (deprecated, use prompt in session_data)
+            model: Optional inference model override (e.g., "gpt-4o-mini", "gpt-4o")
+            temperature: Optional temperature override (0-2, default: 0.7)
+            max_tokens: Optional max tokens override (default: 800)
+        """
         if not user_input:
             return {
                 "session_data": session_data,
@@ -68,6 +80,9 @@ class ConversationalResponseTool:
             session_data,
             user_input,
             persona_config,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens
         )
         result.setdefault("persona", session_data.get("persona"))
         logger.info("Generated conversational response for input: %s", user_input[:80])

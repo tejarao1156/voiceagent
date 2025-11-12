@@ -85,7 +85,10 @@ Current conversation state will be provided to help you understand context."""
         self,
         session_data: Dict[str, Any],
         user_input: str,
-        persona_config: Optional[Dict[str, Any]] = None
+        persona_config: Optional[Dict[str, Any]] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Process user input and generate appropriate response
@@ -108,7 +111,10 @@ Current conversation state will be provided to help you understand context."""
                 session_data["conversation_history"] = conversation_history
             
             # Generate response using OpenAI with conversation history
-            response = await self._generate_response(context, user_input, conversation_history, persona_config)
+            response = await self._generate_response(
+                context, user_input, conversation_history, persona_config,
+                model=model, temperature=temperature, max_tokens=max_tokens
+            )
             
             # Update session based on response
             session_data = self._update_session_from_response(session_data, user_input, response)
@@ -156,7 +162,10 @@ Current conversation history: {len(session_data.get('conversation_history', []))
         context: str,
         user_input: str,
         conversation_history: List[Dict[str, Any]],
-        persona_config: Optional[Dict[str, Any]] = None
+        persona_config: Optional[Dict[str, Any]] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None
     ) -> Dict[str, Any]:
         """Generate response using OpenAI with conversation history"""
         try:
@@ -193,12 +202,17 @@ Current conversation history: {len(session_data.get('conversation_history', []))
             # Add current user input
             messages.append({"role": "user", "content": user_input})
             
+            # Use provided model/temperature/maxTokens or fall back to defaults
+            inference_model = model or INFERENCE_MODEL
+            temp = temperature if temperature is not None else 0.7
+            max_toks = max_tokens if max_tokens is not None else 800
+            
             # Use streaming for faster response (get chunks as they arrive)
             stream = self.client.chat.completions.create(
-                model=INFERENCE_MODEL,
+                model=inference_model,
                 messages=messages,
-                temperature=0.7,
-                max_tokens=800,  # Increased to allow better responses with context
+                temperature=temp,
+                max_tokens=max_toks,
                 stream=True  # Enable streaming for faster first token
             )
             

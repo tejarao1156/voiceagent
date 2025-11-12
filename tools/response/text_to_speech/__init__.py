@@ -69,11 +69,13 @@ class TextToSpeechTool:
         
         return result
 
-    async def _synthesize_chunk(self, text: str, voice: str) -> bytes:
+    async def _synthesize_chunk(self, text: str, voice: str, model: Optional[str] = None) -> bytes:
         """Synthesize a single text chunk."""
         try:
+            # Use provided model or fall back to instance default
+            tts_model = model or self.model
             response = self.client.audio.speech.create(
-                model=self.model,
+                model=tts_model,
                 voice=voice,
                 input=text,
                 response_format="mp3"
@@ -89,7 +91,8 @@ class TextToSpeechTool:
         voice: Optional[str] = None,
         *,
         persona: Optional[Dict[str, Any]] = None,
-        parallel: bool = False  # Disable parallel by default for faster response (most texts are short)
+        parallel: bool = False,  # Disable parallel by default for faster response (most texts are short)
+        model: Optional[str] = None  # Optional TTS model override (e.g., "tts-1", "tts-1-hd")
     ) -> Dict[str, Any]:
         """Generate speech audio for the provided text using OpenAI TTS.
         
@@ -145,14 +148,17 @@ class TextToSpeechTool:
                 }
                 selected_voice = voice_mapping.get(selected_voice.lower(), self.available_voices[0])
 
-            logger.info(f"Generating speech: model={self.model}, voice={selected_voice}, text_length={len(text)}")
+            # Use provided model or fall back to instance default
+            tts_model = model or self.model
+            
+            logger.info(f"Generating speech: model={tts_model}, voice={selected_voice}, text_length={len(text)}")
 
             # For short texts (< 200 chars), process directly (faster - no chunking overhead)
             # For longer texts, split and process in parallel
             if len(text) < 200 or not parallel:
                 # Single TTS call for short/medium text (fastest for most responses)
                 response = self.client.audio.speech.create(
-                    model=self.model,
+                    model=tts_model,
                     voice=selected_voice,
                     input=text,
                     response_format="mp3"
@@ -164,7 +170,7 @@ class TextToSpeechTool:
                 logger.info(f"Processing {len(sentences)} sentence chunks in parallel")
                 
                 # Process all chunks in parallel
-                tasks = [self._synthesize_chunk(sentence, selected_voice) for sentence in sentences]
+                tasks = [self._synthesize_chunk(sentence, selected_voice, tts_model) for sentence in sentences]
                 audio_chunks = await asyncio.gather(*tasks, return_exceptions=True)
                 
                 # Combine audio chunks (skip failed ones)
