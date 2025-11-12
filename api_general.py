@@ -110,19 +110,35 @@ active_stream_handlers: Dict[str, "TwilioStreamHandler"] = {}
 # Startup event - initialize MongoDB
 @app.on_event("startup")
 async def startup_event():
-    from config import TWILIO_PROCESSING_MODE, TWILIO_WEBHOOK_BASE_URL
+    from config import TWILIO_PROCESSING_MODE, TWILIO_WEBHOOK_BASE_URL, RUNTIME_ENVIRONMENT
     from databases.mongodb_db import initialize_mongodb, test_connection
+    from utils.environment_detector import get_environment_info
     
     # Initialize MongoDB for conversation storage
     initialize_mongodb()
     await test_connection()
     
+    # Get environment info for logging
+    env_info = get_environment_info()
+    
     logger.info("Voice Agent API started")
     logger.info("="*50)
+    logger.info(f"🔍 Runtime Environment: {RUNTIME_ENVIRONMENT.upper()}")
+    logger.info(f"🌐 Webhook Base URL: {TWILIO_WEBHOOK_BASE_URL}")
     logger.info(f"📞 Twilio Processing Mode: {TWILIO_PROCESSING_MODE.upper()}")
-    logger.info("Please configure your Twilio number's 'A CALL COMES IN' webhook to:")
-    logger.info(f"   URL: {TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/incoming")
-    logger.info(f"   Method: HTTP POST")
+    logger.info("")
+    logger.info("📋 SINGLE WEBHOOK URL FOR ALL AGENTS:")
+    logger.info(f"   Incoming: {TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/incoming")
+    logger.info(f"   Status: {TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/status")
+    logger.info("")
+    logger.info("💡 The system automatically identifies which agent to use based on")
+    logger.info("   the 'To' phone number in the Twilio webhook. Use this SAME URL")
+    logger.info("   for ALL your Twilio phone numbers!")
+    logger.info("")
+    if RUNTIME_ENVIRONMENT == "local":
+        logger.info("💡 Local Development: Make sure ngrok is running if using Twilio")
+        logger.info("   Run: ngrok http 4002")
+        logger.info("   The system will auto-detect ngrok if running")
     logger.info("="*50)
 
 # ============================================================================
@@ -230,6 +246,17 @@ async def health_check():
         timestamp=datetime.utcnow().isoformat(),
         version="1.0.0"
     )
+
+@app.get(
+    "/debug/environment",
+    summary="Environment Debug Info",
+    description="Get detailed environment detection information for debugging",
+    tags=["Debug"]
+)
+async def debug_environment():
+    """Debug endpoint to check environment detection"""
+    from utils.environment_detector import get_environment_info
+    return get_environment_info()
 
 @app.get(
     "/health/mongodb",
@@ -846,10 +873,44 @@ async def disconnect_websocket(session_id: str):
 # TWILIO PHONE INTEGRATION ENDPOINTS
 # ============================================================================
 
+@app.get(
+    "/webhooks/twilio/urls",
+    summary="Get Single Webhook URLs",
+    description="Get the single webhook URLs that work for all agents. Use these same URLs for all your Twilio phone numbers. The system automatically identifies which agent to use based on the 'To' phone number in the webhook.",
+    tags=["Twilio Phone Integration"]
+)
+async def get_webhook_urls():
+    """
+    Returns the single webhook URLs that should be used for ALL agents.
+    These URLs are environment-aware (local uses ngrok, pod uses Kubernetes URL).
+    """
+    from config import TWILIO_WEBHOOK_BASE_URL, RUNTIME_ENVIRONMENT
+    
+    incoming_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/incoming"
+    status_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/status"
+    
+    return {
+        "incomingUrl": incoming_url,
+        "statusCallbackUrl": status_url,
+        "instructions": "Use these SAME URLs for ALL your Twilio phone numbers. The system automatically routes calls to the correct agent based on the phone number being called (the 'To' field in the webhook).",
+        "environment": {
+            "runtime": RUNTIME_ENVIRONMENT,
+            "baseUrl": TWILIO_WEBHOOK_BASE_URL
+        },
+        "steps": [
+            "1. Go to Twilio Console → Phone Numbers",
+            "2. For EACH phone number, set:",
+            f"   - 'A CALL COMES IN': {incoming_url} (POST)",
+            f"   - 'STATUS CALLBACK URL': {status_url} (POST)",
+            "3. Click Save",
+            "",
+            "💡 Note: Use the SAME URLs for all your phone numbers. The system automatically identifies which agent to use based on which number was called."
+        ]
+    }
 @app.post(
     "/webhooks/twilio/incoming",
-    summary="Twilio Incoming Call Webhook (Unified)",
-    description="Unified webhook for Twilio calls. Routes to batch or stream based on TWILIO_PROCESSING_MODE.",
+    summary="Twilio Incoming Call Webhook (Single URL for All Agents)",
+    description="Single webhook endpoint for all incoming Twilio calls. The system automatically identifies which agent to use based on the 'To' phone number in the webhook. Routes to batch or stream based on TWILIO_PROCESSING_MODE.",
     tags=["Twilio Phone Integration"],
     response_class=HTMLResponse
 )
@@ -868,6 +929,18 @@ async def twilio_incoming_call(request: Request):
         logger.info(f"Received incoming call webhook for CallSid: {call_sid}")
         logger.info(f"Processing mode set to: {TWILIO_PROCESSING_MODE}")
 
+        # Check if agent exists for this phone number (for both stream and batch modes)
+        to_number = call_data.get("To")
+        if to_number:
+            agent_config = await twilio_phone_tool._load_agent_config(to_number)
+            if not agent_config:
+                logger.warning(f"❌ No active agent found for phone number {to_number}")
+                error_response = TwilioVoiceResponse()
+                error_response.say("Sorry, this number does not exist. Please check the number and try again. Goodbye.", voice="alice")
+                error_response.hangup()
+                logger.info(f"Call {call_sid} rejected: Number {to_number} not found in agents collection")
+                return HTMLResponse(content=str(error_response))
+
         response = TwilioVoiceResponse()
 
         if TWILIO_PROCESSING_MODE == "stream":
@@ -879,7 +952,7 @@ async def twilio_incoming_call(request: Request):
             logger.info(f"🚀 Mode: STREAM. Initiating media stream to: {stream_url}")
             stream = connect.stream(url=stream_url)
             
-            # Pass call metadata to the stream handler
+            # Pass call metadata to the stream handler (To number is used to identify agent)
             stream.parameter(name="From", value=call_data.get("From"))
             stream.parameter(name="To", value=call_data.get("To"))
 
@@ -1024,7 +1097,12 @@ async def twilio_recording_handler(request: Request):
                 # Use audio directly without conversion - Twilio sends WAV, Whisper accepts WAV
                 # Skip format conversion to reduce latency
                 logger.info(f"[RECORDING] Skipping format conversion - using WAV directly from Twilio")
-                stt_result = await speech_tool.transcribe(audio_data, "wav")
+                
+                # Get agent config for this call (to use agent-specific STT model)
+                agent_config = twilio_phone_tool.call_agent_configs.get(call_sid)
+                stt_model = agent_config.get("sttModel") if agent_config else None
+                
+                stt_result = await speech_tool.transcribe(audio_data, "wav", model=stt_model)
                 
                 if stt_result.get("success"):
                     user_text = stt_result.get("text", "").strip()
@@ -1040,12 +1118,24 @@ async def twilio_recording_handler(request: Request):
                             logger.info(f"[RECORDING] Stopping AI response and processing new input: {user_text}")
                     
                     if user_text:
-                        # Get AI response
+                        # Get agent config for this call (to use agent-specific models)
+                        agent_config = twilio_phone_tool.call_agent_configs.get(call_sid)
+                        
+                        # Get AI response with agent config
                         session_id = twilio_phone_tool.active_calls.get(call_sid)
                         if session_id:
                             session_data = twilio_phone_tool.session_data.get(session_id, {})
+                            
+                            # Use agent config for LLM if available
+                            llm_model = agent_config.get("inferenceModel") if agent_config else None
+                            temperature = agent_config.get("temperature") if agent_config else None
+                            max_tokens = agent_config.get("maxTokens") if agent_config else None
+                            
                             ai_response = await conversation_tool.generate_response(
-                                session_data, user_text, None
+                                session_data, user_text, None,
+                                model=llm_model,
+                                temperature=temperature,
+                                max_tokens=max_tokens
                             )
                             response_text = ai_response.get("response", "I'm sorry, I didn't understand that.")
                         else:
@@ -1053,8 +1143,15 @@ async def twilio_recording_handler(request: Request):
                         
                         logger.info(f"[RECORDING] AI Response: {response_text}")
                         
-                        # Convert response to speech
-                        tts_result = await tts_tool.synthesize(response_text, voice="alloy", parallel=False)
+                        # Convert response to speech with agent config
+                        tts_voice = agent_config.get("ttsVoice", "alloy") if agent_config else "alloy"
+                        tts_model = agent_config.get("ttsModel") if agent_config else None
+                        tts_result = await tts_tool.synthesize(
+                            response_text, 
+                            voice=tts_voice, 
+                            parallel=False,
+                            model=tts_model
+                        )
                         
                         if tts_result.get("success"):
                             # Use Say command for reliable audio playback on Twilio
@@ -1167,6 +1264,7 @@ async def twilio_recording_handler(request: Request):
 # TWILIO PHONE INTEGRATION (REAL-TIME STREAMING)
 # ============================================================================
 
+# Keep original stream endpoint for backward compatibility
 @app.websocket("/webhooks/twilio/stream")
 async def twilio_stream_websocket_handler(websocket: WebSocket):
     """
@@ -1279,7 +1377,12 @@ async def twilio_recording_handler(request: Request):
                 # Use audio directly without conversion - Twilio sends WAV, Whisper accepts WAV
                 # Skip format conversion to reduce latency
                 logger.info(f"[RECORDING] Skipping format conversion - using WAV directly from Twilio")
-                stt_result = await speech_tool.transcribe(audio_data, "wav")
+                
+                # Get agent config for this call (to use agent-specific STT model)
+                agent_config = twilio_phone_tool.call_agent_configs.get(call_sid)
+                stt_model = agent_config.get("sttModel") if agent_config else None
+                
+                stt_result = await speech_tool.transcribe(audio_data, "wav", model=stt_model)
                 
                 if stt_result.get("success"):
                     user_text = stt_result.get("text", "").strip()
@@ -1295,12 +1398,24 @@ async def twilio_recording_handler(request: Request):
                             logger.info(f"[RECORDING] Stopping AI response and processing new input: {user_text}")
                     
                     if user_text:
-                        # Get AI response
+                        # Get agent config for this call (to use agent-specific models)
+                        agent_config = twilio_phone_tool.call_agent_configs.get(call_sid)
+                        
+                        # Get AI response with agent config
                         session_id = twilio_phone_tool.active_calls.get(call_sid)
                         if session_id:
                             session_data = twilio_phone_tool.session_data.get(session_id, {})
+                            
+                            # Use agent config for LLM if available
+                            llm_model = agent_config.get("inferenceModel") if agent_config else None
+                            temperature = agent_config.get("temperature") if agent_config else None
+                            max_tokens = agent_config.get("maxTokens") if agent_config else None
+                            
                             ai_response = await conversation_tool.generate_response(
-                                session_data, user_text, None
+                                session_data, user_text, None,
+                                model=llm_model,
+                                temperature=temperature,
+                                max_tokens=max_tokens
                             )
                             response_text = ai_response.get("response", "I'm sorry, I didn't understand that.")
                         else:
@@ -1308,8 +1423,15 @@ async def twilio_recording_handler(request: Request):
                         
                         logger.info(f"[RECORDING] AI Response: {response_text}")
                         
-                        # Convert response to speech
-                        tts_result = await tts_tool.synthesize(response_text, voice="alloy", parallel=False)
+                        # Convert response to speech with agent config
+                        tts_voice = agent_config.get("ttsVoice", "alloy") if agent_config else "alloy"
+                        tts_model = agent_config.get("ttsModel") if agent_config else None
+                        tts_result = await tts_tool.synthesize(
+                            response_text, 
+                            voice=tts_voice, 
+                            parallel=False,
+                            model=tts_model
+                        )
                         
                         if tts_result.get("success"):
                             # Use Say command for reliable audio playback on Twilio
@@ -1591,6 +1713,7 @@ async def create_agent(request: Request):
     - `direction` (string, required): "inbound" 
     - `phoneNumber` (string, required): Phone number (e.g., "+1 555 123 4567")
     - `provider` (string, required): "twilio" or "custom"
+    - `userId` (string, optional): User/tenant ID (for multi-tenant support)
     - `sttModel` (string): Speech-to-text model (default: "whisper-1")
     - `inferenceModel` (string): LLM model (default: "gpt-4o-mini")
     - `ttsModel` (string): Text-to-speech model (default: "tts-1")
@@ -1607,6 +1730,7 @@ async def create_agent(request: Request):
     - Database: `voiceagent` (from MONGODB_DATABASE config)
     - Collection: `agents`
     - All configuration fields are persisted
+    - Webhook URLs are automatically generated and stored
     """
     try:
         agent_data = await request.json()
@@ -1621,20 +1745,60 @@ async def create_agent(request: Request):
             raise HTTPException(status_code=503, detail="MongoDB is not available. Please check MongoDB connection.")
         
         agent_store = MongoDBAgentStore()
+        
+        # Create agent first (this returns the agent_id)
         agent_id = await agent_store.create_agent(agent_data)
         
-        if agent_id:
-            logger.info(f"✅ Agent created successfully with ID: {agent_id}")
-            return {
-                "success": True, 
-                "agent_id": agent_id, 
-                "message": "Agent created successfully and stored in MongoDB",
-                "database": "voiceagent",
-                "collection": "agents"
-            }
-        else:
+        if not agent_id:
             logger.error("Failed to create agent - agent_store.create_agent returned None")
             raise HTTPException(status_code=500, detail="Failed to create agent in MongoDB")
+        
+        # Use single webhook URL for all agents (system looks up agent by phone number)
+        from config import TWILIO_WEBHOOK_BASE_URL
+        single_incoming_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/incoming"
+        single_status_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/status"
+        
+        # Save webhook URLs to MongoDB
+        await agent_store.update_agent(agent_id, {
+            "webhookUrl": single_incoming_url,
+            "statusCallbackUrl": single_status_url
+        })
+        
+        logger.info(f"✅ Agent created successfully with ID: {agent_id}")
+        logger.info(f"📞 Agent will be automatically identified by phone number: {agent_data.get('phoneNumber')}")
+        logger.info(f"💾 Agent saved to MongoDB: database='voiceagent', collection='agents'")
+        logger.info(f"🔗 Webhook URLs saved to MongoDB:")
+        logger.info(f"   Incoming: {single_incoming_url}")
+        logger.info(f"   Status: {single_status_url}")
+        
+        # Return response with single webhook URLs
+        return {
+            "success": True,
+            "agent_id": agent_id,
+            "message": "Agent created successfully and stored in MongoDB",
+            "mongodb": {
+                "database": "voiceagent",
+                "collection": "agents",
+                "saved": True
+            },
+            "webhookConfiguration": {
+                "incomingUrl": single_incoming_url,
+                "statusCallbackUrl": single_status_url,
+                "instructions": "Use this SINGLE webhook URL for ALL your Twilio phone numbers. The system automatically identifies which agent to use based on the 'To' phone number in the webhook.",
+                "steps": [
+                    "1. Go to Twilio Console → Phone Numbers",
+                    f"2. Click on phone number: {agent_data.get('phoneNumber')}",
+                    "3. Scroll to 'Voice & Fax' section",
+                    f"4. Set 'A CALL COMES IN' to: {single_incoming_url} (POST)",
+                    f"5. Set 'STATUS CALLBACK URL' to: {single_status_url} (POST)",
+                    "6. Click Save",
+                    "",
+                    "💡 Note: This same webhook URL works for ALL your agents. The system automatically routes calls to the correct agent based on the phone number being called."
+                ]
+            },
+            "database": "voiceagent",
+            "collection": "agents"
+        }
             
     except HTTPException:
         raise

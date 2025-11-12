@@ -16,6 +16,7 @@ export default function SaaSDashboard() {
   const [activeTab, setActiveTab] = useState('AI Agents')
   const [agents, setAgents] = useState<Agent[]>([]) // Start with empty array - load from MongoDB
   const [createModalOpen, setCreateModalOpen] = useState(false)
+  const [editAgent, setEditAgent] = useState<Agent | null>(null)
   const [loadingAgents, setLoadingAgents] = useState(false)
   const [agentFilter, setAgentFilter] = useState<'all' | 'active' | 'inactive'>('all')
 
@@ -59,32 +60,75 @@ export default function SaaSDashboard() {
     twilioAuthToken?: string
   }) => {
     try {
-      const response = await fetch('/agents', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(data),
-      })
+      if (editAgent) {
+        // Update existing agent - exclude name and phoneNumber
+        const updateData = {
+          direction: data.direction,
+          provider: data.provider,
+          sttModel: data.sttModel,
+          inferenceModel: data.inferenceModel,
+          ttsModel: data.ttsModel,
+          ttsVoice: data.ttsVoice,
+          systemPrompt: data.systemPrompt,
+          greeting: data.greeting,
+          temperature: data.temperature,
+          maxTokens: data.maxTokens,
+          active: data.active,
+          twilioAccountSid: data.twilioAccountSid,
+          twilioAuthToken: data.twilioAuthToken,
+        }
 
-      if (!response.ok) {
-        throw new Error('Failed to create agent')
+        const response = await fetch(`/agents/${editAgent.id}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(updateData),
+        })
+
+        if (!response.ok) {
+          throw new Error('Failed to update agent')
+        }
+
+        // Close modal and reset edit state
+        setCreateModalOpen(false)
+        setEditAgent(null)
+        
+        // Reload agents from MongoDB after a short delay to ensure DB write is complete
+        setTimeout(async () => {
+          await loadAgents()
+        }, 500)
+        
+        alert('Agent updated successfully!')
+      } else {
+        // Create new agent
+        const response = await fetch('/agents', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(data),
+        })
+
+        if (!response.ok) {
+          throw new Error('Failed to create agent')
+        }
+
+        const result = await response.json()
+        
+        // Close modal
+        setCreateModalOpen(false)
+        
+        // Reload agents from MongoDB after a short delay to ensure DB write is complete
+        setTimeout(async () => {
+          await loadAgents()
+        }, 500)
+        
+        alert('Agent created successfully!')
       }
-
-      const result = await response.json()
-      
-      // Close modal
-      setCreateModalOpen(false)
-      
-      // Reload agents from MongoDB after a short delay to ensure DB write is complete
-      setTimeout(async () => {
-        await loadAgents()
-      }, 500)
-      
-      alert('Agent created successfully!')
     } catch (error) {
-      console.error('Error creating agent:', error)
-      alert('Failed to create agent. Please try again.')
+      console.error(`Error ${editAgent ? 'updating' : 'creating'} agent:`, error)
+      alert(`Failed to ${editAgent ? 'update' : 'create'} agent. Please try again.`)
     }
   }
 
@@ -124,8 +168,8 @@ export default function SaaSDashboard() {
               direction: agent.direction || 'inbound',
               phoneNumber: agent.phoneNumber,
               lastUpdated,
-              status: agent.active ? 'active' : 'idle',
-              active: agent.active,
+              status: (agent.active === true || agent.active === undefined) ? 'active' : 'idle',
+              active: agent.active !== false, // Default to true if undefined/null
               sttModel: agent.sttModel,
               inferenceModel: agent.inferenceModel,
               ttsModel: agent.ttsModel,
@@ -162,8 +206,10 @@ export default function SaaSDashboard() {
 
   // Filter agents based on active/inactive filter
   const filteredAgents = agents.filter(agent => {
-    if (agentFilter === 'active') return agent.active === true
-    if (agentFilter === 'inactive') return agent.active === false
+    // Treat undefined/null as active (default behavior)
+    const isActive = agent.active !== false
+    if (agentFilter === 'active') return isActive === true
+    if (agentFilter === 'inactive') return isActive === false
     return true // 'all' shows everything
   })
 
@@ -184,8 +230,8 @@ export default function SaaSDashboard() {
   }, [mounted])
 
   const handleEdit = (agent: Agent) => {
-    // TODO: Implement edit functionality
-    console.log('Edit agent:', agent)
+    setEditAgent(agent)
+    setCreateModalOpen(true)
   }
 
   const handleToggleActive = async (agent: Agent, active: boolean) => {
@@ -342,10 +388,16 @@ export default function SaaSDashboard() {
       </div>
 
       <CreateAgentModal
-        open={createModalOpen}
-        onOpenChange={setCreateModalOpen}
-        onSubmit={handleCreateAgent}
-      />
+          open={createModalOpen}
+          onOpenChange={(open) => {
+            setCreateModalOpen(open)
+            if (!open) {
+              setEditAgent(null) // Reset edit agent when modal closes
+            }
+          }}
+          onSubmit={handleCreateAgent}
+          editAgent={editAgent}
+        />
     </div>
   )
 }

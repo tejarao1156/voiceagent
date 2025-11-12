@@ -97,31 +97,28 @@ class TwilioPhoneTool:
             agent_config = await self._load_agent_config(to_number)
             
             if not agent_config:
-                logger.warning(f"No active agent found for phone number {to_number}, using defaults")
-                # Use default configuration
-                agent_config = {
-                    "sttModel": "whisper-1",
-                    "inferenceModel": "gpt-4o-mini",
-                    "ttsModel": "tts-1",
-                    "ttsVoice": "alloy",
-                    "systemPrompt": None,
-                    "greeting": "Hello! How can I help you today?",
-                    "temperature": 0.7,
-                    "maxTokens": 500,
-                }
-            else:
-                logger.info(f"✅ Using agent config for {to_number}: {agent_config.get('name', 'Unknown')}")
-                logger.info(f"   STT: {agent_config.get('sttModel')}, TTS: {agent_config.get('ttsModel')} ({agent_config.get('ttsVoice')}), LLM: {agent_config.get('inferenceModel')}")
+                logger.warning(f"❌ No active agent found for phone number {to_number}")
+                # Return error message saying number does not exist
+                response = VoiceResponse()
+                response.say("Sorry, this number does not exist. Please check the number and try again. Goodbye.", voice="alice")
+                response.hangup()
+                logger.info(f"Call {call_sid} rejected: Number {to_number} not found in agents collection")
+                return str(response)
+            
+            logger.info(f"✅ Using agent config for {to_number}: {agent_config.get('name', 'Unknown')}")
+            logger.info(f"   STT: {agent_config.get('sttModel')}, TTS: {agent_config.get('ttsModel')} ({agent_config.get('ttsVoice')}), LLM: {agent_config.get('inferenceModel')}")
             
             # Store agent config for this call
             self.call_agent_configs[call_sid] = agent_config
             
-            # Create conversation session with agent's system prompt
+            # Create conversation session
             session_data = self.conversation_tool.create_session(
                 customer_id=f"phone_{from_number}",
-                persona=None,
-                prompt=agent_config.get("systemPrompt")  # Use agent's system prompt
+                persona=None
             )
+            # Set system prompt in session data if agent config has one
+            if agent_config.get("systemPrompt"):
+                session_data["systemPrompt"] = agent_config.get("systemPrompt")
             
             session_id = session_data.get("session_id", call_sid)
             

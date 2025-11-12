@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { ChevronDown, ChevronUp, Settings, Bot, MessageSquare, Zap } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -34,13 +34,34 @@ interface CreateAgentModalProps {
     twilioAccountSid?: string
     twilioAuthToken?: string
   }) => void
+  editAgent?: {
+    id: string
+    name: string
+    direction: 'inbound'
+    phoneNumber: string
+    provider?: 'twilio' | 'custom' | 'plivo'
+    sttModel?: string
+    inferenceModel?: string
+    ttsModel?: string
+    ttsVoice?: string
+    systemPrompt?: string
+    greeting?: string
+    temperature?: number
+    maxTokens?: number
+    active?: boolean
+    twilioAccountSid?: string
+    twilioAuthToken?: string
+  } | null
 }
 
 export function CreateAgentModal({
   open,
   onOpenChange,
   onSubmit,
+  editAgent,
 }: CreateAgentModalProps) {
+  const isEditMode = !!editAgent
+  
   const [formData, setFormData] = useState({
     name: '',
     direction: 'inbound' as 'inbound',
@@ -58,6 +79,72 @@ export function CreateAgentModal({
     twilioAccountSid: '',
     twilioAuthToken: '',
   })
+
+  const [webhookUrls, setWebhookUrls] = useState<{
+    incomingUrl: string
+    statusCallbackUrl: string
+    environment?: { runtime: string; baseUrl: string }
+  } | null>(null)
+
+  // Fetch webhook URLs when modal opens and provider is Twilio
+  useEffect(() => {
+    const fetchWebhookUrls = async () => {
+      if (open && formData.provider === 'twilio') {
+        try {
+          const response = await fetch('/webhooks/twilio/urls')
+          if (response.ok) {
+            const data = await response.json()
+            setWebhookUrls(data)
+          }
+        } catch (error) {
+          console.error('Failed to fetch webhook URLs:', error)
+        }
+      }
+    }
+    fetchWebhookUrls()
+  }, [open, formData.provider])
+
+  // Load edit agent data when modal opens
+  useEffect(() => {
+    if (open && editAgent) {
+      setFormData({
+        name: editAgent.name || '',
+        direction: editAgent.direction || 'inbound',
+        phoneNumber: editAgent.phoneNumber || '',
+        provider: (editAgent.provider === 'plivo' ? 'twilio' : editAgent.provider) || 'twilio' as 'twilio' | 'custom',
+        sttModel: editAgent.sttModel || 'whisper-1',
+        inferenceModel: editAgent.inferenceModel || 'gpt-4o-mini',
+        ttsModel: editAgent.ttsModel || 'tts-1',
+        ttsVoice: editAgent.ttsVoice || 'alloy',
+        systemPrompt: editAgent.systemPrompt || '',
+        greeting: editAgent.greeting || '',
+        temperature: editAgent.temperature ?? 0.7,
+        maxTokens: editAgent.maxTokens ?? 500,
+        active: editAgent.active ?? true,
+        twilioAccountSid: editAgent.twilioAccountSid || '',
+        twilioAuthToken: editAgent.twilioAuthToken || '',
+      })
+    } else if (open && !editAgent) {
+      // Reset form for create mode
+      setFormData({
+        name: '',
+        direction: 'inbound',
+        phoneNumber: '',
+        provider: 'twilio',
+        sttModel: 'whisper-1',
+        inferenceModel: 'gpt-4o-mini',
+        ttsModel: 'tts-1',
+        ttsVoice: 'alloy',
+        systemPrompt: '',
+        greeting: '',
+        temperature: 0.7,
+        maxTokens: 500,
+        active: true,
+        twilioAccountSid: '',
+        twilioAuthToken: '',
+      })
+    }
+  }, [open, editAgent])
 
   const [expandedSections, setExpandedSections] = useState({
     basic: true,
@@ -102,10 +189,12 @@ export function CreateAgentModal({
       <DialogContent className="sm:max-w-[700px] max-h-[90vh] overflow-y-auto bg-white border-slate-200 [&>button]:text-slate-600">
         <DialogHeader>
           <DialogTitle className="text-2xl font-semibold text-slate-900">
-            Create New AI Agent
+            {isEditMode ? 'Edit AI Agent' : 'Create New AI Agent'}
           </DialogTitle>
           <p className="text-sm text-slate-600 mt-1">
-            Configure your voice AI agent with custom models and behavior settings
+            {isEditMode 
+              ? 'Update your voice AI agent configuration (name and phone number cannot be changed)'
+              : 'Configure your voice AI agent with custom models and behavior settings'}
           </p>
         </DialogHeader>
 
@@ -132,13 +221,15 @@ export function CreateAgentModal({
                 <div>
                   <label className="text-sm font-medium text-slate-700 mb-1 block">
                     Agent Name <span className="text-red-500">*</span>
+                    {isEditMode && <span className="text-xs text-slate-500 ml-2">(Cannot be changed)</span>}
                   </label>
                   <Input
                     value={formData.name}
                     onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                     placeholder="e.g., gman, alexa-bot"
                     required
-                    className="bg-white border-slate-300 text-slate-900 placeholder:text-slate-400"
+                    disabled={isEditMode}
+                    className="bg-white border-slate-300 text-slate-900 placeholder:text-slate-400 disabled:bg-slate-100 disabled:cursor-not-allowed"
                   />
                 </div>
 
@@ -184,15 +275,18 @@ export function CreateAgentModal({
                 <div>
                   <label className="text-sm font-medium text-slate-700 mb-1 block">
                     Phone Number <span className="text-red-500">*</span>
+                    {isEditMode && <span className="text-xs text-slate-500 ml-2">(Cannot be changed)</span>}
                   </label>
-                  <PhoneInput
-                    value={formData.phoneNumber}
-                    onChange={(value) =>
-                      setFormData({ ...formData, phoneNumber: value })
-                    }
-                    placeholder="Enter phone number"
-                    required
-                  />
+                  <div className={isEditMode ? "pointer-events-none opacity-60" : ""}>
+                    <PhoneInput
+                      value={formData.phoneNumber}
+                      onChange={(value) =>
+                        setFormData({ ...formData, phoneNumber: value })
+                      }
+                      placeholder="Enter phone number"
+                      required
+                    />
+                  </div>
                 </div>
 
                 <div className="flex items-center gap-2 pt-2">
@@ -451,35 +545,52 @@ export function CreateAgentModal({
               </button>
               {expandedSections.provider && (
                 <div className="p-4 space-y-4 bg-white">
-                  <div>
-                    <label className="text-sm font-medium text-slate-700 mb-1 block">
-                      Twilio Account SID (Optional)
-                    </label>
-                    <Input
-                      type="text"
-                      value={formData.twilioAccountSid}
-                      onChange={(e) =>
-                        setFormData({ ...formData, twilioAccountSid: e.target.value })
-                      }
-                      placeholder="Override default Twilio account"
-                      className="bg-white border-slate-300 text-slate-900 placeholder:text-slate-400"
-                    />
-                  </div>
+                  {/* Webhook URLs - Read Only */}
+                  {webhookUrls && (
+                    <>
+                      <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-4">
+                        <p className="text-xs font-medium text-indigo-900 mb-2">
+                          🌐 Environment: {webhookUrls.environment?.runtime?.toUpperCase() || 'UNKNOWN'}
+                        </p>
+                        <p className="text-xs text-indigo-700">
+                          These URLs are automatically generated based on your environment. Use the same URLs for all your Twilio phone numbers.
+                        </p>
+                      </div>
 
-                  <div>
-                    <label className="text-sm font-medium text-slate-700 mb-1 block">
-                      Twilio Auth Token (Optional)
-                    </label>
-                    <Input
-                      type="password"
-                      value={formData.twilioAuthToken}
-                      onChange={(e) =>
-                        setFormData({ ...formData, twilioAuthToken: e.target.value })
-                      }
-                      placeholder="Override default Twilio auth token"
-                      className="bg-white border-slate-300 text-slate-900 placeholder:text-slate-400"
-                    />
-                  </div>
+                      <div>
+                        <label className="text-sm font-medium text-slate-700 mb-1 block">
+                          Incoming Webhook URL <span className="text-xs text-slate-500">(Read-only)</span>
+                        </label>
+                        <Input
+                          type="text"
+                          value={webhookUrls.incomingUrl}
+                          readOnly
+                          disabled
+                          className="bg-slate-50 border-slate-300 text-slate-600 cursor-not-allowed font-mono text-xs"
+                        />
+                        <p className="text-xs text-slate-500 mt-1">
+                          Set this as "A CALL COMES IN" webhook in Twilio Console
+                        </p>
+                      </div>
+
+                      <div>
+                        <label className="text-sm font-medium text-slate-700 mb-1 block">
+                          Status Callback URL <span className="text-xs text-slate-500">(Read-only)</span>
+                        </label>
+                        <Input
+                          type="text"
+                          value={webhookUrls.statusCallbackUrl}
+                          readOnly
+                          disabled
+                          className="bg-slate-50 border-slate-300 text-slate-600 cursor-not-allowed font-mono text-xs"
+                        />
+                        <p className="text-xs text-slate-500 mt-1">
+                          Set this as "STATUS CALLBACK URL" in Twilio Console
+                        </p>
+                      </div>
+
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -499,7 +610,7 @@ export function CreateAgentModal({
               type="submit"
               className="bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white shadow-lg"
             >
-              Create Agent
+              {isEditMode ? 'Update Agent' : 'Create Agent'}
             </Button>
           </div>
         </form>

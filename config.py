@@ -78,12 +78,27 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 # ============================================================================
+# ENVIRONMENT DETECTION
+# ============================================================================
+from utils.environment_detector import detect_runtime_environment, get_webhook_base_url
+
+# Detect runtime environment (local, kubernetes, docker, unknown)
+RUNTIME_ENVIRONMENT = detect_runtime_environment()
+
+# ============================================================================
 # TWILIO CONFIGURATION
 # ============================================================================
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
-TWILIO_WEBHOOK_BASE_URL = os.getenv("TWILIO_WEBHOOK_BASE_URL", f"http://{API_HOST}:{API_PORT}")
+
+# Get webhook base URL based on environment detection
+# This will automatically use:
+# - Explicit TWILIO_WEBHOOK_BASE_URL if set
+# - Kubernetes ingress/service URL if in pod
+# - ngrok URL if available locally
+# - localhost fallback otherwise
+TWILIO_WEBHOOK_BASE_URL = get_webhook_base_url()
 
 # Determines how to process calls: "batch" for <Record>, "stream" for Media Streams.
 TWILIO_PROCESSING_MODE = os.getenv("TWILIO_PROCESSING_MODE", "batch").lower()
