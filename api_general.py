@@ -1,12 +1,15 @@
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Query, Path, WebSocket, WebSocketDisconnect
 from starlette.requests import Request
+from starlette.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from typing import Optional, Dict, Any, List
 import json
 import logging
 import asyncio
+import os
 from datetime import datetime
+import httpx
 
 # Import all models from the unified models file
 from models import (
@@ -126,6 +129,7 @@ async def startup_event():
 # GENERAL ENDPOINTS
 # ============================================================================
 
+
 @app.get(
     "/",
     summary="Root Endpoint",
@@ -203,8 +207,6 @@ async def root():
             <p class="subtitle">AI-powered voice conversation system</p>
             <div class="links">
                 <a href="/saas-dashboard" class="link">🚀 SaaS Dashboard - Voice Agent Management</a>
-                <a href="/chat" class="link">🎤 Chat UI - Voice Conversation</a>
-                <a href="/dashboard" class="link">📞 Twilio Dashboard</a>
                 <a href="/docs" class="link link-docs">📚 API Documentation (Swagger)</a>
                 <a href="/redoc" class="link link-docs">📖 API Documentation (ReDoc)</a>
             </div>
@@ -1416,119 +1418,137 @@ async def twilio_recording_handler(request: Request):
                 content='<?xml version="1.0" encoding="UTF-8"?><Response><Say>An error occurred.</Say><Hangup/></Response>'
             )
 
-@app.get(
-    "/dashboard",
-    summary="Twilio Phone Dashboard",
-    description="HTML dashboard for monitoring Twilio phone calls",
-    tags=["Twilio Phone Integration"],
-    response_class=HTMLResponse
-)
-async def dashboard():
-    """Serve the Twilio phone dashboard UI."""
-    import os
-    dashboard_path = os.path.join(os.path.dirname(__file__), "ui", "twilio_phone_ui.html")
-    if os.path.exists(dashboard_path):
-        return FileResponse(dashboard_path)
-    else:
-        raise HTTPException(status_code=404, detail="Dashboard not found")
 
-@app.get(
-    "/twilio/dashboard",
-    summary="Twilio Phone Dashboard (Legacy)",
-    description="HTML dashboard for monitoring Twilio phone calls (legacy endpoint)",
-    tags=["Twilio Phone Integration"],
-    response_class=HTMLResponse
-)
-async def twilio_dashboard():
-    """Serve the Twilio phone dashboard UI (legacy endpoint - redirects to /chat)."""
-    import os
-    dashboard_path = os.path.join(os.path.dirname(__file__), "ui", "twilio_phone_ui.html")
-    if os.path.exists(dashboard_path):
-        return FileResponse(dashboard_path)
-    else:
-        raise HTTPException(status_code=404, detail="Dashboard not found")
+# Next.js UI proxy configuration
+# Note: Port 9000 is only used internally for FastAPI->Next.js communication
+# It is NOT exposed externally - all access is through port 4002
+NEXTJS_INTERNAL_URL = os.getenv("NEXTJS_INTERNAL_URL", "http://localhost:9000")
 
-@app.get(
+async def proxy_to_nextjs(request: Request, path: str = ""):
+    """Proxy request to Next.js server"""
+    try:
+        # Build the target URL
+        target_url = f"{NEXTJS_INTERNAL_URL}/{path}"
+        if request.url.query:
+            target_url += f"?{request.url.query}"
+        
+        # Forward headers (excluding host and connection)
+        headers = dict(request.headers)
+        headers.pop("host", None)
+        headers.pop("connection", None)
+        headers.pop("content-length", None)  # Let httpx calculate this
+        
+        # Get request body for methods that support it
+        body = None
+        if request.method in ["POST", "PUT", "PATCH"]:
+            body = await request.body()
+        
+        # Make request to Next.js
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.request(
+                method=request.method,
+                url=target_url,
+                headers=headers,
+                content=body,
+                follow_redirects=True,
+            )
+            
+            # Filter response headers (remove connection-specific headers, but keep important ones)
+            response_headers = {}
+            # Copy all headers except connection-specific ones
+            for key, value in response.headers.items():
+                key_lower = key.lower()
+                if key_lower not in ["connection", "transfer-encoding", "content-encoding"]:
+                    response_headers[key] = value
+            
+            # Get content type - preserve original or default to text/html
+            content_type = response.headers.get("content-type", "text/html")
+            
+            # Ensure CORS headers are set for browser compatibility
+            response_headers["access-control-allow-origin"] = "*"
+            response_headers["access-control-allow-methods"] = "GET, POST, PUT, DELETE, PATCH, OPTIONS"
+            response_headers["access-control-allow-headers"] = "*"
+            
+            # Return response with proper headers
+            return Response(
+                content=response.content,
+                status_code=response.status_code,
+                headers=response_headers,
+                media_type=content_type,
+            )
+    except httpx.ConnectError:
+        logger.error("Next.js server not available. Is it running on port 9000?")
+        return HTMLResponse(
+            content="""
+            <html>
+                <body style="font-family: sans-serif; padding: 40px; text-align: center;">
+                    <h1>⚠️ UI Server Not Available</h1>
+                    <p>The Next.js UI server is not running.</p>
+                    <p>Please start it with: <code>cd ui && npm run dev</code></p>
+                </body>
+            </html>
+            """,
+            status_code=503
+        )
+    except Exception as e:
+        logger.error(f"Error proxying to Next.js: {e}", exc_info=True)
+        return HTMLResponse(
+            content=f"<html><body><h1>Error</h1><p>{str(e)}</p></body></html>",
+            status_code=500
+        )
+
+# Proxy routes for Next.js UI - must be defined before catch-all routes
+@app.api_route(
     "/saas-dashboard",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     summary="SaaS Dashboard",
-    description="Professional SaaS-style Voice Agent Dashboard for managing AI agents",
-    tags=["UI"],
-    response_class=HTMLResponse
+    description="Proxy SaaS Dashboard to Next.js",
+    tags=["UI"]
 )
-async def saas_dashboard():
-    """Serve the SaaS Voice Agent Dashboard."""
-    html_content = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>SaaS Voice Agent Dashboard</title>
-        <style>
-            * {
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-            }
-            html, body {
-                height: 100%;
-                overflow: hidden;
-            }
-            iframe {
-                width: 100%;
-                height: 100vh;
-                border: none;
-            }
-            .loading {
-                position: absolute;
-                top: 50%;
-                left: 50%;
-                transform: translate(-50%, -50%);
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                color: #666;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="loading" id="loading">Loading SaaS Dashboard...</div>
-        <iframe 
-            src="http://localhost:9000/saas-dashboard" 
-            id="dashboard-frame"
-            onload="document.getElementById('loading').style.display='none'"
-            allow="fullscreen"
-        ></iframe>
-        <script>
-            // Fallback if Next.js server is not running
-            setTimeout(function() {
-                var iframe = document.getElementById('dashboard-frame');
-                if (iframe.contentWindow.location.href === 'about:blank' || 
-                    iframe.contentDocument === null) {
-                    document.getElementById('loading').innerHTML = 
-                        '⚠️ Next.js server not running. Please start it with: cd ui && npm run dev';
-                    document.getElementById('loading').style.color = '#dc2626';
-                }
-            }, 3000);
-        </script>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
+@app.api_route(
+    "/saas-dashboard/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    summary="SaaS Dashboard Routes",
+    description="Proxy all SaaS dashboard routes to Next.js",
+    tags=["UI"]
+)
+async def saas_dashboard_proxy(request: Request, path: str = ""):
+    """Proxy SaaS Dashboard routes to Next.js"""
+    full_path = f"saas-dashboard/{path}" if path else "saas-dashboard"
+    return await proxy_to_nextjs(request, full_path)
 
-@app.get(
-    "/chat",
-    summary="Chat UI",
-    description="Conversation chat UI with voice and text support",
-    tags=["UI"],
-    response_class=HTMLResponse
+# Proxy Next.js static assets and API routes
+@app.api_route(
+    "/_next/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
+    summary="Next.js Static Assets",
+    description="Proxy Next.js static assets",
+    tags=["UI"]
 )
-async def chat_ui():
-    """Serve the chat UI."""
-    import os
-    chat_path = os.path.join(os.path.dirname(__file__), "ui", "chat_ui.html")
-    if os.path.exists(chat_path):
-        return FileResponse(chat_path)
-    else:
-        raise HTTPException(status_code=404, detail="Chat UI not found")
+async def nextjs_static_assets(request: Request, path: str):
+    """Proxy Next.js static assets"""
+    return await proxy_to_nextjs(request, f"_next/{path}")
+
+# Note: FastAPI routes don't use /api/ prefix, so this only handles Next.js API routes
+@app.api_route(
+    "/api/session/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    summary="Next.js Session API",
+    description="Proxy Next.js session API routes",
+    tags=["UI"]
+)
+@app.api_route(
+    "/api/session",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    summary="Next.js Session API",
+    description="Proxy Next.js session API routes",
+    tags=["UI"]
+)
+async def nextjs_session_api(request: Request, path: str = ""):
+    """Proxy Next.js session API routes"""
+    full_path = f"api/session/{path}" if path else "api/session"
+    return await proxy_to_nextjs(request, full_path)
+
 
 # ============================================================================
 # AGENT MANAGEMENT ENDPOINTS
@@ -1878,21 +1898,6 @@ async def delete_agent(agent_id: str = Path(..., description="MongoDB Agent ID")
         logger.error(f"Error deleting agent: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get(
-    "/ui/chat",
-    summary="Chat UI (Legacy)",
-    description="Conversation chat UI with voice and text support (legacy endpoint)",
-    tags=["UI"],
-    response_class=HTMLResponse
-)
-async def chat_ui_legacy():
-    """Serve the chat UI (legacy endpoint - redirects to /chat)."""
-    import os
-    chat_path = os.path.join(os.path.dirname(__file__), "ui", "chat_ui.html")
-    if os.path.exists(chat_path):
-        return FileResponse(chat_path)
-    else:
-        raise HTTPException(status_code=404, detail="Chat UI not found")
 
 @app.get(
     "/twilio/status",

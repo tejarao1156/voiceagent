@@ -4,7 +4,8 @@
 
 import type { CallStatistics, CallsByDate, CallsByAgent, RecentCall } from './types'
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4002'
+// Use relative URLs so requests go through FastAPI proxy on port 4002
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || ''
 
 /**
  * Fetch call statistics
