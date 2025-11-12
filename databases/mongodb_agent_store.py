@@ -184,6 +184,18 @@ class MongoDBAgentStore:
             async for doc in cursor:
                 doc["id"] = str(doc["_id"])
                 del doc["_id"]
+                
+                # Normalize field names: convert snake_case to camelCase for API consistency
+                # Handle phone_number -> phoneNumber
+                if "phone_number" in doc and "phoneNumber" not in doc:
+                    doc["phoneNumber"] = doc.pop("phone_number")
+                # Handle is_active -> active (if needed)
+                if "is_active" in doc and "active" not in doc:
+                    doc["active"] = doc.pop("is_active")
+                elif "is_active" in doc and "active" in doc:
+                    # Keep active, remove is_active
+                    del doc["is_active"]
+                
                 agents.append(doc)
             
             return agents

@@ -37,12 +37,12 @@ const sampleCallsByAgent: CallsByAgent[] = [
 ]
 
 export function AnalyticsDashboard() {
-  const [stats, setStats] = useState<CallStatistics | null>(sampleStats)
-  const [callsByDate, setCallsByDate] = useState<CallsByDate[]>(sampleCallsByDate)
-  const [callsByAgent, setCallsByAgent] = useState<CallsByAgent[]>(sampleCallsByAgent)
+  const [stats, setStats] = useState<CallStatistics | null>(null)
+  const [callsByDate, setCallsByDate] = useState<CallsByDate[]>([])
+  const [callsByAgent, setCallsByAgent] = useState<CallsByAgent[]>([])
   const [loading, setLoading] = useState(false)
   const [selectedDays, setSelectedDays] = useState(7)
-  const [useSampleData, setUseSampleData] = useState(true)
+  const [useSampleData, setUseSampleData] = useState(false)
 
   useEffect(() => {
     fetchAnalytics()
@@ -63,51 +63,38 @@ export function AnalyticsDashboard() {
         Promise.race([fetchCallsByAgent(), timeoutPromise]),
       ])
 
-      // Process stats response
+      // Process stats response - Always use real data, fallback to empty if no data
       if (statsResult.status === 'fulfilled' && !(statsResult.value instanceof Error)) {
         const realStats = statsResult.value as CallStatistics
-        if (realStats.total_calls > 0) {
-          setStats(realStats)
-          setUseSampleData(false)
-        } else {
-          setStats(sampleStats)
-          setUseSampleData(true)
-        }
+        setStats(realStats)
+        setUseSampleData(realStats.total_calls === 0)
       } else {
-        setStats(sampleStats)
-        setUseSampleData(true)
+        setStats({ total_calls: 0, total_duration_seconds: 0, average_duration_seconds: 0, min_duration_seconds: 0, max_duration_seconds: 0, active_calls: 0, completed_calls: 0 })
+        setUseSampleData(false)
       }
 
-      // Process date response
+      // Process date response - Always use real data
       if (dateResult.status === 'fulfilled' && !(dateResult.value instanceof Error)) {
         const realDateData = dateResult.value as CallsByDate[]
-        if (realDateData.length > 0) {
-          setCallsByDate(realDateData)
-        } else {
-          setCallsByDate(sampleCallsByDate)
-        }
+        setCallsByDate(realDateData)
       } else {
-        setCallsByDate(sampleCallsByDate)
+        setCallsByDate([])
       }
 
-      // Process agent response
+      // Process agent response - Always use real data
       if (agentResult.status === 'fulfilled' && !(agentResult.value instanceof Error)) {
         const realAgentData = agentResult.value as CallsByAgent[]
-        if (realAgentData.length > 0) {
-          setCallsByAgent(realAgentData)
-        } else {
-          setCallsByAgent(sampleCallsByAgent)
-        }
+        setCallsByAgent(realAgentData)
       } else {
-        setCallsByAgent(sampleCallsByAgent)
+        setCallsByAgent([])
       }
     } catch (error) {
       console.error('Error fetching analytics:', error)
-      // Use sample data on error
-      setStats(sampleStats)
-      setCallsByDate(sampleCallsByDate)
-      setCallsByAgent(sampleCallsByAgent)
-      setUseSampleData(true)
+      // Use empty data on error, not sample data
+      setStats({ total_calls: 0, total_duration_seconds: 0, average_duration_seconds: 0, min_duration_seconds: 0, max_duration_seconds: 0, active_calls: 0, completed_calls: 0 })
+      setCallsByDate([])
+      setCallsByAgent([])
+      setUseSampleData(false)
     } finally {
       setLoading(false)
     }
@@ -121,19 +108,19 @@ export function AnalyticsDashboard() {
     )
   }
 
-  // Ensure stats is always set (use sample data if no real data)
-  const displayStats = stats || sampleStats
-  const displayCallsByDate = callsByDate.length > 0 ? callsByDate : sampleCallsByDate
-  const displayCallsByAgent = callsByAgent.length > 0 ? callsByAgent : sampleCallsByAgent
+  // Use real data, show empty state if no data
+  const displayStats = stats || { total_calls: 0, total_duration_seconds: 0, average_duration_seconds: 0, min_duration_seconds: 0, max_duration_seconds: 0, active_calls: 0, completed_calls: 0 }
+  const displayCallsByDate = callsByDate
+  const displayCallsByAgent = callsByAgent
 
   return (
     <div className="space-y-6">
-      {/* Sample Data Indicator */}
-      {useSampleData && (
+      {/* Data Status Indicator */}
+      {useSampleData && displayStats.total_calls === 0 && (
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Activity className="h-4 w-4 text-blue-600" />
-            <span className="text-sm text-blue-800">Showing sample data for demonstration</span>
+            <span className="text-sm text-blue-800">No call data yet. Make some calls to see analytics here.</span>
           </div>
         </div>
       )}

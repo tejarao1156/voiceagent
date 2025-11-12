@@ -10,28 +10,30 @@ import { CreateAgentModal } from './CreateAgentModal'
 import { AnalyticsDashboard } from './dashboard-statistics'
 
 export default function SaaSDashboard() {
-  // Check URL hash or default to dashboard
-  const [activeSection, setActiveSection] = useState(() => {
-    if (typeof window !== 'undefined') {
-      const hash = window.location.hash.replace('#', '')
-      if (hash && ['dashboard', 'ai-agents', 'calls', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(hash)) {
-        return hash
-      }
-    }
-    return 'dashboard'
-  })
+  // Check URL hash or default to dashboard - use client-side only to avoid hydration mismatch
+  const [activeSection, setActiveSection] = useState('dashboard')
+  const [mounted, setMounted] = useState(false)
   const [activeTab, setActiveTab] = useState('AI Agents')
   const [agents, setAgents] = useState<Agent[]>([]) // Start with empty array - load from MongoDB
   const [createModalOpen, setCreateModalOpen] = useState(false)
   const [loadingAgents, setLoadingAgents] = useState(false)
   const [agentFilter, setAgentFilter] = useState<'all' | 'active' | 'inactive'>('all')
 
-  // Sync with URL hash changes
+  // Initialize from URL hash and sync with hash changes (client-side only)
   useEffect(() => {
+    setMounted(true)
+    
+    // Set initial section from hash
+    const hash = window.location.hash.replace('#', '')
+    if (hash && ['dashboard', 'ai-agents', 'calls', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(hash)) {
+      setActiveSection(hash)
+    }
+    
+    // Listen for hash changes
     const handleHashChange = () => {
-      const hash = window.location.hash.replace('#', '')
-      if (hash && ['dashboard', 'ai-agents', 'calls', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(hash)) {
-        setActiveSection(hash)
+      const newHash = window.location.hash.replace('#', '')
+      if (newHash && ['dashboard', 'ai-agents', 'calls', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(newHash)) {
+        setActiveSection(newHash)
       }
     }
 
@@ -57,7 +59,7 @@ export default function SaaSDashboard() {
     twilioAuthToken?: string
   }) => {
     try {
-      const response = await fetch('http://localhost:4002/agents', {
+      const response = await fetch('/agents', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -74,8 +76,10 @@ export default function SaaSDashboard() {
       // Close modal
       setCreateModalOpen(false)
       
-      // Reload agents from MongoDB
-      await loadAgents()
+      // Reload agents from MongoDB after a short delay to ensure DB write is complete
+      setTimeout(async () => {
+        await loadAgents()
+      }, 500)
       
       alert('Agent created successfully!')
     } catch (error) {
@@ -88,56 +92,70 @@ export default function SaaSDashboard() {
     try {
       setLoadingAgents(true)
       console.log('Loading agents from MongoDB...')
-      const response = await fetch('http://localhost:4002/agents')
+      const response = await fetch('/agents')
       if (response.ok) {
         const result = await response.json()
         console.log('Agents API response:', result)
         if (result.success && result.agents) {
           // Transform MongoDB agents to UI format
-          const transformedAgents: Agent[] = result.agents.map((agent: any) => ({
-            id: agent.id,
-            name: agent.name,
-            direction: agent.direction || 'inbound',
-            phoneNumber: agent.phoneNumber,
-            lastUpdated: agent.updated_at 
-              ? new Date(agent.updated_at).toLocaleDateString('en-US', {
+          // Format dates client-side only to avoid hydration mismatch
+          const transformedAgents: Agent[] = result.agents.map((agent: any) => {
+            let lastUpdated = 'Unknown'
+            if (agent.updated_at && typeof window !== 'undefined') {
+              try {
+                const date = new Date(agent.updated_at)
+                lastUpdated = date.toLocaleDateString('en-US', {
                   month: 'short',
                   day: 'numeric',
                   year: 'numeric',
-                }) + ' ' + new Date(agent.updated_at).toLocaleTimeString('en-US', {
+                }) + ' ' + date.toLocaleTimeString('en-US', {
                   hour: 'numeric',
                   minute: '2-digit',
                   hour12: true,
                 })
-              : 'Unknown',
-            status: agent.active ? 'active' : 'idle',
-            active: agent.active,
-            sttModel: agent.sttModel,
-            inferenceModel: agent.inferenceModel,
-            ttsModel: agent.ttsModel,
-            ttsVoice: agent.ttsVoice,
-            systemPrompt: agent.systemPrompt,
-            greeting: agent.greeting,
-            temperature: agent.temperature,
-            maxTokens: agent.maxTokens,
-            provider: agent.provider,
-            twilioAccountSid: agent.twilioAccountSid,
-            twilioAuthToken: agent.twilioAuthToken,
-          }))
+              } catch (e) {
+                lastUpdated = agent.updated_at
+              }
+            }
+            
+            return {
+              id: agent.id,
+              name: agent.name,
+              direction: agent.direction || 'inbound',
+              phoneNumber: agent.phoneNumber,
+              lastUpdated,
+              status: agent.active ? 'active' : 'idle',
+              active: agent.active,
+              sttModel: agent.sttModel,
+              inferenceModel: agent.inferenceModel,
+              ttsModel: agent.ttsModel,
+              ttsVoice: agent.ttsVoice,
+              systemPrompt: agent.systemPrompt,
+              greeting: agent.greeting,
+              temperature: agent.temperature,
+              maxTokens: agent.maxTokens,
+              provider: agent.provider,
+              twilioAccountSid: agent.twilioAccountSid,
+              twilioAuthToken: agent.twilioAuthToken,
+            }
+          })
           console.log(`✅ Loaded ${transformedAgents.length} agents from MongoDB`)
+          console.log('📋 Agent names:', transformedAgents.map(a => a.name))
           setAgents(transformedAgents)
+          setLoadingAgents(false)
         } else {
-          console.warn('No agents found in response:', result)
+          console.warn('⚠️ No agents found in response:', result)
           setAgents([]) // Set empty array if no agents
+          setLoadingAgents(false)
         }
       } else {
-        console.error('Failed to load agents:', response.status, response.statusText)
+        console.error('❌ Failed to load agents:', response.status, response.statusText)
         setAgents([]) // Set empty array on error
+        setLoadingAgents(false)
       }
     } catch (error) {
-      console.error('Error loading agents:', error)
+      console.error('❌ Error loading agents:', error)
       setAgents([]) // Set empty array on error
-    } finally {
       setLoadingAgents(false)
     }
   }
@@ -149,12 +167,21 @@ export default function SaaSDashboard() {
     return true // 'all' shows everything
   })
 
-  // Load agents on mount
+  // Load agents on mount and when section changes (client-side only to avoid hydration issues)
   useEffect(() => {
-    if (activeSection === 'ai-agents') {
+    if (mounted) {
+      if (activeSection === 'ai-agents') {
+        loadAgents()
+      }
+    }
+  }, [mounted, activeSection])
+  
+  // Also load agents when component first mounts to ai-agents section
+  useEffect(() => {
+    if (mounted && activeSection === 'ai-agents' && agents.length === 0) {
       loadAgents()
     }
-  }, [activeSection])
+  }, [mounted])
 
   const handleEdit = (agent: Agent) => {
     // TODO: Implement edit functionality
@@ -163,7 +190,7 @@ export default function SaaSDashboard() {
 
   const handleToggleActive = async (agent: Agent, active: boolean) => {
     try {
-      const response = await fetch(`http://localhost:4002/agents/${agent.id}`, {
+      const response = await fetch(`/agents/${agent.id}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -187,7 +214,7 @@ export default function SaaSDashboard() {
   const handleDelete = async (agent: Agent) => {
     if (confirm(`Are you sure you want to delete ${agent.name}?`)) {
       try {
-        const response = await fetch(`http://localhost:4002/agents/${agent.id}`, {
+        const response = await fetch(`/agents/${agent.id}`, {
           method: 'DELETE',
         })
         
@@ -219,7 +246,7 @@ export default function SaaSDashboard() {
         />
 
         <main className="p-6">
-          {activeSection === 'ai-agents' && (
+          {mounted && activeSection === 'ai-agents' && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -282,7 +309,7 @@ export default function SaaSDashboard() {
             </motion.div>
           )}
 
-          {activeSection === 'dashboard' && (
+          {mounted && activeSection === 'dashboard' && (
             <div>
               <div className="mb-6">
                 <h1 className="text-2xl font-semibold text-slate-800 mb-2">
