@@ -8,6 +8,7 @@ import { TopNav } from './TopNav'
 import { AgentTable, type Agent } from './AgentTable'
 import { CreateAgentModal } from './CreateAgentModal'
 import { AnalyticsDashboard } from './dashboard-statistics'
+import { CallsSection } from './CallsSection'
 
 export default function SaaSDashboard() {
   // Check URL hash or default to dashboard - use client-side only to avoid hydration mismatch
@@ -369,7 +370,17 @@ export default function SaaSDashboard() {
             </div>
           )}
 
-          {activeSection !== 'ai-agents' && activeSection !== 'dashboard' && (
+          {mounted && activeSection === 'calls' && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.2 }}
+            >
+              <CallsSection />
+            </motion.div>
+          )}
+
+          {activeSection !== 'ai-agents' && activeSection !== 'dashboard' && activeSection !== 'calls' && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}

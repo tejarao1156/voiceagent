@@ -926,11 +926,25 @@ async def twilio_incoming_call(request: Request):
         form_data = await request.form()
         call_data = dict(form_data)
         call_sid = call_data.get("CallSid")
+        from_number = call_data.get("From")
+        to_number = call_data.get("To")
         logger.info(f"Received incoming call webhook for CallSid: {call_sid}")
         logger.info(f"Processing mode set to: {TWILIO_PROCESSING_MODE}")
 
+        # Create call record in MongoDB
+        try:
+            from databases.mongodb_call_store import MongoDBCallStore
+            call_store = MongoDBCallStore()
+            await call_store.create_call(
+                call_sid=call_sid,
+                from_number=from_number or "unknown",
+                to_number=to_number or "unknown",
+                agent_id=to_number
+            )
+        except Exception as e:
+            logger.warning(f"Could not create call record: {e}")
+
         # Check if agent exists for this phone number (for both stream and batch modes)
-        to_number = call_data.get("To")
         if to_number:
             agent_config = await twilio_phone_tool._load_agent_config(to_number)
             if not agent_config:
@@ -1005,6 +1019,15 @@ async def twilio_call_status(request: Request):
         status = status_data.get("CallStatus", "unknown")
         
         logger.info(f"📞 Call status update: {call_sid} -> {status}")
+        
+        # Update call status in MongoDB when call ends
+        if status in ["completed", "failed", "busy", "no-answer", "canceled"]:
+            try:
+                from databases.mongodb_call_store import MongoDBCallStore
+                call_store = MongoDBCallStore()
+                await call_store.end_call(call_sid)
+            except Exception as e:
+                logger.warning(f"Could not update call status: {e}")
         
         # Clean up stream handlers if call is ending
         if status in ["completed", "failed", "busy", "no-answer", "canceled"]:
@@ -1142,6 +1165,23 @@ async def twilio_recording_handler(request: Request):
                             response_text = "I'm sorry, I couldn't process your request."
                         
                         logger.info(f"[RECORDING] AI Response: {response_text}")
+                        
+                        # Store transcripts in MongoDB
+                        try:
+                            from databases.mongodb_call_store import MongoDBCallStore
+                            call_store = MongoDBCallStore()
+                            await call_store.update_call_transcript(
+                                call_sid=call_sid,
+                                role="user",
+                                text=user_text
+                            )
+                            await call_store.update_call_transcript(
+                                call_sid=call_sid,
+                                role="assistant",
+                                text=response_text
+                            )
+                        except Exception as e:
+                            logger.warning(f"Could not store transcripts: {e}")
                         
                         # Convert response to speech with agent config
                         tts_voice = agent_config.get("ttsVoice", "alloy") if agent_config else "alloy"
@@ -1422,6 +1462,23 @@ async def twilio_recording_handler(request: Request):
                             response_text = "I'm sorry, I couldn't process your request."
                         
                         logger.info(f"[RECORDING] AI Response: {response_text}")
+                        
+                        # Store transcripts in MongoDB
+                        try:
+                            from databases.mongodb_call_store import MongoDBCallStore
+                            call_store = MongoDBCallStore()
+                            await call_store.update_call_transcript(
+                                call_sid=call_sid,
+                                role="user",
+                                text=user_text
+                            )
+                            await call_store.update_call_transcript(
+                                call_sid=call_sid,
+                                role="assistant",
+                                text=response_text
+                            )
+                        except Exception as e:
+                            logger.warning(f"Could not store transcripts: {e}")
                         
                         # Convert response to speech with agent config
                         tts_voice = agent_config.get("ttsVoice", "alloy") if agent_config else "alloy"
@@ -2432,6 +2489,144 @@ async def get_recent_calls(
     except Exception as e:
         logger.error(f"Error getting recent calls: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/api/calls",
+    summary="Get All Calls",
+    description="Get all calls with transcripts. Supports filtering by agent and status.",
+    tags=["Calls"],
+    response_model=Dict[str, Any]
+)
+async def get_all_calls(
+    agent_id: Optional[str] = Query(None, description="Filter by agent/phone number"),
+    status: Optional[str] = Query(None, description="Filter by status: 'active' or 'completed'"),
+    limit: int = Query(100, description="Maximum number of calls to return", ge=1, le=1000)
+):
+    """Get all calls with transcripts"""
+    try:
+        from databases.mongodb_call_store import MongoDBCallStore
+        call_store = MongoDBCallStore()
+        
+        # Map UI status to DB status
+        db_status = None
+        if status == "ongoing":
+            db_status = "active"
+        elif status == "finished":
+            db_status = "completed"
+        elif status:
+            db_status = status
+        
+        calls = await call_store.get_all_calls(
+            agent_id=agent_id,
+            status=db_status,
+            limit=limit
+        )
+        
+        return {"calls": calls}
+        
+    except Exception as e:
+        logger.error(f"Error getting calls: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/api/calls/active",
+    summary="Get Active Calls",
+    description="Get currently active calls for real-time display",
+    tags=["Calls"]
+)
+async def get_active_calls():
+    """Get currently active calls"""
+    try:
+        from databases.mongodb_call_store import MongoDBCallStore
+        call_store = MongoDBCallStore()
+        calls = await call_store.get_active_calls()
+        return {"calls": calls}
+    except Exception as e:
+        logger.error(f"Error getting active calls: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/api/calls/{call_sid}",
+    summary="Get Call by ID",
+    description="Get a specific call with full transcript",
+    tags=["Calls"]
+)
+async def get_call_by_id(call_sid: str):
+    """Get a specific call by call_sid"""
+    try:
+        from databases.mongodb_call_store import MongoDBCallStore
+        call_store = MongoDBCallStore()
+        call = await call_store.get_call_by_sid(call_sid)
+        
+        if call is None:
+            raise HTTPException(status_code=404, detail="Call not found")
+        
+        return {"call": call}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting call: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.websocket("/ws/calls/{call_sid}/transcript")
+async def live_transcript_websocket(websocket: WebSocket, call_sid: str):
+    """WebSocket endpoint for real-time transcript updates"""
+    await websocket.accept()
+    
+    try:
+        from databases.mongodb_call_store import MongoDBCallStore
+        call_store = MongoDBCallStore()
+        
+        # Send initial transcript
+        call = await call_store.get_call_by_sid(call_sid)
+        if call:
+            await websocket.send_json({
+                "type": "initial",
+                "transcript": call.get("conversation", [])
+            })
+        else:
+            await websocket.send_json({
+                "type": "error",
+                "message": "Call not found"
+            })
+            await websocket.close()
+            return
+        
+        # Poll for updates every 1 second
+        last_count = len(call.get("conversation", [])) if call else 0
+        
+        while True:
+            await asyncio.sleep(1)
+            
+            # Check if call still exists and is active
+            call = await call_store.get_call_by_sid(call_sid)
+            if not call:
+                await websocket.send_json({"type": "call_ended"})
+                break
+            
+            if call.get("status") != "ongoing":
+                await websocket.send_json({"type": "call_ended"})
+                break
+            
+            # Send new transcript entries
+            current_transcript = call.get("conversation", [])
+            if len(current_transcript) > last_count:
+                new_entries = current_transcript[last_count:]
+                for entry in new_entries:
+                    await websocket.send_json({
+                        "type": "transcript_update",
+                        "entry": entry
+                    })
+                last_count = len(current_transcript)
+                
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected for call {call_sid}")
+    except Exception as e:
+        logger.error(f"Error in transcript WebSocket: {e}")
+        try:
+            await websocket.close()
+        except:
+            pass
 
 # ============================================================================
 
