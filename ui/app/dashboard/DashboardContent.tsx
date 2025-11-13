@@ -59,19 +59,36 @@ export default function DashboardContent({ onAddNumber }: DashboardContentProps)
   }, [])
 
   useEffect(() => {
-    if (selectedNumber) {
-      // Fetch calls for selected number
-      // fetch(`/api/calls?number=${selectedNumber.id}`)
-      //   .then(res => res.json())
-      //   .then(data => setCalls(selectedNumber.id, data))
-      
-      // Mock polling for ongoing calls
-      const interval = setInterval(() => {
-        // Poll for updates
-      }, 5000)
-      return () => clearInterval(interval)
+    const fetchCalls = async () => {
+      if (selectedNumber) {
+        try {
+          const { fetchCalls } = await import('@/lib/api')
+          const fetchedCalls = await fetchCalls(selectedNumber.id)
+          
+          // Transform API response to match Call interface
+          const transformedCalls = fetchedCalls.map((call: any) => ({
+            id: call.id || call.call_sid,
+            phoneNumberId: selectedNumber.id,
+            callerNumber: call.from_number || call.callerNumber,
+            status: call.status === 'ongoing' ? 'ongoing' : 'finished',
+            timestamp: new Date(call.timestamp || call.start_time),
+            duration: call.duration,
+            conversation: call.conversation || []
+          }))
+          
+          setCalls(selectedNumber.id, transformedCalls)
+        } catch (error) {
+          console.error('Error fetching calls:', error)
+        }
+      }
     }
-  }, [selectedNumber])
+    
+    fetchCalls()
+    
+    // Poll for updates every 5 seconds
+    const interval = setInterval(fetchCalls, 5000)
+    return () => clearInterval(interval)
+  }, [selectedNumber, setCalls])
 
   return (
     <div className="p-8">
@@ -225,7 +242,17 @@ export default function DashboardContent({ onAddNumber }: DashboardContentProps)
               </div>
             </CardHeader>
             <CardContent>
-              <CallList calls={filteredCalls} />
+              <CallList 
+                calls={filteredCalls} 
+                onCallUpdate={(callId, updates) => {
+                  if (selectedNumber) {
+                    const updatedCalls = allCalls.map(call => 
+                      call.id === callId ? { ...call, ...updates } : call
+                    )
+                    setCalls(selectedNumber.id, updatedCalls)
+                  }
+                }}
+              />
             </CardContent>
           </Card>
         </motion.div>

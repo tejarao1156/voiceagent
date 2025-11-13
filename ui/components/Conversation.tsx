@@ -7,13 +7,14 @@ import { cn } from '@/lib/utils'
 
 interface ConversationProps {
   messages: ConversationMessage[]
+  isLive?: boolean
 }
 
-export function Conversation({ messages }: ConversationProps) {
+export function Conversation({ messages, isLive = false }: ConversationProps) {
   if (!messages || messages.length === 0) {
     return (
       <div className="text-center py-8 text-slate-500 text-sm">
-        <p>No conversation data available</p>
+        <p>{isLive ? 'Waiting for conversation...' : 'No conversation data available'}</p>
       </div>
     )
   }
@@ -22,6 +23,7 @@ export function Conversation({ messages }: ConversationProps) {
     <div className="space-y-4 p-4">
       {messages.map((message, index) => {
         const isUser = message.role === 'user'
+        const isLastMessage = index === messages.length - 1
         
         return (
           <motion.div
@@ -45,7 +47,8 @@ export function Conversation({ messages }: ConversationProps) {
                 "max-w-[80%] rounded-2xl px-4 py-3 shadow-lg",
                 isUser
                   ? "bg-slate-800/50 text-slate-100 border border-slate-700/50"
-                  : "bg-gradient-to-r from-blue-500/20 to-purple-500/20 text-slate-100 border border-blue-500/30"
+                  : "bg-gradient-to-r from-blue-500/20 to-purple-500/20 text-slate-100 border border-blue-500/30",
+                isLive && isLastMessage && "ring-2 ring-green-400/50"
               )}
             >
               <div className="flex items-center gap-2 mb-1">
@@ -53,8 +56,11 @@ export function Conversation({ messages }: ConversationProps) {
                   {isUser ? '🧑 User' : '🤖 AI'}
                 </span>
                 <span className="text-xs text-slate-500">
-                  {new Date(message.timestamp).toLocaleTimeString()}
+                  {new Date(message.timestamp as string | Date).toLocaleTimeString()}
                 </span>
+                {isLive && isLastMessage && (
+                  <span className="text-xs text-green-400 animate-pulse">● Live</span>
+                )}
               </div>
               <p className="text-sm leading-relaxed">{message.text}</p>
             </div>

@@ -337,6 +337,18 @@ class TwilioStreamHandler:
                 else:
                     logger.info(f"User said (Query #{current_query_id}): '{user_text}'")
                 
+                # Store user transcript in MongoDB
+                try:
+                    from databases.mongodb_call_store import MongoDBCallStore
+                    call_store = MongoDBCallStore()
+                    await call_store.update_call_transcript(
+                        call_sid=self.call_sid,
+                        role="user",
+                        text=user_text
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not store user transcript: {e}")
+                
                 # Get the latest session_data right before generating response
                 # This ensures we have the most up-to-date conversation history
                 # Use agent config for LLM if available
@@ -368,6 +380,18 @@ class TwilioStreamHandler:
                     logger.info(f"💬 AI responding to interrupt (Query #{current_query_id}): '{response_text[:70]}...'")
                 else:
                     logger.info(f"AI response (Query #{current_query_id}): '{response_text[:70]}...'")
+                
+                # Store AI transcript in MongoDB
+                try:
+                    from databases.mongodb_call_store import MongoDBCallStore
+                    call_store = MongoDBCallStore()
+                    await call_store.update_call_transcript(
+                        call_sid=self.call_sid,
+                        role="assistant",
+                        text=response_text
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not store AI transcript: {e}")
                 
                 # Final check before starting TTS
                 if current_query_id != self.query_sequence:
@@ -564,6 +588,14 @@ class TwilioStreamHandler:
     def _handle_stop_event(self, stop_data: Dict):
         """Handles the 'stop' event from Twilio stream."""
         logger.info(f"Stream stopped for call SID: {self.call_sid}. Cleaning up.")
+        
+        # End call in MongoDB
+        try:
+            from databases.mongodb_call_store import MongoDBCallStore
+            call_store = MongoDBCallStore()
+            asyncio.create_task(call_store.end_call(self.call_sid))
+        except Exception as e:
+            logger.warning(f"Could not end call record: {e}")
         
         # Clean up from global registry
         try:
