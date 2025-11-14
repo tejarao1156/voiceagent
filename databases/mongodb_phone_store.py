@@ -65,21 +65,24 @@ class MongoDBPhoneStore:
         
         Returns:
             Phone registration ID if successful, None otherwise
+        
+        Raises:
+            ValueError: If phone number already exists and is not deleted
         """
         if not is_mongodb_available():
             logger.warning("MongoDB not available, skipping phone registration")
-            return None
+            raise ValueError("MongoDB is not available. Please check MongoDB connection.")
         
         try:
             collection = self._get_collection()
             if collection is None:
                 logger.error("MongoDB collection is None, cannot register phone")
-                return None
+                raise ValueError("MongoDB collection is not available. Please check MongoDB connection.")
             
             phone_number = phone_data.get("phoneNumber")
             if not phone_number:
                 logger.error("Phone number is required for registration")
-                return None
+                raise ValueError("Phone number is required for registration")
             
             # Normalize phone number to E.164 format
             normalized_phone = normalize_phone_number(phone_number)
@@ -87,18 +90,22 @@ class MongoDBPhoneStore:
             
             # Check if phone number already exists (check both original and normalized formats)
             # Exclude deleted phones from the check
-            existing = await collection.find_one({
-                "phoneNumber": normalized_phone,
-                "isDeleted": {"$ne": True}
-            })
-            if not existing:
-                # Also check if any phone with different format exists (normalize all and compare)
-                # Exclude deleted phones
-                async for doc in collection.find({"isDeleted": {"$ne": True}}):
-                    stored_phone = doc.get("phoneNumber", "")
-                    if normalize_phone_number(stored_phone) == normalized_phone:
-                        existing = doc
-                        break
+            try:
+                existing = await collection.find_one({
+                    "phoneNumber": normalized_phone,
+                    "isDeleted": {"$ne": True}
+                })
+                if not existing:
+                    # Also check if any phone with different format exists (normalize all and compare)
+                    # Exclude deleted phones
+                    async for doc in collection.find({"isDeleted": {"$ne": True}}):
+                        stored_phone = doc.get("phoneNumber", "")
+                        if normalize_phone_number(stored_phone) == normalized_phone:
+                            existing = doc
+                            break
+            except Exception as e:
+                logger.error(f"Error checking for existing phone: {e}", exc_info=True)
+                raise ValueError(f"Error checking if phone number exists: {str(e)}")
             
             if existing:
                 existing_phone_id = str(existing.get("_id"))
@@ -107,8 +114,9 @@ class MongoDBPhoneStore:
                 
                 # If phone exists and is not deleted, raise error (duplicate validation)
                 if not existing_is_deleted:
+                    error_msg = f"Phone number {normalized_phone} is already registered. Please delete the existing registration first or use a different phone number."
                     logger.warning(f"❌ Duplicate phone number detected: {normalized_phone} (original: {phone_number}) already registered (ID: {existing_phone_id}, Active: {existing_is_active})")
-                    raise ValueError(f"Phone number {normalized_phone} is already registered and not deleted. Please delete the existing registration first or use a different phone number.")
+                    raise ValueError(error_msg)
                 
                 # If phone exists but is deleted, allow re-registration (restore it)
                 logger.info(f"Phone number {normalized_phone} was previously deleted. Restoring registration...")
@@ -149,9 +157,13 @@ class MongoDBPhoneStore:
             logger.info(f"   Phone ID: {result.inserted_id}")
             return str(result.inserted_id)
             
+        except ValueError:
+            # Re-raise ValueError (duplicate phone, validation errors) to be handled by API endpoint
+            raise
         except Exception as e:
-            logger.error(f"❌ Error registering phone number: {e}", exc_info=True)
-            return None
+            # Catch other unexpected errors (MongoDB connection issues, etc.)
+            logger.error(f"❌ Unexpected error registering phone number: {e}", exc_info=True)
+            raise ValueError(f"Failed to register phone number due to an unexpected error: {str(e)}")
     
     async def get_phone(self, phone_id: str) -> Optional[Dict[str, Any]]:
         """Get a registered phone by ID"""
@@ -308,7 +320,7 @@ class MongoDBPhoneStore:
             return False
     
     async def delete_phone(self, phone_id: str) -> bool:
-        """Soft delete a registered phone number (set isDeleted=True)"""
+        """Soft delete a registered phone number (set isDeleted=True) and deactivate associated agents"""
         if not is_mongodb_available():
             logger.warning("MongoDB not available, skipping phone deletion")
             return False
@@ -319,6 +331,16 @@ class MongoDBPhoneStore:
                 return False
             
             from bson import ObjectId
+            
+            # First, get the phone number before deleting (to deactivate associated agents)
+            phone_doc = await collection.find_one({"_id": ObjectId(phone_id)})
+            if not phone_doc:
+                logger.warning(f"No phone found with ID {phone_id}")
+                return False
+            
+            phone_number = phone_doc.get("phoneNumber")
+            normalized_phone = normalize_phone_number(phone_number) if phone_number else None
+            
             # Soft delete: set isDeleted to True instead of actually deleting
             result = await collection.update_one(
                 {"_id": ObjectId(phone_id)},
@@ -331,9 +353,24 @@ class MongoDBPhoneStore:
             
             if result.modified_count > 0:
                 logger.info(f"✅ Soft deleted phone {phone_id} in MongoDB (set isDeleted=True)")
+                
+                # Deactivate all agents associated with this phone number
+                if normalized_phone:
+                    try:
+                        from databases.mongodb_agent_store import MongoDBAgentStore
+                        agent_store = MongoDBAgentStore()
+                        deactivated_count = await agent_store.deactivate_agents_by_phone(normalized_phone)
+                        if deactivated_count > 0:
+                            logger.info(f"✅ Deactivated {deactivated_count} agent(s) associated with phone number {normalized_phone}")
+                        else:
+                            logger.debug(f"No active agents found for phone number {normalized_phone}")
+                    except Exception as e:
+                        logger.error(f"Error deactivating agents for phone {normalized_phone}: {e}", exc_info=True)
+                        # Don't fail phone deletion if agent deactivation fails
+                
                 return True
             else:
-                logger.warning(f"No phone found with ID {phone_id}")
+                logger.warning(f"No phone found with ID {phone_id} or no changes made")
                 return False
                 
         except Exception as e:
