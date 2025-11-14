@@ -17,10 +17,47 @@ export function CallsSection() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'ongoing' | 'finished'>('all')
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
 
-  // Load calls from API
-  const loadCalls = async () => {
+  // Helper function to compare calls and detect changes
+  const callsHaveChanged = (oldCalls: Call[], newCalls: Call[]): boolean => {
+    if (oldCalls.length !== newCalls.length) return true
+    
+    // Create maps for quick lookup
+    const oldMap = new Map(oldCalls.map(call => [call.id, call]))
+    const newMap = new Map(newCalls.map(call => [call.id, call]))
+    
+    // Check for new or removed calls
+    for (const newCall of newCalls) {
+      const oldCall = oldMap.get(newCall.id)
+      if (!oldCall) return true // New call added
+      
+      // Check if status changed
+      if (oldCall.status !== newCall.status) return true
+      
+      // Check if conversation length changed (new messages)
+      const oldConvLength = oldCall.conversation?.length || 0
+      const newConvLength = newCall.conversation?.length || 0
+      if (oldConvLength !== newConvLength) return true
+      
+      // Check if duration changed (for completed calls)
+      if (oldCall.duration !== newCall.duration) return true
+    }
+    
+    // Check for removed calls
+    for (const oldCall of oldCalls) {
+      if (!newMap.has(oldCall.id)) return true // Call removed
+    }
+    
+    return false
+  }
+
+  // Load calls from API (background update)
+  const loadCalls = async (isInitial: boolean = false) => {
     try {
-      setLoading(true)
+      // Only show loading on initial load
+      if (isInitial) {
+        setLoading(true)
+      }
+      
       const fetchedCalls = await fetchCalls(selectedAgent || undefined)
       
       // Transform API response to match Call interface
@@ -34,21 +71,37 @@ export function CallsSection() {
         conversation: call.conversation || []
       }))
       
-      setCalls(transformedCalls)
+      // Only update state if data has actually changed
+      setCalls(prevCalls => {
+        if (isInitial || callsHaveChanged(prevCalls, transformedCalls)) {
+          return transformedCalls
+        }
+        return prevCalls // No changes, keep existing state
+      })
     } catch (error) {
       console.error('Error fetching calls:', error)
-      setCalls([])
+      // Only clear calls on initial load error
+      if (isInitial) {
+        setCalls([])
+      }
     } finally {
-      setLoading(false)
+      if (isInitial) {
+        setLoading(false)
+      }
     }
   }
 
-  // Load calls on mount and poll for updates
+  // Load calls on mount and poll for updates in background
   useEffect(() => {
-    loadCalls()
+    // Initial load
+    loadCalls(true)
     
-    // Poll for updates every 5 seconds
-    const interval = setInterval(loadCalls, 5000)
+    // Poll for updates every 3 seconds (background, no loading state)
+    // More frequent polling to catch status changes faster
+    const interval = setInterval(() => {
+      loadCalls(false)
+    }, 3000)
+    
     return () => clearInterval(interval)
   }, [selectedAgent])
 
@@ -209,26 +262,68 @@ export function CallsSection() {
         </div>
       </Card>
 
-      {/* Calls List */}
-      <Card className="p-6">
-        {loading ? (
+      {/* Calls List - Two Sections */}
+      {loading ? (
+        <Card className="p-6">
           <div className="text-center py-12 text-slate-500">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto mb-4"></div>
             <p>Loading calls...</p>
           </div>
-        ) : (
-          <CallList
-            calls={filteredCalls}
-            onCallUpdate={(callId, updates) => {
-              setCalls(prevCalls =>
-                prevCalls.map(call =>
-                  call.id === callId ? { ...call, ...updates } : call
-                )
-              )
-            }}
-          />
-        )}
-      </Card>
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Left Section - Completed Calls */}
+          <Card className="p-6">
+            <div className="mb-4">
+              <h2 className="text-lg font-semibold text-slate-800 mb-1">
+                Completed Calls
+              </h2>
+              <p className="text-sm text-slate-600">
+                {filteredCalls.filter(call => call.status === 'finished').length} calls
+              </p>
+            </div>
+            <div className="max-h-[600px] overflow-y-auto">
+              <CallList
+                calls={filteredCalls.filter(call => call.status === 'finished')}
+                onCallUpdate={(callId, updates) => {
+                  setCalls(prevCalls =>
+                    prevCalls.map(call =>
+                      call.id === callId ? { ...call, ...updates } : call
+                    )
+                  )
+                }}
+              />
+            </div>
+          </Card>
+
+          {/* Right Section - Ongoing Calls */}
+          <Card className="p-6 border-2 border-green-200 bg-green-50/30">
+            <div className="mb-4">
+              <div className="flex items-center gap-2">
+                <h2 className="text-lg font-semibold text-slate-800">
+                  Ongoing Calls
+                </h2>
+                <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+              </div>
+              <p className="text-sm text-slate-600">
+                {filteredCalls.filter(call => call.status === 'ongoing').length} active
+              </p>
+            </div>
+            <div className="max-h-[600px] overflow-y-auto">
+              <CallList
+                calls={filteredCalls.filter(call => call.status === 'ongoing')}
+                onCallUpdate={(callId, updates) => {
+                  setCalls(prevCalls =>
+                    prevCalls.map(call =>
+                      call.id === callId ? { ...call, ...updates } : call
+                    )
+                  )
+                }}
+              />
+            </div>
+          </Card>
+        </div>
+      )}
     </div>
   )
 }
