@@ -1934,40 +1934,45 @@ async def list_agents(active_only: Optional[bool] = Query(False, description="On
 @app.get(
     "/api/voices",
     summary="Get Available Voices",
-    description="Get all unique TTS voices used in agents from database",
+    description="Get all available TTS voices. Shows all voices with indication of which are used in agents.",
     tags=["Voice Customization"]
 )
 async def get_available_voices():
-    """Get all unique TTS voices from agents in database"""
+    """Get all available TTS voices with usage status from database"""
     try:
-        from databases.mongodb_agent_store import MongoDBAgentStore
-        from databases.mongodb_db import is_mongodb_available
+        from tools.response.text_to_speech import TextToSpeechTool
         
-        if not is_mongodb_available():
-            # Fallback to default voices if MongoDB not available
-            default_voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
-            return {"voices": [{"name": v, "used": False} for v in default_voices]}
+        # Get all available voices from TTS tool
+        tts_tool = TextToSpeechTool()
+        all_voices = tts_tool.available_voices  # ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
         
-        agent_store = MongoDBAgentStore()
-        agents = await agent_store.list_agents(active_only=False)
+        # Get voices used in agents from database
+        used_voices = set()
+        try:
+            from databases.mongodb_agent_store import MongoDBAgentStore
+            from databases.mongodb_db import is_mongodb_available
+            
+            if is_mongodb_available():
+                agent_store = MongoDBAgentStore()
+                agents = await agent_store.list_agents(active_only=False)
+                
+                # Extract unique voices from agents
+                for agent in agents:
+                    tts_voice = agent.get("ttsVoice") or agent.get("tts_voice")
+                    if tts_voice:
+                        used_voices.add(tts_voice)
+        except Exception as e:
+            logger.warning(f"Could not fetch used voices from database: {e}")
         
-        # Extract unique voices from agents
-        voices_set = set()
-        for agent in agents:
-            tts_voice = agent.get("ttsVoice") or agent.get("tts_voice")
-            if tts_voice:
-                voices_set.add(tts_voice)
+        # Return all voices with usage status
+        voices_list = []
+        for voice in sorted(all_voices):
+            voices_list.append({
+                "name": voice,
+                "used": voice in used_voices
+            })
         
-        # If no voices found in DB, use default voices
-        if not voices_set:
-            voices_set = {"alloy", "echo", "fable", "onyx", "nova", "shimmer"}
-        
-        # Sort voices for consistent display
-        voices_list = sorted(list(voices_set))
-        
-        return {
-            "voices": [{"name": voice, "used": True} for voice in voices_list]
-        }
+        return {"voices": voices_list}
     except Exception as e:
         logger.error(f"Error getting available voices: {e}")
         # Fallback to default voices on error
