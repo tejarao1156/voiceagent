@@ -39,6 +39,7 @@ class TwilioStreamHandler:
         self.ai_speech_start_time = None  # Timestamp when AI started speaking (for grace period)
         self.stream_sid = None
         self.call_sid = None
+        self.to_number = None  # Store To number for credential lookup
         self.session_id = None
         self.session_data: Dict[str, Any] = {}
         self.silence_frames_count = 0
@@ -94,6 +95,7 @@ class TwilioStreamHandler:
         self.call_sid = start_data['callSid']
         from_number = start_data.get('customParameters', {}).get('From', 'Unknown')
         to_number = start_data.get('customParameters', {}).get('To', 'Unknown')
+        self.to_number = to_number  # Store for credential lookup
         
         logger.info(f"Stream started: call_sid={self.call_sid}, stream_sid={self.stream_sid}")
         logger.info(f"Call from: {from_number} to: {to_number}")
@@ -577,10 +579,11 @@ class TwilioStreamHandler:
             
             # Also try to update call status via REST API if available
             try:
-                from config import TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
-                if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+                from utils.twilio_credentials import get_twilio_credentials
+                twilio_creds = await get_twilio_credentials(phone_number=self.to_number, call_sid=self.call_sid)
+                if twilio_creds and twilio_creds.get("account_sid") and twilio_creds.get("auth_token"):
                     from twilio.rest import Client
-                    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+                    client = Client(twilio_creds["account_sid"], twilio_creds["auth_token"])
                     call = client.calls(self.call_sid).update(status="completed")
                     logger.info(f"✅ Call {self.call_sid} status updated to completed via REST API")
             except Exception as e:

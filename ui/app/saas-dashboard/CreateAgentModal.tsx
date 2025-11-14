@@ -6,13 +6,13 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Slider } from '@/components/ui/slider'
-import { PhoneInput } from '@/components/ui/phone-input'
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { fetchRegisteredPhones, type RegisteredPhone } from '@/lib/api'
 
 interface CreateAgentModalProps {
   open: boolean
@@ -85,24 +85,56 @@ export function CreateAgentModal({
     statusCallbackUrl: string
     environment?: { runtime: string; baseUrl: string }
   } | null>(null)
+  const [registeredPhones, setRegisteredPhones] = useState<RegisteredPhone[]>([])
+  const [selectedPhoneId, setSelectedPhoneId] = useState<string>('')
 
-  // Fetch webhook URLs when modal opens and provider is Twilio
+  // Fetch webhook URLs and registered phones when modal opens
   useEffect(() => {
-    const fetchWebhookUrls = async () => {
+    const fetchData = async () => {
       if (open && formData.provider === 'twilio') {
         try {
+          // Fetch webhook URLs
           const response = await fetch('/webhooks/twilio/urls')
           if (response.ok) {
             const data = await response.json()
             setWebhookUrls(data)
           }
+          
+          // Fetch registered phones (only active ones for agent creation)
+          if (!isEditMode) {
+            const phones = await fetchRegisteredPhones(true) // Only active phones
+            setRegisteredPhones(phones)
+            if (phones.length > 0) {
+              setSelectedPhoneId(phones[0].id)
+              const firstPhone = phones[0]
+              setFormData(prev => ({
+                ...prev,
+                phoneNumber: firstPhone.phoneNumber,
+                twilioAccountSid: firstPhone.twilioAccountSid,
+              }))
+            }
+          }
         } catch (error) {
-          console.error('Failed to fetch webhook URLs:', error)
+          console.error('Failed to fetch data:', error)
         }
       }
     }
-    fetchWebhookUrls()
-  }, [open, formData.provider])
+    fetchData()
+  }, [open, formData.provider, isEditMode])
+  
+  // Handle registered phone selection
+  useEffect(() => {
+    if (selectedPhoneId && !isEditMode) {
+      const selectedPhone = registeredPhones.find(p => p.id === selectedPhoneId)
+      if (selectedPhone) {
+        setFormData(prev => ({
+          ...prev,
+          phoneNumber: selectedPhone.phoneNumber,
+          twilioAccountSid: selectedPhone.twilioAccountSid,
+        }))
+      }
+    }
+  }, [selectedPhoneId, isEditMode, registeredPhones])
 
   // Load edit agent data when modal opens
   useEffect(() => {
@@ -163,6 +195,19 @@ export function CreateAgentModal({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    
+    // Validate that a registered phone is selected (for new agents)
+    if (!isEditMode && (!selectedPhoneId || !formData.phoneNumber)) {
+      alert('Please select a registered phone number')
+      return
+    }
+    
+    // Validate that registered phones exist (for new agents)
+    if (!isEditMode && registeredPhones.length === 0) {
+      alert('No registered phone numbers available. Please register a phone number first.')
+      return
+    }
+    
     onSubmit(formData)
     setFormData({
       name: '',
@@ -181,6 +226,7 @@ export function CreateAgentModal({
       twilioAccountSid: '',
       twilioAuthToken: '',
     })
+    setSelectedPhoneId('')
     onOpenChange(false)
   }
 
@@ -277,16 +323,43 @@ export function CreateAgentModal({
                     Phone Number <span className="text-red-500">*</span>
                     {isEditMode && <span className="text-xs text-slate-500 ml-2">(Cannot be changed)</span>}
                   </label>
-                  <div className={isEditMode ? "pointer-events-none opacity-60" : ""}>
-                    <PhoneInput
-                      value={formData.phoneNumber}
-                      onChange={(value) =>
-                        setFormData({ ...formData, phoneNumber: value })
-                      }
-                      placeholder="Enter phone number"
+                  {isEditMode ? (
+                    <div className="pointer-events-none opacity-60">
+                      <Input
+                        value={formData.phoneNumber}
+                        readOnly
+                        className="bg-slate-50 border-slate-300 text-slate-600 cursor-not-allowed"
+                      />
+                    </div>
+                  ) : registeredPhones.length > 0 ? (
+                    <select
+                      value={selectedPhoneId}
+                      onChange={(e) => setSelectedPhoneId(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900"
                       required
-                    />
-                  </div>
+                    >
+                      <option value="">Select a registered phone number</option>
+                      {registeredPhones.map((phone) => (
+                        <option key={phone.id} value={phone.id}>
+                          {phone.phoneNumber}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                      <p className="text-sm font-medium text-amber-900 mb-1">
+                        No registered phone numbers available
+                      </p>
+                      <p className="text-xs text-amber-700">
+                        Please register a phone number first using the "Register Phone Number" button in the top navigation bar.
+                      </p>
+                    </div>
+                  )}
+                  {!isEditMode && registeredPhones.length > 0 && (
+                    <p className="text-xs text-slate-500 mt-1">
+                      Select a phone number that has been registered with Twilio credentials
+                    </p>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-2 pt-2">
@@ -609,6 +682,7 @@ export function CreateAgentModal({
             <Button
               type="submit"
               className="bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white shadow-lg"
+              disabled={!isEditMode && registeredPhones.length === 0}
             >
               {isEditMode ? 'Update Agent' : 'Create Agent'}
             </Button>

@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 import logging
 from .mongodb_db import get_mongo_db, is_mongodb_available
+from .mongodb_phone_store import normalize_phone_number
 
 logger = logging.getLogger(__name__)
 
@@ -45,19 +46,36 @@ class MongoDBAgentStore:
             phone_number = agent_data.get("phoneNumber")
             agent_name = agent_data.get("name")
             
+            # Normalize phone number to E.164 format
+            if phone_number:
+                original_phone = phone_number
+                phone_number = normalize_phone_number(phone_number)
+                agent_data["phoneNumber"] = phone_number
+                if original_phone != phone_number:
+                    logger.info(f"Normalized agent phone number: '{original_phone}' -> '{phone_number}'")
+            
             # Determine if the new agent will be active
             will_be_active = agent_data.get("active")
             if will_be_active is None:
                 will_be_active = True  # Default to active
             
             # If creating an active agent, deactivate all existing agents with the same phone number
+            # Check both exact match and normalized match
             if phone_number and will_be_active:
                 existing_agents = []
+                # First try exact match
                 async for doc in collection.find({
                     "phoneNumber": phone_number,
                     "isDeleted": {"$ne": True}
                 }):
                     existing_agents.append(doc)
+                
+                # Also check normalized matches (for backward compatibility with old formats)
+                if not existing_agents:
+                    async for doc in collection.find({"isDeleted": {"$ne": True}}):
+                        stored_phone = doc.get("phoneNumber", "")
+                        if normalize_phone_number(stored_phone) == phone_number:
+                            existing_agents.append(doc)
                 
                 if existing_agents:
                     logger.info(f"Found {len(existing_agents)} existing agent(s) with phone number {phone_number}")
@@ -69,10 +87,16 @@ class MongoDBAgentStore:
                         logger.warning(f"Agent with same name '{agent_name}' and phone '{phone_number}' already exists")
                         # User might be trying to create a duplicate - we'll still create it but deactivate old ones
                     
-                    # Deactivate all existing agents with this phone number (excluding deleted ones)
-                    # This ensures only one agent per phone number can be active
+                    # Deactivate all existing agents with this phone number (normalized match)
+                    # Get all phone numbers that normalize to the same value
+                    phone_numbers_to_deactivate = [phone_number]
+                    async for doc in collection.find({"isDeleted": {"$ne": True}}):
+                        stored_phone = doc.get("phoneNumber", "")
+                        if stored_phone not in phone_numbers_to_deactivate and normalize_phone_number(stored_phone) == phone_number:
+                            phone_numbers_to_deactivate.append(stored_phone)
+                    
                     deactivate_result = await collection.update_many(
-                        {"phoneNumber": phone_number, "isDeleted": {"$ne": True}},
+                        {"phoneNumber": {"$in": phone_numbers_to_deactivate}, "isDeleted": {"$ne": True}},
                         {"$set": {"active": False, "updated_at": datetime.utcnow().isoformat()}}
                     )
                     logger.info(f"Deactivated {deactivate_result.modified_count} existing agent(s) with phone number {phone_number} to ensure only one active agent per number")
@@ -135,7 +159,7 @@ class MongoDBAgentStore:
             return None
     
     async def get_agent_by_phone(self, phone_number: str) -> Optional[Dict[str, Any]]:
-        """Get an agent by phone number"""
+        """Get an agent by phone number (with normalization)"""
         if not is_mongodb_available():
             logger.debug("MongoDB not available, skipping agent retrieval")
             return None
@@ -145,18 +169,34 @@ class MongoDBAgentStore:
             if collection is None:
                 return None
             
+            # Normalize the input phone number
+            normalized_phone = normalize_phone_number(phone_number)
+            logger.debug(f"Looking up agent by phone: '{phone_number}' -> normalized: '{normalized_phone}'")
+            
+            # First try exact match with normalized number
             agent = await collection.find_one({
-                "phoneNumber": phone_number,
+                "phoneNumber": normalized_phone,
                 "isDeleted": {"$ne": True}
             })
             
             if agent:
-                # Convert ObjectId to string and add as 'id'
                 agent_dict = dict(agent)
                 agent_dict["id"] = str(agent_dict["_id"])
                 del agent_dict["_id"]
+                logger.debug(f"✅ Found agent by normalized phone: {normalized_phone}")
                 return agent_dict
             
+            # If not found, try to find by normalizing all stored agents
+            async for doc in collection.find({"isDeleted": {"$ne": True}}):
+                stored_phone = doc.get("phoneNumber", "")
+                if normalize_phone_number(stored_phone) == normalized_phone:
+                    agent_dict = dict(doc)
+                    agent_dict["id"] = str(agent_dict["_id"])
+                    del agent_dict["_id"]
+                    logger.info(f"✅ Found agent by normalized comparison: stored '{stored_phone}' matches '{normalized_phone}'")
+                    return agent_dict
+            
+            logger.warning(f"❌ No agent found for phone: '{phone_number}' (normalized: '{normalized_phone}')")
             return None
             
         except Exception as e:
