@@ -179,6 +179,7 @@ export default function SaaSDashboard() {
               lastUpdated,
               status: (agent.active === true || agent.active === undefined) ? 'active' : 'idle',
               active: agent.active !== false, // Default to true if undefined/null
+              phoneIsDeleted: agent.phoneIsDeleted || false, // Include phone deletion status
               sttModel: agent.sttModel,
               inferenceModel: agent.inferenceModel,
               ttsModel: agent.ttsModel,
@@ -276,6 +277,12 @@ export default function SaaSDashboard() {
   }
 
   const handleToggleActive = async (agent: Agent, active: boolean) => {
+    // Prevent toggling if phone is deleted
+    if (agent.phoneIsDeleted) {
+      alert('Cannot toggle active status. The associated phone number has been deleted.')
+      return
+    }
+    
     try {
       const response = await fetch(`/agents/${agent.id}`, {
         method: 'PUT',

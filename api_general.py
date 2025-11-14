@@ -2128,8 +2128,14 @@ async def register_phone(request: Request):
             phone_id = await phone_store.register_phone(registration_data)
         except ValueError as e:
             # Duplicate phone number validation error
-            logger.warning(f"❌ Duplicate phone registration attempt: {phone_number} - {str(e)}")
-            raise HTTPException(status_code=409, detail=str(e))
+            error_message = str(e)
+            logger.warning(f"❌ Duplicate phone registration attempt: {phone_number} - {error_message}")
+            raise HTTPException(status_code=409, detail=error_message)
+        except Exception as e:
+            # Catch any other exceptions from register_phone (e.g., MongoDB errors)
+            error_message = f"Failed to register phone number: {str(e)}"
+            logger.error(f"❌ Error registering phone {phone_number}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=error_message)
         
         if not phone_id:
             logger.error("Failed to register phone - phone_store.register_phone returned None")

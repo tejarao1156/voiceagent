@@ -39,6 +39,7 @@ export interface Agent {
   lastUpdated: string
   status: 'active' | 'idle' | 'upgraded'
   active?: boolean
+  phoneIsDeleted?: boolean  // True if the associated phone number is deleted
   // Configuration fields
   sttModel?: string
   inferenceModel?: string
@@ -154,21 +155,32 @@ export function AgentTable({
                 {agent.phoneNumber}
               </TableCell>
               <TableCell>
-                <label className="relative inline-flex items-center cursor-pointer">
+                <label className={cn(
+                  "relative inline-flex items-center",
+                  agent.phoneIsDeleted ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+                )}>
                   <input
                     type="checkbox"
                     checked={agent.active ?? false}
                     onChange={(e) => {
                       e.stopPropagation()
-                      if (onToggleActive) {
+                      if (onToggleActive && !agent.phoneIsDeleted) {
                         onToggleActive(agent, e.target.checked)
                       }
                     }}
-                    className="sr-only peer"
+                    disabled={agent.phoneIsDeleted}
+                    className="sr-only peer disabled:cursor-not-allowed"
                   />
-                  <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
-                  <span className="ml-3 text-sm font-medium text-slate-700">
+                  <div className={cn(
+                    "w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600",
+                    agent.phoneIsDeleted && "opacity-50 cursor-not-allowed"
+                  )}></div>
+                  <span className={cn(
+                    "ml-3 text-sm font-medium",
+                    agent.phoneIsDeleted ? "text-slate-500" : "text-slate-700"
+                  )}>
                     {agent.active ? 'Active' : 'Inactive'}
+                    {agent.phoneIsDeleted && ' (Phone Deleted)'}
                   </span>
                 </label>
               </TableCell>
@@ -183,9 +195,12 @@ export function AgentTable({
                     </button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-56">
-                    <DropdownMenuItem onClick={() => onEdit(agent)}>
+                    <DropdownMenuItem 
+                      onClick={() => onEdit(agent)}
+                    >
                       <Edit className="h-4 w-4 mr-2" />
                       Edit
+                      {agent.phoneIsDeleted && " (View Only)"}
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem

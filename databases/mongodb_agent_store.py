@@ -245,6 +245,23 @@ class MongoDBAgentStore:
                 elif doc.get("active") is None:
                     doc["active"] = True  # Default to active if None
                 
+                # Check if the agent's phone number is deleted
+                phone_number = doc.get("phoneNumber")
+                phone_is_deleted = False
+                if phone_number:
+                    try:
+                        from .mongodb_phone_store import MongoDBPhoneStore
+                        phone_store = MongoDBPhoneStore()
+                        phone = await phone_store.get_phone_by_number(phone_number)
+                        # If phone is not found or is deleted, mark as deleted
+                        if not phone or phone.get("isDeleted", False):
+                            phone_is_deleted = True
+                    except Exception as e:
+                        logger.debug(f"Error checking phone status for {phone_number}: {e}")
+                        # If we can't check, assume not deleted (don't block agent)
+                
+                doc["phoneIsDeleted"] = phone_is_deleted
+                
                 agents.append(doc)
             
             return agents
@@ -328,7 +345,7 @@ class MongoDBAgentStore:
         """Deactivate all agents with a given phone number, optionally excluding one agent
         
         Args:
-            phone_number: Phone number to search for
+            phone_number: Phone number to search for (should be normalized)
             exclude_agent_id: Optional agent ID to exclude from deactivation
             
         Returns:
@@ -345,8 +362,13 @@ class MongoDBAgentStore:
             
             from bson import ObjectId
             
+            # Normalize phone number for consistent matching
+            normalized_phone = normalize_phone_number(phone_number)
+            logger.debug(f"Deactivating agents for phone: '{phone_number}' -> normalized: '{normalized_phone}'")
+            
             # Build query (exclude deleted agents)
-            query = {"phoneNumber": phone_number, "isDeleted": {"$ne": True}}
+            # Try exact match first
+            query = {"phoneNumber": normalized_phone, "isDeleted": {"$ne": True}}
             if exclude_agent_id:
                 query["_id"] = {"$ne": ObjectId(exclude_agent_id)}
             
@@ -356,13 +378,28 @@ class MongoDBAgentStore:
                 {"$set": {"active": False, "updated_at": datetime.utcnow().isoformat()}}
             )
             
+            # Also check for agents with different phone formats that normalize to the same value
+            if result.modified_count == 0:
+                # Find all non-deleted agents and check if their phone normalizes to the same value
+                async for doc in collection.find({"isDeleted": {"$ne": True}}):
+                    stored_phone = doc.get("phoneNumber", "")
+                    if normalize_phone_number(stored_phone) == normalized_phone:
+                        agent_id = str(doc.get("_id"))
+                        if exclude_agent_id and agent_id == exclude_agent_id:
+                            continue
+                        await collection.update_one(
+                            {"_id": doc.get("_id")},
+                            {"$set": {"active": False, "updated_at": datetime.utcnow().isoformat()}}
+                        )
+                        result.modified_count += 1
+            
             if result.modified_count > 0:
-                logger.info(f"Deactivated {result.modified_count} agent(s) with phone number {phone_number}")
+                logger.info(f"✅ Deactivated {result.modified_count} agent(s) with phone number {normalized_phone}")
             
             return result.modified_count
             
         except Exception as e:
-            logger.error(f"Error deactivating agents by phone in MongoDB: {e}")
+            logger.error(f"Error deactivating agents by phone in MongoDB: {e}", exc_info=True)
             return 0
     
     async def delete_agent(self, agent_id: str) -> bool:

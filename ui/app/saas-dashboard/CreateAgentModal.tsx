@@ -49,6 +49,7 @@ interface CreateAgentModalProps {
     temperature?: number
     maxTokens?: number
     active?: boolean
+    phoneIsDeleted?: boolean
     twilioAccountSid?: string
     twilioAuthToken?: string
   } | null
@@ -61,6 +62,11 @@ export function CreateAgentModal({
   editAgent,
 }: CreateAgentModalProps) {
   const isEditMode = !!editAgent
+  // Agent is read-only if: inactive (active=false) OR phone is deleted
+  const isInactiveAgent = isEditMode && editAgent && (
+    editAgent.active === false || 
+    editAgent.phoneIsDeleted === true
+  )
   
   const [formData, setFormData] = useState({
     name: '',
@@ -196,6 +202,15 @@ export function CreateAgentModal({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     
+    // Prevent submission for inactive agents
+    if (isInactiveAgent) {
+      const reason = editAgent && editAgent.phoneIsDeleted
+        ? 'The associated phone number has been deleted'
+        : 'This agent is inactive'
+      alert(`This agent cannot be updated. ${reason}.`)
+      return
+    }
+    
     // Validate that a registered phone is selected (for new agents)
     if (!isEditMode && (!selectedPhoneId || !formData.phoneNumber)) {
       alert('Please select a registered phone number')
@@ -235,13 +250,26 @@ export function CreateAgentModal({
       <DialogContent className="sm:max-w-[700px] max-h-[90vh] overflow-y-auto bg-white border-slate-200 [&>button]:text-slate-600">
         <DialogHeader>
           <DialogTitle className="text-2xl font-semibold text-slate-900">
-            {isEditMode ? 'Edit AI Agent' : 'Create New AI Agent'}
+            {isEditMode ? (isInactiveAgent ? 'View AI Agent (Inactive)' : 'Edit AI Agent') : 'Create New AI Agent'}
           </DialogTitle>
           <p className="text-sm text-slate-600 mt-1">
-            {isEditMode 
+            {isInactiveAgent 
+              ? (editAgent && editAgent.phoneIsDeleted
+                  ? 'This agent is read-only because its associated phone number was deleted. You can view the configuration but cannot make changes.'
+                  : 'This agent is inactive. You can view the configuration but cannot make changes.')
+              : isEditMode 
               ? 'Update your voice AI agent configuration (name and phone number cannot be changed)'
               : 'Configure your voice AI agent with custom models and behavior settings'}
           </p>
+          {isInactiveAgent && (
+            <div className="mt-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+              <p className="text-sm text-amber-800">
+                ⚠️ This agent is read-only. {editAgent && editAgent.phoneIsDeleted 
+                  ? 'The associated phone number has been deleted, so this agent cannot be edited or activated.'
+                  : 'This agent is inactive and cannot be edited or activated.'}
+              </p>
+            </div>
+          )}
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="space-y-4 mt-4">
@@ -274,7 +302,7 @@ export function CreateAgentModal({
                     onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                     placeholder="e.g., gman, alexa-bot"
                     required
-                    disabled={isEditMode}
+                    disabled={isEditMode || isInactiveAgent}
                     className="bg-white border-slate-300 text-slate-900 placeholder:text-slate-400 disabled:bg-slate-100 disabled:cursor-not-allowed"
                   />
                 </div>
@@ -292,7 +320,8 @@ export function CreateAgentModal({
                           direction: e.target.value as 'inbound',
                         })
                       }
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900"
+                      disabled={isInactiveAgent}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900 disabled:bg-slate-100 disabled:cursor-not-allowed"
                     >
                       <option value="inbound">Inbound</option>
                     </select>
@@ -310,7 +339,8 @@ export function CreateAgentModal({
                           provider: e.target.value as 'twilio' | 'custom',
                         })
                       }
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900"
+                      disabled={isInactiveAgent}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900 disabled:bg-slate-100 disabled:cursor-not-allowed"
                     >
                       <option value="twilio">Twilio</option>
                       <option value="custom">Custom</option>
@@ -362,7 +392,7 @@ export function CreateAgentModal({
                   )}
                 </div>
 
-                <div className="flex items-center gap-2 pt-2">
+                  <div className="flex items-center gap-2 pt-2">
                   <input
                     type="checkbox"
                     id="active"
@@ -370,7 +400,8 @@ export function CreateAgentModal({
                     onChange={(e) =>
                       setFormData({ ...formData, active: e.target.checked })
                     }
-                    className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                    disabled={isInactiveAgent}
+                    className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 disabled:cursor-not-allowed"
                   />
                   <label htmlFor="active" className="text-sm font-medium text-slate-700 cursor-pointer">
                     Active (Enable agent to receive calls)
@@ -409,7 +440,8 @@ export function CreateAgentModal({
                       onChange={(e) =>
                         setFormData({ ...formData, sttModel: e.target.value })
                       }
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900"
+                      disabled={isInactiveAgent}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900 disabled:bg-slate-100 disabled:cursor-not-allowed"
                     >
                       <option value="whisper-1">whisper-1</option>
                     </select>
@@ -425,7 +457,8 @@ export function CreateAgentModal({
                       onChange={(e) =>
                         setFormData({ ...formData, inferenceModel: e.target.value })
                       }
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900"
+                      disabled={isInactiveAgent}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900 disabled:bg-slate-100 disabled:cursor-not-allowed"
                     >
                       <option value="gpt-4o-mini">gpt-4o-mini (Fast, Cost-effective)</option>
                       <option value="gpt-4o">gpt-4o (More Capable)</option>
@@ -445,7 +478,8 @@ export function CreateAgentModal({
                       onChange={(e) =>
                         setFormData({ ...formData, ttsModel: e.target.value })
                       }
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900"
+                      disabled={isInactiveAgent}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900 disabled:bg-slate-100 disabled:cursor-not-allowed"
                     >
                       <option value="tts-1">tts-1 (Faster, Lower Latency)</option>
                       <option value="tts-1-hd">tts-1-hd (Higher Quality)</option>
@@ -462,7 +496,8 @@ export function CreateAgentModal({
                       onChange={(e) =>
                         setFormData({ ...formData, ttsVoice: e.target.value })
                       }
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900"
+                      disabled={isInactiveAgent}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900 disabled:bg-slate-100 disabled:cursor-not-allowed"
                     >
                       <option value="alloy">alloy</option>
                       <option value="echo">echo</option>
@@ -509,7 +544,8 @@ export function CreateAgentModal({
                     placeholder="You are a helpful customer support agent..."
                     required
                     rows={4}
-                    className="bg-white border-slate-300 text-slate-900 placeholder:text-slate-400"
+                    disabled={isInactiveAgent}
+                    className="bg-white border-slate-300 text-slate-900 placeholder:text-slate-400 disabled:bg-slate-100 disabled:cursor-not-allowed"
                   />
                   <p className="text-xs text-slate-500 mt-1">
                     Custom instructions for AI behavior and personality
@@ -526,7 +562,8 @@ export function CreateAgentModal({
                       setFormData({ ...formData, greeting: e.target.value })
                     }
                     placeholder="Welcome to customer support! How can I help you?"
-                    className="bg-white border-slate-300 text-slate-900 placeholder:text-slate-400"
+                    disabled={isInactiveAgent}
+                    className="bg-white border-slate-300 text-slate-900 placeholder:text-slate-400 disabled:bg-slate-100 disabled:cursor-not-allowed"
                   />
                   <p className="text-xs text-slate-500 mt-1">
                     Initial message when call starts (optional)
@@ -567,6 +604,7 @@ export function CreateAgentModal({
                     min={0}
                     max={2}
                     step={0.1}
+                    disabled={isInactiveAgent}
                   />
                   <p className="text-xs text-slate-500 mt-1">
                     Controls response randomness (0.0 = deterministic, 2.0 = creative)
@@ -586,6 +624,7 @@ export function CreateAgentModal({
                         maxTokens: parseInt(e.target.value) || 500,
                       })
                     }
+                    disabled={isInactiveAgent}
                     min={1}
                     max={4000}
                     className="bg-white border-slate-300 text-slate-900"
@@ -681,10 +720,10 @@ export function CreateAgentModal({
             </Button>
             <Button
               type="submit"
-              className="bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white shadow-lg"
-              disabled={!isEditMode && registeredPhones.length === 0}
+              className="bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white shadow-lg disabled:bg-slate-400 disabled:cursor-not-allowed"
+              disabled={isInactiveAgent || (!isEditMode && registeredPhones.length === 0)}
             >
-              {isEditMode ? 'Update Agent' : 'Create Agent'}
+              {isInactiveAgent ? 'View Only (Inactive)' : (isEditMode ? 'Update Agent' : 'Create Agent')}
             </Button>
           </div>
         </form>
