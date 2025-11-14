@@ -931,6 +931,18 @@ async def twilio_incoming_call(request: Request):
         logger.info(f"Received incoming call webhook for CallSid: {call_sid}")
         logger.info(f"Processing mode set to: {TWILIO_PROCESSING_MODE}")
 
+        # Check if agent exists for this phone number (for both stream and batch modes)
+        agent_config = None
+        if to_number:
+            agent_config = await twilio_phone_tool._load_agent_config(to_number)
+            if not agent_config:
+                logger.warning(f"❌ No active agent found for phone number {to_number}")
+                error_response = TwilioVoiceResponse()
+                error_response.say("Sorry, this number does not exist. Please check the number and try again. Goodbye.", voice="alice")
+                error_response.hangup()
+                logger.info(f"Call {call_sid} rejected: Number {to_number} not found in agents collection")
+                return HTMLResponse(content=str(error_response))
+
         # Create call record in MongoDB
         try:
             from databases.mongodb_call_store import MongoDBCallStore
@@ -941,19 +953,21 @@ async def twilio_incoming_call(request: Request):
                 to_number=to_number or "unknown",
                 agent_id=to_number
             )
+            
+            # Store greeting in transcript for batch mode (stream mode handles it in _send_greeting)
+            if TWILIO_PROCESSING_MODE != "stream" and agent_config:
+                greeting_text = agent_config.get("greeting", "Hello! How can I help you today?")
+                try:
+                    await call_store.update_call_transcript(
+                        call_sid=call_sid,
+                        role="assistant",
+                        text=greeting_text
+                    )
+                    logger.info(f"✅ Stored greeting in transcript for call {call_sid}: '{greeting_text[:50]}...'")
+                except Exception as e:
+                    logger.warning(f"Could not store greeting transcript: {e}")
         except Exception as e:
             logger.warning(f"Could not create call record: {e}")
-
-        # Check if agent exists for this phone number (for both stream and batch modes)
-        if to_number:
-            agent_config = await twilio_phone_tool._load_agent_config(to_number)
-            if not agent_config:
-                logger.warning(f"❌ No active agent found for phone number {to_number}")
-                error_response = TwilioVoiceResponse()
-                error_response.say("Sorry, this number does not exist. Please check the number and try again. Goodbye.", voice="alice")
-                error_response.hangup()
-                logger.info(f"Call {call_sid} rejected: Number {to_number} not found in agents collection")
-                return HTMLResponse(content=str(error_response))
 
         response = TwilioVoiceResponse()
 
@@ -2568,6 +2582,41 @@ async def get_call_by_id(call_sid: str):
         logger.error(f"Error getting call: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get(
+    "/api/calls/{call_sid}/verify",
+    summary="Verify Call Transcript",
+    description="Debug endpoint to verify call transcript storage",
+    tags=["Calls"]
+)
+async def verify_call_transcript(call_sid: str):
+    """Verify call transcript storage - for debugging"""
+    try:
+        from databases.mongodb_call_store import MongoDBCallStore
+        call_store = MongoDBCallStore()
+        call = await call_store.get_call_by_sid(call_sid)
+        
+        if not call:
+            return {
+                "error": "Call not found",
+                "call_sid": call_sid,
+                "collection": "calls"
+            }
+        
+        transcript = call.get("conversation", [])
+        return {
+            "call_sid": call_sid,
+            "status": call.get("status"),
+            "transcript_count": len(transcript),
+            "transcript": transcript,
+            "collection": "calls",
+            "from_number": call.get("from_number"),
+            "to_number": call.get("to_number"),
+            "start_time": call.get("timestamp")
+        }
+    except Exception as e:
+        logger.error(f"Error verifying call transcript: {e}")
+        return {"error": str(e), "call_sid": call_sid}
+
 @app.websocket("/ws/calls/{call_sid}/transcript")
 async def live_transcript_websocket(websocket: WebSocket, call_sid: str):
     """WebSocket endpoint for real-time transcript updates"""
@@ -2604,7 +2653,9 @@ async def live_transcript_websocket(websocket: WebSocket, call_sid: str):
                 await websocket.send_json({"type": "call_ended"})
                 break
             
-            if call.get("status") != "ongoing":
+            # Check if call is still active (handle both "ongoing" and "active" status)
+            call_status = call.get("status")
+            if call_status not in ["ongoing", "active"]:
                 await websocket.send_json({"type": "call_ended"})
                 break
             

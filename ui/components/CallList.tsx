@@ -39,6 +39,11 @@ export function CallList({ calls, onCallUpdate }: CallListProps) {
       const wsUrl = process.env.NEXT_PUBLIC_WS_URL || `${wsProtocol}//${wsHost}`
       const url = `${wsUrl}/ws/calls/${call.id}/transcript`
       
+      // Skip if WebSocket already exists for this call
+      if (wsConnections[call.id]) {
+        return
+      }
+      
       const ws = new WebSocket(url)
       wsConnections[call.id] = ws
       
