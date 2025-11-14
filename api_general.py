@@ -1932,6 +1932,49 @@ async def list_agents(active_only: Optional[bool] = Query(False, description="On
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get(
+    "/api/voices",
+    summary="Get Available Voices",
+    description="Get all unique TTS voices used in agents from database",
+    tags=["Voice Customization"]
+)
+async def get_available_voices():
+    """Get all unique TTS voices from agents in database"""
+    try:
+        from databases.mongodb_agent_store import MongoDBAgentStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        if not is_mongodb_available():
+            # Fallback to default voices if MongoDB not available
+            default_voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
+            return {"voices": [{"name": v, "used": False} for v in default_voices]}
+        
+        agent_store = MongoDBAgentStore()
+        agents = await agent_store.list_agents(active_only=False)
+        
+        # Extract unique voices from agents
+        voices_set = set()
+        for agent in agents:
+            tts_voice = agent.get("ttsVoice") or agent.get("tts_voice")
+            if tts_voice:
+                voices_set.add(tts_voice)
+        
+        # If no voices found in DB, use default voices
+        if not voices_set:
+            voices_set = {"alloy", "echo", "fable", "onyx", "nova", "shimmer"}
+        
+        # Sort voices for consistent display
+        voices_list = sorted(list(voices_set))
+        
+        return {
+            "voices": [{"name": voice, "used": True} for voice in voices_list]
+        }
+    except Exception as e:
+        logger.error(f"Error getting available voices: {e}")
+        # Fallback to default voices on error
+        default_voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
+        return {"voices": [{"name": v, "used": False} for v in default_voices]}
+
+@app.get(
     "/agents/{agent_id}",
     summary="Get Agent",
     description="Get a specific agent by MongoDB ID. Returns full agent configuration including all settings.",

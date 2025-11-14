@@ -9,6 +9,7 @@ import { AgentTable, type Agent } from './AgentTable'
 import { CreateAgentModal } from './CreateAgentModal'
 import { AnalyticsDashboard } from './dashboard-statistics'
 import { CallsSection } from './CallsSection'
+import { VoiceCustomization } from './VoiceCustomization'
 
 export default function SaaSDashboard() {
   // Check URL hash or default to dashboard - use client-side only to avoid hydration mismatch
@@ -380,7 +381,17 @@ export default function SaaSDashboard() {
             </motion.div>
           )}
 
-          {activeSection !== 'ai-agents' && activeSection !== 'dashboard' && activeSection !== 'calls' && (
+          {mounted && activeSection === 'voice-customization' && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.2 }}
+            >
+              <VoiceCustomization />
+            </motion.div>
+          )}
+
+          {activeSection !== 'ai-agents' && activeSection !== 'dashboard' && activeSection !== 'calls' && activeSection !== 'voice-customization' && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
