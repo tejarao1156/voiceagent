@@ -302,26 +302,35 @@ Once your server is running (`python main.py`), access these UIs:
 3. Click **Buy** to purchase (or use the trial number)
 4. Copy your phone number (format: `+1234567890`)
 
-**Step 4: Configure Your `.env` File**
+**Step 4: Register Phone Number Through App UI**
 
-1. Open your `.env` file (or create from `env.example`)
-2. Add your Twilio credentials:
+⚠️ **IMPORTANT**: Twilio credentials MUST be registered through the app UI, NOT in `.env` file.
 
-```bash
-# ============================================================================
-# TWILIO CONFIGURATION (for phone integration)
-# ============================================================================
-TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TWILIO_AUTH_TOKEN=your_auth_token_from_twilio_console
-TWILIO_PHONE_NUMBER=+1234567890
-TWILIO_WEBHOOK_BASE_URL=https://your-domain.com
-```
+1. **Start your server:**
+   ```bash
+   python main.py
+   ```
+
+2. **Open the app UI** and navigate to "AI Agents" section
+
+3. **Click "Register Phone Number"** button (beside "Create Agent")
+
+4. **Enter your Twilio credentials:**
+   - Phone Number: Your Twilio phone number (e.g., +1234567890)
+   - Twilio Account SID: From Twilio Console Dashboard (starts with "AC")
+   - Twilio Auth Token: From Twilio Console Dashboard (click "Show Token")
+
+5. **Click "Register Phone"** - the system will:
+   - Store credentials securely in MongoDB
+   - Generate webhook URLs for you to configure in Twilio Console
+   - Display instructions on how to configure webhooks
 
 **Where to find each value:**
-- `TWILIO_ACCOUNT_SID`: Dashboard → Account Info (starts with "AC")
-- `TWILIO_AUTH_TOKEN`: Dashboard → Account Info → Auth Token (click to reveal)
-- `TWILIO_PHONE_NUMBER`: Your purchased Twilio number (format: +1234567890)
-- `TWILIO_WEBHOOK_BASE_URL`: See Step 5 below
+- `Phone Number`: Your purchased Twilio number (format: +1234567890)
+- `Twilio Account SID`: Dashboard → Account Info (starts with "AC")
+- `Twilio Auth Token`: Dashboard → Account Info → Auth Token (click to reveal)
+
+**Note**: The system will ONLY pull credentials from MongoDB, not from `.env` file.
 
 **Step 5: Set Up Public URL (Webhook Access)**
 
@@ -415,19 +424,15 @@ Twilio Console → Phone Numbers → [Your Number] → Configure
 
 **Step 7: Verify Your Configuration**
 
-1. **Check your `.env` file has all values:**
-   ```bash
-   # Required
-   TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   TWILIO_AUTH_TOKEN=your_auth_token_here
-   TWILIO_PHONE_NUMBER=+1234567890
-   TWILIO_WEBHOOK_BASE_URL=https://your-domain.com
-   ```
+1. **Verify phone number is registered:**
+   - Check the app UI "AI Agents" section
+   - Your registered phone number should appear in the list
+   - You can use it when creating agents
 
-2. **Restart your server:**
-   ```bash
-   python main.py
-   ```
+2. **Verify webhook URLs are configured in Twilio Console:**
+   - Go to Twilio Console → Phone Numbers → [Your Number]
+   - Check that "A CALL COMES IN" webhook is set correctly
+   - Check that "STATUS CALLBACK URL" is set correctly
 
 3. **Test the webhook endpoint:**
    ```bash

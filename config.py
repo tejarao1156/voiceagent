@@ -88,9 +88,9 @@ RUNTIME_ENVIRONMENT = detect_runtime_environment()
 # ============================================================================
 # TWILIO CONFIGURATION
 # ============================================================================
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
+# Note: Twilio credentials MUST be registered through the app UI.
+# All credentials are stored in MongoDB via the "Register Phone Number" feature.
+# No credentials should be set in .env file - they are pulled from MongoDB only.
 
 # Get webhook base URL based on environment detection
 # This will automatically use:

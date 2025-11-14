@@ -6,21 +6,28 @@ import { cn } from '@/lib/utils'
 import { Sidebar } from './Sidebar'
 import { TopNav } from './TopNav'
 import { AgentTable, type Agent } from './AgentTable'
+import { RegisteredPhonesTable } from './RegisteredPhonesTable'
 import { CreateAgentModal } from './CreateAgentModal'
+import { RegisterPhoneModal } from './RegisterPhoneModal'
 import { AnalyticsDashboard } from './dashboard-statistics'
 import { CallsSection } from './CallsSection'
 import { VoiceCustomization } from './VoiceCustomization'
+import { Button } from '@/components/ui/button'
+import { fetchRegisteredPhones } from '@/lib/api'
 
 export default function SaaSDashboard() {
   // Check URL hash or default to dashboard - use client-side only to avoid hydration mismatch
   const [activeSection, setActiveSection] = useState('dashboard')
   const [mounted, setMounted] = useState(false)
   const [activeTab, setActiveTab] = useState('AI Agents')
+  const [registeredPhones, setRegisteredPhones] = useState<any[]>([])
+  const [loadingPhones, setLoadingPhones] = useState(false)
   const [agents, setAgents] = useState<Agent[]>([]) // Start with empty array - load from MongoDB
   const [createModalOpen, setCreateModalOpen] = useState(false)
+  const [registerPhoneModalOpen, setRegisterPhoneModalOpen] = useState(false)
   const [editAgent, setEditAgent] = useState<Agent | null>(null)
   const [loadingAgents, setLoadingAgents] = useState(false)
-  const [agentFilter, setAgentFilter] = useState<'all' | 'active' | 'inactive'>('all')
+  const [agentFilter, setAgentFilter] = useState<'all' | 'active' | 'inactive' | 'phones'>('all')
 
   // Initialize from URL hash and sync with hash changes (client-side only)
   useEffect(() => {
@@ -215,14 +222,46 @@ export default function SaaSDashboard() {
     return true // 'all' shows everything
   })
 
+  // Load registered phones (fetch ALL phones, not just active)
+  const loadRegisteredPhones = async () => {
+    try {
+      setLoadingPhones(true)
+      console.log('🔍 Fetching registered phones from MongoDB...')
+      // Fetch all phones regardless of active status
+      const phones = await fetchRegisteredPhones(false)
+      console.log(`✅ Loaded ${phones.length} registered phone(s) from MongoDB:`, phones)
+      setRegisteredPhones(phones)
+      if (phones.length === 0) {
+        console.warn('⚠️ No phones found in MongoDB. Make sure you have registered at least one phone number.')
+      }
+    } catch (error) {
+      console.error('❌ Error loading registered phones:', error)
+      setRegisteredPhones([])
+      // Show user-friendly error
+      alert(`Failed to load registered phones: ${error instanceof Error ? error.message : 'Unknown error'}`)
+    } finally {
+      setLoadingPhones(false)
+    }
+  }
+
   // Load agents on mount and when section changes (client-side only to avoid hydration issues)
   useEffect(() => {
     if (mounted) {
       if (activeSection === 'ai-agents') {
         loadAgents()
+        // Always load registered phones (for dropdown in CreateAgentModal and phones tab)
+        loadRegisteredPhones()
       }
     }
   }, [mounted, activeSection])
+  
+  // Reload phones when phones tab is selected
+  useEffect(() => {
+    if (mounted && activeSection === 'ai-agents' && agentFilter === 'phones') {
+      console.log('📞 Phones tab selected, loading registered phones...')
+      loadRegisteredPhones()
+    }
+  }, [mounted, activeSection, agentFilter])
   
   // Also load agents when component first mounts to ai-agents section
   useEffect(() => {
@@ -280,6 +319,31 @@ export default function SaaSDashboard() {
     }
   }
 
+  const handleDeletePhone = async (phone: any) => {
+    if (confirm(`Are you sure you want to delete phone number ${phone.phoneNumber}? This action cannot be undone.`)) {
+      try {
+        console.log(`🗑️ Deleting phone ${phone.id} (${phone.phoneNumber})`)
+        const response = await fetch(`/api/phones/${phone.id}`, {
+          method: 'DELETE',
+        })
+        
+        if (response.ok) {
+          const result = await response.json()
+          console.log('✅ Phone deleted:', result)
+          // Reload phones from MongoDB after deletion
+          await loadRegisteredPhones()
+          alert('Phone number deleted successfully!')
+        } else {
+          const errorData = await response.json().catch(() => ({ detail: response.statusText }))
+          throw new Error(errorData.detail || 'Failed to delete phone')
+        }
+      } catch (error) {
+        console.error('❌ Error deleting phone:', error)
+        alert(`Failed to delete phone number. ${error instanceof Error ? error.message : 'Please try again.'}`)
+      }
+    }
+  }
+
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -290,6 +354,7 @@ export default function SaaSDashboard() {
           activeTab={activeTab}
           onTabChange={setActiveTab}
           onCreateAgent={() => setCreateModalOpen(true)}
+          onRegisterPhone={() => setRegisterPhoneModalOpen(true)}
           activeSection={activeSection}
         />
 
@@ -345,15 +410,36 @@ export default function SaaSDashboard() {
                 >
                   Inactive Agents
                 </button>
+                <button
+                  onClick={() => setAgentFilter('phones')}
+                  className={cn(
+                    "px-4 py-2 text-sm font-medium transition-colors",
+                    agentFilter === 'phones'
+                      ? "text-indigo-600 border-b-2 border-indigo-600"
+                      : "text-slate-600 hover:text-slate-900"
+                  )}
+                >
+                  Registered Phone Numbers
+                </button>
               </div>
 
-              {/* Agent Table */}
-              <AgentTable
-                agents={filteredAgents}
-                onEdit={handleEdit}
-                onDelete={handleDelete}
-                onToggleActive={handleToggleActive}
-              />
+              {/* Content based on selected tab */}
+              {agentFilter === 'phones' ? (
+                <RegisteredPhonesTable
+                  phones={registeredPhones}
+                  onCopy={(text, field) => {
+                    console.log(`Copied ${field}:`, text)
+                  }}
+                  onDelete={handleDeletePhone}
+                />
+              ) : (
+                <AgentTable
+                  agents={filteredAgents}
+                  onEdit={handleEdit}
+                  onDelete={handleDelete}
+                  onToggleActive={handleToggleActive}
+                />
+              )}
             </motion.div>
           )}
 
@@ -420,6 +506,18 @@ export default function SaaSDashboard() {
           onSubmit={handleCreateAgent}
           editAgent={editAgent}
         />
+
+      <RegisterPhoneModal
+        open={registerPhoneModalOpen}
+        onOpenChange={setRegisterPhoneModalOpen}
+        onSuccess={() => {
+          // Reload agents and registered phones if in ai-agents section (to refresh phone dropdown)
+          if (activeSection === 'ai-agents') {
+            loadAgents()
+            loadRegisteredPhones()
+          }
+        }}
+      />
     </div>
   )
 }

@@ -928,17 +928,49 @@ async def twilio_incoming_call(request: Request):
         call_sid = call_data.get("CallSid")
         from_number = call_data.get("From")
         to_number = call_data.get("To")
-        logger.info(f"Received incoming call webhook for CallSid: {call_sid}")
-        logger.info(f"Processing mode set to: {TWILIO_PROCESSING_MODE}")
+        logger.info(f"📞 Received incoming call webhook for CallSid: {call_sid}")
+        logger.info(f"   From: {from_number}")
+        logger.info(f"   To: {to_number}")
+        logger.info(f"   Processing mode: {TWILIO_PROCESSING_MODE}")
 
-        # Check if agent exists for this phone number (for both stream and batch modes)
+        # FIRST: Check if phone number is registered in MongoDB (REQUIRED)
+        if to_number:
+            from databases.mongodb_phone_store import MongoDBPhoneStore
+            from databases.mongodb_db import is_mongodb_available
+            
+            if is_mongodb_available():
+                phone_store = MongoDBPhoneStore()
+                logger.info(f"🔍 Looking up registered phone for: '{to_number}'")
+                registered_phone = await phone_store.get_phone_by_number(to_number)
+                
+                if not registered_phone or registered_phone.get("isActive") == False:
+                    logger.warning(f"❌ Phone number '{to_number}' is NOT registered in MongoDB")
+                    logger.warning(f"   Please ensure the phone number is registered through the app UI")
+                    error_response = TwilioVoiceResponse()
+                    error_response.say("Sorry, this number is not registered. Please register the phone number through the app first. Goodbye.", voice="alice")
+                    error_response.hangup()
+                    logger.info(f"Call {call_sid} rejected: Phone number {to_number} not registered in MongoDB")
+                    return HTMLResponse(content=str(error_response))
+                else:
+                    logger.info(f"✅ Phone number '{to_number}' is registered in MongoDB")
+                    logger.info(f"   Registered phone ID: {registered_phone.get('id')}")
+                    logger.info(f"   Stored as: {registered_phone.get('phoneNumber')}")
+            else:
+                logger.error("MongoDB is not available - cannot verify phone registration")
+                error_response = TwilioVoiceResponse()
+                error_response.say("Sorry, the system is temporarily unavailable. Please try again later. Goodbye.", voice="alice")
+                error_response.hangup()
+                logger.info(f"Call {call_sid} rejected: MongoDB not available")
+                return HTMLResponse(content=str(error_response))
+
+        # SECOND: Check if agent exists for this phone number (for both stream and batch modes)
         agent_config = None
         if to_number:
             agent_config = await twilio_phone_tool._load_agent_config(to_number)
             if not agent_config:
                 logger.warning(f"❌ No active agent found for phone number {to_number}")
                 error_response = TwilioVoiceResponse()
-                error_response.say("Sorry, this number does not exist. Please check the number and try again. Goodbye.", voice="alice")
+                error_response.say("Sorry, no agent is configured for this number. Please create an agent for this phone number. Goodbye.", voice="alice")
                 error_response.hangup()
                 logger.info(f"Call {call_sid} rejected: Number {to_number} not found in agents collection")
                 return HTMLResponse(content=str(error_response))
@@ -1100,13 +1132,22 @@ async def twilio_recording_handler(request: Request):
                 
                 # Download the recording with Twilio authentication
                 import base64
-                from config import TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
+                from utils.twilio_credentials import get_twilio_credentials
+                
+                # Get credentials from registered phone (or fallback to global config)
+                to_number = form_data.get("To")
+                twilio_creds = await get_twilio_credentials(phone_number=to_number, call_sid=call_sid)
+                
+                if not twilio_creds or not twilio_creds.get("account_sid") or not twilio_creds.get("auth_token"):
+                    logger.error(f"[RECORDING] No Twilio credentials found for phone {to_number}. Please register the phone number through the app.")
+                    response.say("I'm sorry, there was an issue with authentication.", voice="alice")
+                    return HTMLResponse(content=str(response))
                 
                 # Try downloading with .wav extension first
                 recording_url_wav = recording_url + ".wav"
                 
                 # Create basic auth header
-                auth_string = f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}"
+                auth_string = f"{twilio_creds['account_sid']}:{twilio_creds['auth_token']}"
                 auth_bytes = auth_string.encode("utf-8")
                 auth_b64 = base64.b64encode(auth_bytes).decode("utf-8")
                 
@@ -1397,13 +1438,22 @@ async def twilio_recording_handler(request: Request):
                 
                 # Download the recording with Twilio authentication
                 import base64
-                from config import TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
+                from utils.twilio_credentials import get_twilio_credentials
+                
+                # Get credentials from registered phone (or fallback to global config)
+                to_number = form_data.get("To")
+                twilio_creds = await get_twilio_credentials(phone_number=to_number, call_sid=call_sid)
+                
+                if not twilio_creds or not twilio_creds.get("account_sid") or not twilio_creds.get("auth_token"):
+                    logger.error(f"[RECORDING] No Twilio credentials found for phone {to_number}. Please register the phone number through the app.")
+                    response.say("I'm sorry, there was an issue with authentication.", voice="alice")
+                    return HTMLResponse(content=str(response))
                 
                 # Try downloading with .wav extension first
                 recording_url_wav = recording_url + ".wav"
                 
                 # Create basic auth header
-                auth_string = f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}"
+                auth_string = f"{twilio_creds['account_sid']}:{twilio_creds['auth_token']}"
                 auth_bytes = auth_string.encode("utf-8")
                 auth_b64 = base64.b64encode(auth_bytes).decode("utf-8")
                 
@@ -1979,6 +2029,269 @@ async def get_available_voices():
         default_voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
         return {"voices": [{"name": v, "used": False} for v in default_voices]}
 
+# ============================================================================
+# PHONE NUMBER REGISTRATION ENDPOINTS
+# ============================================================================
+
+@app.post(
+    "/api/phones/register",
+    summary="Register Phone Number",
+    description="Register a new phone number with Twilio credentials. Stores phone number, Twilio Account SID, Auth Token, and webhook URLs in MongoDB.",
+    tags=["Phone Registration"],
+    responses={
+        200: {
+            "description": "Phone registered successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "phone_id": "507f1f77bcf86cd799439011",
+                        "message": "Phone number registered successfully"
+                    }
+                }
+            }
+        },
+        400: {
+            "description": "Invalid request data",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Phone number is required"}
+                }
+            }
+        },
+        500: {
+            "description": "Failed to register phone",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Failed to register phone number"}
+                }
+            }
+        }
+    }
+)
+async def register_phone(request: Request):
+    """
+    Register a new phone number with Twilio credentials.
+    
+    **Request Body Fields:**
+    - `phoneNumber` (string, required): Phone number (e.g., "+1 555 123 4567")
+    - `twilioAccountSid` (string, required): Twilio Account SID
+    - `twilioAuthToken` (string, required): Twilio Auth Token
+    - `userId` (string, optional): User/tenant ID (for multi-tenant support)
+    
+    **Returns:**
+    - Webhook URLs (incoming and status callback) that should be configured in Twilio Console
+    """
+    try:
+        phone_data = await request.json()
+        logger.info(f"Received phone registration request for: {phone_data.get('phoneNumber')}")
+        
+        from databases.mongodb_phone_store import MongoDBPhoneStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        # Check MongoDB availability
+        if not is_mongodb_available():
+            logger.error("MongoDB is not available for phone registration")
+            raise HTTPException(status_code=503, detail="MongoDB is not available. Please check MongoDB connection.")
+        
+        # Validate required fields
+        phone_number = phone_data.get("phoneNumber")
+        twilio_account_sid = phone_data.get("twilioAccountSid")
+        twilio_auth_token = phone_data.get("twilioAuthToken")
+        
+        if not phone_number:
+            raise HTTPException(status_code=400, detail="Phone number is required")
+        if not twilio_account_sid:
+            raise HTTPException(status_code=400, detail="Twilio Account SID is required")
+        if not twilio_auth_token:
+            raise HTTPException(status_code=400, detail="Twilio Auth Token is required")
+        
+        phone_store = MongoDBPhoneStore()
+        
+        # Generate webhook URLs (same for all phones)
+        from config import TWILIO_WEBHOOK_BASE_URL
+        incoming_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/incoming"
+        status_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/status"
+        
+        # Prepare phone data
+        registration_data = {
+            "phoneNumber": phone_number,
+            "twilioAccountSid": twilio_account_sid,
+            "twilioAuthToken": twilio_auth_token,
+            "webhookUrl": incoming_url,
+            "statusCallbackUrl": status_url,
+            "userId": phone_data.get("userId")
+        }
+        
+        # Register phone (with duplicate validation)
+        try:
+            phone_id = await phone_store.register_phone(registration_data)
+        except ValueError as e:
+            # Duplicate phone number validation error
+            logger.warning(f"❌ Duplicate phone registration attempt: {phone_number} - {str(e)}")
+            raise HTTPException(status_code=409, detail=str(e))
+        
+        if not phone_id:
+            logger.error("Failed to register phone - phone_store.register_phone returned None")
+            raise HTTPException(status_code=500, detail="Failed to register phone number in MongoDB")
+        
+        logger.info(f"✅ Phone number registered successfully with ID: {phone_id}")
+        logger.info(f"📞 Phone: {phone_number}")
+        logger.info(f"🔗 Webhook URLs:")
+        logger.info(f"   Incoming: {incoming_url}")
+        logger.info(f"   Status: {status_url}")
+        
+        # Return response with webhook URLs
+        return {
+            "success": True,
+            "phone_id": phone_id,
+            "message": "Phone number registered successfully",
+            "phoneNumber": phone_number,
+            "webhookConfiguration": {
+                "incomingUrl": incoming_url,
+                "statusCallbackUrl": status_url,
+                "instructions": "Configure these URLs in your Twilio Console",
+                "steps": [
+                    "1. Go to Twilio Console → Phone Numbers",
+                    f"2. Click on phone number: {phone_number}",
+                    "3. Scroll to 'Voice & Fax' section",
+                    f"4. Set 'A CALL COMES IN' to: {incoming_url} (POST)",
+                    f"5. Set 'STATUS CALLBACK URL' to: {status_url} (POST)",
+                    "6. Click Save"
+                ]
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error registering phone number: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to register phone number: {str(e)}")
+
+@app.get(
+    "/api/phones",
+    summary="List Registered Phone Numbers",
+    description="Get all registered phone numbers. Returns list of phone numbers with their Twilio credentials (auth token is hidden for security).",
+    tags=["Phone Registration"],
+    responses={
+        200: {
+            "description": "List of registered phones",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "phones": [
+                            {
+                                "id": "507f1f77bcf86cd799439011",
+                                "phoneNumber": "+15551234567",
+                                "twilioAccountSid": "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                                "webhookUrl": "https://your-domain.com/webhooks/twilio/incoming",
+                                "statusCallbackUrl": "https://your-domain.com/webhooks/twilio/status",
+                                "created_at": "2025-01-15T10:30:00"
+                            }
+                        ],
+                        "count": 1
+                    }
+                }
+            }
+        }
+    }
+)
+async def list_phones(active_only: bool = Query(False, description="Only return active phones")):
+    """List all registered phone numbers"""
+    try:
+        from databases.mongodb_phone_store import MongoDBPhoneStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        logger.info(f"📞 Listing phones - active_only={active_only}")
+        
+        if not is_mongodb_available():
+            logger.warning("MongoDB not available for listing phones")
+            return {
+                "success": True,
+                "phones": [],
+                "count": 0
+            }
+        
+        phone_store = MongoDBPhoneStore()
+        phones = await phone_store.list_phones(active_only=active_only)
+        
+        logger.info(f"✅ Found {len(phones)} phone(s) in MongoDB (active_only={active_only})")
+        if phones:
+            logger.info(f"   Phone numbers: {[p.get('phoneNumber', 'N/A') for p in phones]}")
+        
+        return {
+            "success": True,
+            "phones": phones,
+            "count": len(phones)
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error listing phones: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete(
+    "/api/phones/{phone_id}",
+    summary="Delete Registered Phone Number (Soft Delete)",
+    description="Soft delete a registered phone number by setting isDeleted=true. The phone will not appear in the UI but remains in MongoDB for audit purposes.",
+    tags=["Phone Registration"],
+    responses={
+        200: {
+            "description": "Phone deleted successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "message": "Phone deleted successfully"
+                    }
+                }
+            }
+        },
+        404: {
+            "description": "Phone not found",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Phone not found"}
+                }
+            }
+        }
+    }
+)
+async def delete_phone(phone_id: str = Path(..., description="MongoDB Phone ID")):
+    """
+    Delete a registered phone number from MongoDB (soft delete).
+    
+    **Path Parameters:**
+    - `phone_id` (string, required): MongoDB ObjectID of the phone number
+    
+    **Note:** This is a soft delete - sets isDeleted=True. The phone remains in MongoDB for audit purposes.
+    """
+    try:
+        from databases.mongodb_phone_store import MongoDBPhoneStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        logger.info(f"🗑️ Deleting phone {phone_id}")
+        
+        if not is_mongodb_available():
+            logger.error("MongoDB is not available for phone deletion")
+            raise HTTPException(status_code=503, detail="MongoDB is not available. Please check MongoDB connection.")
+        
+        phone_store = MongoDBPhoneStore()
+        success = await phone_store.delete_phone(phone_id)
+        
+        if success:
+            logger.info(f"✅ Phone {phone_id} soft deleted successfully")
+            return {"success": True, "message": "Phone deleted successfully"}
+        else:
+            logger.warning(f"❌ Phone {phone_id} not found or deletion failed")
+            raise HTTPException(status_code=404, detail="Phone not found")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error deleting phone {phone_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get(
     "/agents/{agent_id}",
     summary="Get Agent",
@@ -2190,23 +2503,35 @@ async def delete_agent(agent_id: str = Path(..., description="MongoDB Agent ID")
 )
 async def get_twilio_status():
     """Get current status of Twilio integration."""
-    from config import TWILIO_ACCOUNT_SID, TWILIO_PHONE_NUMBER, TWILIO_WEBHOOK_BASE_URL
+    from config import TWILIO_WEBHOOK_BASE_URL
+    from databases.mongodb_phone_store import MongoDBPhoneStore
+    from databases.mongodb_db import is_mongodb_available
     
     # Combine active calls from both batch and stream modes
     stream_call_sids = list(active_stream_handlers.keys())
     batch_call_sids = list(twilio_phone_tool.active_calls.keys())
     all_active_calls = list(set(stream_call_sids + batch_call_sids))
     
+    # Get registered phones count
+    registered_phones_count = 0
+    if is_mongodb_available():
+        try:
+            phone_store = MongoDBPhoneStore()
+            phones = await phone_store.list_phones(active_only=True)
+            registered_phones_count = len(phones)
+        except Exception as e:
+            logger.warning(f"Could not get registered phones count: {e}")
+    
     return {
-        "configured": bool(TWILIO_ACCOUNT_SID and TWILIO_PHONE_NUMBER),
-        "phone_number": TWILIO_PHONE_NUMBER,
-        "account_sid": TWILIO_ACCOUNT_SID[:10] + "..." if TWILIO_ACCOUNT_SID else None,
+        "configured": registered_phones_count > 0,
+        "registered_phones_count": registered_phones_count,
         "webhook_base_url": TWILIO_WEBHOOK_BASE_URL,
         "active_calls": len(all_active_calls),
         "active_call_sids": all_active_calls,
         "stream_mode_calls": len(stream_call_sids),
         "batch_mode_calls": len(batch_call_sids),
-        "server_status": "online"
+        "server_status": "online",
+        "note": "Twilio credentials should be registered through the app UI"
     }
 
 @app.post(
@@ -2227,7 +2552,7 @@ async def hangup_twilio_call(call_sid: str, reason: str = Query("Call ended by s
     ```
     """
     try:
-        from config import TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
+        from utils.twilio_credentials import get_twilio_credentials
         
         # Try to hang up via stream handler first (for streaming mode)
         if call_sid in active_stream_handlers:
@@ -2242,10 +2567,13 @@ async def hangup_twilio_call(call_sid: str, reason: str = Query("Call ended by s
                 }
         
         # Fallback: Use Twilio REST API to update call status
-        if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+        # Get credentials from registered phone (or fallback to global config)
+        twilio_creds = await get_twilio_credentials(call_sid=call_sid)
+        
+        if twilio_creds and twilio_creds.get("account_sid") and twilio_creds.get("auth_token"):
             try:
                 from twilio.rest import Client
-                client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+                client = Client(twilio_creds["account_sid"], twilio_creds["auth_token"])
                 
                 # Update call status to completed (this will hang up the call)
                 call = client.calls(call_sid).update(status="completed")
@@ -2271,7 +2599,7 @@ async def hangup_twilio_call(call_sid: str, reason: str = Query("Call ended by s
         else:
             raise HTTPException(
                 status_code=400,
-                detail="Twilio credentials not configured. Cannot hang up call via REST API."
+                detail="Twilio credentials not found for this call. Please register the phone number through the app."
             )
     
     except HTTPException:
