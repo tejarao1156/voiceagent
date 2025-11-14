@@ -85,7 +85,7 @@ class MongoDBCallStore:
                 }
             )
             
-            logger.debug(f"Updated transcript for call {call_sid}: {role} - {text[:50]}...")
+            logger.info(f"✅ Updated transcript for call {call_sid}: {role} - {text[:50]}...")
             return True
             
         except Exception as e:

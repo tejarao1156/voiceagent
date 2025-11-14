@@ -415,6 +415,19 @@ class TwilioStreamHandler:
         # Use agent's greeting if available, otherwise default
         greeting_text = self.agent_config.get("greeting", "Hello! How can I help you today?") if self.agent_config else "Hello! How can I help you today?"
         logger.info(f"Sending greeting: '{greeting_text}'")
+        
+        # Store greeting in MongoDB transcript
+        try:
+            from databases.mongodb_call_store import MongoDBCallStore
+            call_store = MongoDBCallStore()
+            await call_store.update_call_transcript(
+                call_sid=self.call_sid,
+                role="assistant",
+                text=greeting_text
+            )
+        except Exception as e:
+            logger.warning(f"Could not store greeting transcript: {e}")
+        
         # Store TTS task for potential cancellation
         self.tts_streaming_task = asyncio.create_task(self._synthesize_and_stream_tts(greeting_text))
         await self.tts_streaming_task
