@@ -1023,11 +1023,13 @@ async def twilio_incoming_call(request: Request):
         try:
             from databases.mongodb_call_store import MongoDBCallStore
             call_store = MongoDBCallStore()
+            # For outbound calls, use 'from' number as agent_id; for inbound, use 'to' number
+            agent_id_for_call = agent_phone_number if agent_phone_number else (to_number or "unknown")
             await call_store.create_call(
                 call_sid=call_sid,
                 from_number=from_number or "unknown",
                 to_number=to_number or "unknown",
-                agent_id=to_number
+                agent_id=agent_id_for_call
             )
             
             # Store greeting in transcript for batch mode (stream mode handles it in _send_greeting)
@@ -1049,9 +1051,18 @@ async def twilio_incoming_call(request: Request):
 
         if TWILIO_PROCESSING_MODE == "stream":
             # --- Streaming Logic ---
-            connect = response.connect()
-            base_url = TWILIO_WEBHOOK_BASE_URL.split('//')[-1]
-            stream_url = f"wss://{base_url}/webhooks/twilio/stream"
+            try:
+                connect = response.connect()
+                # Extract base URL properly (handle both http:// and https://)
+                if '//' in TWILIO_WEBHOOK_BASE_URL:
+                    base_url = TWILIO_WEBHOOK_BASE_URL.split('//')[-1]
+                else:
+                    base_url = TWILIO_WEBHOOK_BASE_URL
+                stream_url = f"wss://{base_url}/webhooks/twilio/stream"
+                logger.info(f"🔗 Stream URL: {stream_url}")
+            except Exception as stream_setup_error:
+                logger.error(f"❌ Error setting up stream: {stream_setup_error}", exc_info=True)
+                raise
             
             logger.info(f"🚀 Mode: STREAM. Initiating media stream to: {stream_url}")
             stream = connect.stream(url=stream_url)
@@ -1091,11 +1102,21 @@ async def twilio_incoming_call(request: Request):
         return HTMLResponse(content=str(response))
         
     except Exception as e:
-        logger.error(f"Error handling incoming call webhook: {e}", exc_info=True)
-        error_response = TwilioVoiceResponse()
-        error_response.say("Sorry, a critical application error occurred. Goodbye.")
-        error_response.hangup()
-        return HTMLResponse(content=str(error_response))
+        logger.error(f"❌ CRITICAL ERROR handling incoming call webhook: {e}", exc_info=True)
+        import traceback
+        logger.error(f"Full traceback:\n{traceback.format_exc()}")
+        try:
+            error_response = TwilioVoiceResponse()
+            error_response.say("Sorry, a critical application error occurred. Goodbye.", voice="alice")
+            error_response.hangup()
+            return HTMLResponse(content=str(error_response))
+        except Exception as inner_e:
+            logger.error(f"❌ Error creating error response: {inner_e}", exc_info=True)
+            # Fallback to basic XML response
+            return HTMLResponse(
+                content='<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice">An error occurred. Goodbye.</Say><Hangup/></Response>',
+                status_code=500
+            )
 
 
 @app.post(

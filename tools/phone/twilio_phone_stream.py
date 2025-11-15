@@ -92,21 +92,14 @@ class TwilioStreamHandler:
                     if was_interrupted and self.is_speaking and self.speech_buffer:
                         logger.info("🔄 AI stopped, processing waiting interrupt speech...")
                         
-                        # CRITICAL: Wait for previous task to complete or be cancelled before starting new one
+                        # CRITICAL: Cancel previous task before starting new one
                         if self.speech_processing_task and not self.speech_processing_task.done():
-                            logger.info("⏳ Waiting for previous query to finish before processing interrupt...")
+                            logger.info("⏳ Cancelling previous query before processing interrupt...")
                             # Cancel the previous task
                             self.speech_processing_task.cancel()
-                            try:
-                                # Wait a short time for the task to handle cancellation
-                                await asyncio.wait_for(self.speech_processing_task, timeout=0.5)
-                            except (asyncio.CancelledError, asyncio.TimeoutError):
-                                # Task was cancelled or timed out - that's fine, we'll start new one
-                                logger.info("✅ Previous query cancelled, processing interrupt")
-                            except Exception as e:
-                                logger.warning(f"Error waiting for previous task: {e}")
+                            # Note: The cancelled task will be cleaned up when _process_user_speech checks query_sequence
                         
-                        # Increment query sequence AFTER ensuring previous task is cancelled
+                        # Increment query sequence AFTER cancelling previous task
                         self.query_sequence += 1
                         logger.info(f"🆕 Starting Interrupt Query #{self.query_sequence}")
                         self.speech_processing_task = asyncio.create_task(self._process_waiting_interrupt())
@@ -351,22 +344,16 @@ class TwilioStreamHandler:
                 was_interrupt = self.interrupt_detected
                 self.interrupt_detected = False
                 
-                # CRITICAL: Wait for previous task to complete or be cancelled before starting new one
+                # CRITICAL: Cancel previous task before starting new one
                 # This ensures queries are processed in sequence, not out of order
                 if self.speech_processing_task and not self.speech_processing_task.done():
-                    logger.info("⏳ Waiting for previous query to finish before starting new one...")
+                    logger.info("⏳ Cancelling previous query before starting new one...")
                     # Cancel the previous task
                     self.speech_processing_task.cancel()
-                    try:
-                        # Wait a short time for the task to handle cancellation
-                        await asyncio.wait_for(self.speech_processing_task, timeout=0.5)
-                    except (asyncio.CancelledError, asyncio.TimeoutError):
-                        # Task was cancelled or timed out - that's fine, we'll start new one
-                        logger.info("✅ Previous query cancelled, starting new query")
-                    except Exception as e:
-                        logger.warning(f"Error waiting for previous task: {e}")
+                    # Note: We can't await here since _process_media_event is not async
+                    # The cancelled task will be cleaned up when _process_user_speech checks query_sequence
                 
-                # Increment query sequence AFTER ensuring previous task is cancelled
+                # Increment query sequence AFTER cancelling previous task
                 self.query_sequence += 1
                 logger.info(f"🆕 Starting Query #{self.query_sequence}")
                 self.speech_processing_task = asyncio.create_task(self._process_user_speech(was_interrupt=was_interrupt))
