@@ -15,8 +15,8 @@ interface TopNavProps {
 export function TopNav({ activeTab, onTabChange, onCreateAgent, onRegisterPhone, activeSection }: TopNavProps) {
   // Show "Create Agent" for incoming section
   const showCreateAgent = activeSection === 'incoming-agent'
-  // Show "Register Phone Number" only for incoming section
-  const showRegisterPhone = activeSection === 'incoming-agent'
+  // Show "Register Phone Number" for both incoming and outgoing sections
+  const showRegisterPhone = activeSection === 'incoming-agent' || activeSection === 'outgoing-agent'
   
   return (
     <div className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-sm">

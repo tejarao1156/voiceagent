@@ -8,6 +8,7 @@ import { TopNav } from './TopNav'
 import { AgentTable, type Agent } from './AgentTable'
 import { RegisteredPhonesTable } from './RegisteredPhonesTable'
 import { OutgoingAgent } from './OutgoingAgent'
+import { MakeCallForm } from './MakeCallForm'
 import { CreateAgentModal } from './CreateAgentModal'
 import { RegisterPhoneModal } from './RegisterPhoneModal'
 import { AnalyticsDashboard } from './dashboard-statistics'
@@ -27,7 +28,8 @@ export default function SaaSDashboard() {
   const [registerPhoneModalOpen, setRegisterPhoneModalOpen] = useState(false)
   const [editAgent, setEditAgent] = useState<Agent | null>(null)
   const [loadingAgents, setLoadingAgents] = useState(false)
-  const [agentFilter, setAgentFilter] = useState<'all' | 'active' | 'inactive' | 'phones'>('all')
+  const [agentFilter, setAgentFilter] = useState<'all' | 'active' | 'inactive' | 'phones' | 'make-call'>('all')
+  const [outgoingAgentFilter, setOutgoingAgentFilter] = useState<'make-call'>('make-call')
 
   // Initialize from URL hash and sync with hash changes (client-side only)
   useEffect(() => {
@@ -285,6 +287,9 @@ export default function SaaSDashboard() {
         // Always load registered phones (for dropdown in CreateAgentModal and phones tab)
         loadRegisteredPhones()
       } else if (activeSection === 'outgoing-agent') {
+        // Always clear agents first to ensure we only show MongoDB data
+        setAgents([])
+        loadAgents()
         // Load registered phones for outgoing agent section
         loadRegisteredPhones()
       } else {
@@ -493,12 +498,29 @@ export default function SaaSDashboard() {
                   Outgoing Agent
                 </h1>
                 <p className="text-slate-600">
-                  Make outbound calls using your registered phone numbers.
+                  Create and manage Outgoing Agents for making outbound calls.
                 </p>
               </div>
 
-              {/* Outgoing Agent Component */}
-              <OutgoingAgent registeredPhones={registeredPhones} />
+              {/* Tabs */}
+              <div className="flex gap-1 mb-6 border-b border-slate-200">
+                <button
+                  onClick={() => setOutgoingAgentFilter('make-call')}
+                  className={cn(
+                    "px-4 py-2 text-sm font-medium transition-colors",
+                    outgoingAgentFilter === 'make-call'
+                      ? "text-indigo-600 border-b-2 border-indigo-600"
+                      : "text-slate-600 hover:text-slate-900"
+                  )}
+                >
+                  Make a Call
+                </button>
+              </div>
+
+              {/* Content based on selected tab */}
+              {outgoingAgentFilter === 'make-call' && (
+                <MakeCallForm registeredPhones={registeredPhones} />
+              )}
             </motion.div>
           )}
 
