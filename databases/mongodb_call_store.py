@@ -95,24 +95,33 @@ class MongoDBCallStore:
     async def end_call(self, call_sid: str, duration_seconds: Optional[float] = None) -> bool:
         """Mark call as completed and store final duration"""
         if not is_mongodb_available():
+            logger.warning(f"MongoDB not available, cannot end call {call_sid}")
             return False
         
         try:
             collection = self._get_collection()
             if collection is None:
+                logger.warning(f"MongoDB collection not available, cannot end call {call_sid}")
+                return False
+            
+            # First check if call exists
+            call_doc = await collection.find_one({"call_sid": call_sid})
+            if not call_doc:
+                logger.warning(f"Call {call_sid} not found in MongoDB - may have been created before call record was saved")
                 return False
             
             now = datetime.utcnow().isoformat()
             
             # If duration not provided, calculate from start_time
             if duration_seconds is None:
-                call_doc = await collection.find_one({"call_sid": call_sid})
-                if call_doc and call_doc.get("start_time"):
+                if call_doc.get("start_time"):
                     start_time = datetime.fromisoformat(call_doc["start_time"])
                     end_time = datetime.fromisoformat(now)
                     duration_seconds = (end_time - start_time).total_seconds()
+                else:
+                    duration_seconds = 0
             
-            await collection.update_one(
+            result = await collection.update_one(
                 {"call_sid": call_sid},
                 {
                     "$set": {
@@ -124,11 +133,15 @@ class MongoDBCallStore:
                 }
             )
             
-            logger.info(f"Ended call {call_sid}: duration {duration_seconds:.2f}s")
-            return True
+            if result.modified_count > 0:
+                logger.info(f"✅ Ended call {call_sid}: duration {duration_seconds:.2f}s")
+                return True
+            else:
+                logger.warning(f"⚠️ Call {call_sid} was not updated (may already be completed)")
+                return True  # Return True even if not modified - call is in correct state
             
         except Exception as e:
-            logger.error(f"Error ending call: {e}")
+            logger.error(f"Error ending call {call_sid}: {e}", exc_info=True)
             return False
     
     async def get_all_calls(self, agent_id: Optional[str] = None, 

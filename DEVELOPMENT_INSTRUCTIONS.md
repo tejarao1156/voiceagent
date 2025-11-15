@@ -8,6 +8,7 @@ This file contains instructions that the AI assistant should follow for every co
 2. **Reuse Existing Code**: Before creating new functions, check if existing functions or features can be reused.
 3. **Test Everything**: Test all features that are changed. If you change a function within a feature, test the entire feature.
 4. **Maintain Existing Flow**: Don't break existing functionality. If changes are required, make them carefully and test thoroughly.
+5. never add dummy data into ui for the testing
 
 ## Workflow for Every Request
 

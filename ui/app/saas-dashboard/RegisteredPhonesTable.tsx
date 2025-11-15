@@ -122,6 +122,7 @@ export function RegisteredPhonesTable({
         <TableHeader>
           <TableRow className="border-b border-slate-200 bg-slate-50/50">
             <TableHead className="font-semibold text-slate-800">Phone Number</TableHead>
+            <TableHead className="font-semibold text-slate-800">Provider</TableHead>
             <TableHead className="font-semibold text-slate-800">Twilio Account SID</TableHead>
             <TableHead className="font-semibold text-slate-800">Status</TableHead>
             <TableHead className="font-semibold text-slate-800">User ID</TableHead>
@@ -154,6 +155,14 @@ export function RegisteredPhonesTable({
                     </span>
                   )}
                 </div>
+              </TableCell>
+              <TableCell>
+                <Badge 
+                  variant="success"
+                  className="bg-blue-100 text-blue-800 capitalize"
+                >
+                  {phone.provider || 'twilio'}
+                </Badge>
               </TableCell>
               <TableCell>
                 <div className="flex items-center gap-2">

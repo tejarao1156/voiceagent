@@ -8,7 +8,8 @@ import {
   Link as LinkIcon,
   FileText,
   Settings,
-  ArrowUp
+  ArrowUp,
+  PhoneCall
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -20,7 +21,8 @@ interface SidebarItem {
 
 const sidebarItems: SidebarItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard className="h-5 w-5" /> },
-  { id: 'ai-agents', label: 'AI Agents', icon: <Bot className="h-5 w-5" /> },
+  { id: 'incoming-agent', label: 'Incoming Agent', icon: <Bot className="h-5 w-5" /> },
+  { id: 'outgoing-agent', label: 'Outgoing Agent', icon: <PhoneCall className="h-5 w-5" /> },
   { id: 'calls', label: 'Calls', icon: <Phone className="h-5 w-5" /> },
   { id: 'voice-customization', label: 'Voice Customization', icon: <Volume2 className="h-5 w-5" /> },
   { id: 'endpoints', label: 'Endpoints', icon: <LinkIcon className="h-5 w-5" /> },

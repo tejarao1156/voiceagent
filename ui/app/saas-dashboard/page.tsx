@@ -7,6 +7,7 @@ import { Sidebar } from './Sidebar'
 import { TopNav } from './TopNav'
 import { AgentTable, type Agent } from './AgentTable'
 import { RegisteredPhonesTable } from './RegisteredPhonesTable'
+import { OutgoingAgent } from './OutgoingAgent'
 import { CreateAgentModal } from './CreateAgentModal'
 import { RegisterPhoneModal } from './RegisterPhoneModal'
 import { AnalyticsDashboard } from './dashboard-statistics'
@@ -19,7 +20,6 @@ export default function SaaSDashboard() {
   // Check URL hash or default to dashboard - use client-side only to avoid hydration mismatch
   const [activeSection, setActiveSection] = useState('dashboard')
   const [mounted, setMounted] = useState(false)
-  const [activeTab, setActiveTab] = useState('AI Agents')
   const [registeredPhones, setRegisteredPhones] = useState<any[]>([])
   const [loadingPhones, setLoadingPhones] = useState(false)
   const [agents, setAgents] = useState<Agent[]>([]) // Start with empty array - load from MongoDB
@@ -35,15 +35,21 @@ export default function SaaSDashboard() {
     
     // Set initial section from hash
     const hash = window.location.hash.replace('#', '')
-    if (hash && ['dashboard', 'ai-agents', 'calls', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(hash)) {
+    if (hash && ['dashboard', 'incoming-agent', 'outgoing-agent', 'calls', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(hash)) {
       setActiveSection(hash)
+    } else if (hash === 'ai-agents') {
+      // Legacy support: if hash is 'ai-agents', default to 'incoming-agent'
+      setActiveSection('incoming-agent')
     }
     
     // Listen for hash changes
     const handleHashChange = () => {
       const newHash = window.location.hash.replace('#', '')
-      if (newHash && ['dashboard', 'ai-agents', 'calls', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(newHash)) {
+      if (newHash && ['dashboard', 'incoming-agent', 'outgoing-agent', 'calls', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(newHash)) {
         setActiveSection(newHash)
+      } else if (newHash === 'ai-agents') {
+        // Legacy support: if hash is 'ai-agents', default to 'incoming-agent'
+        setActiveSection('incoming-agent')
       }
     }
 
@@ -53,9 +59,8 @@ export default function SaaSDashboard() {
 
   const handleCreateAgent = async (data: {
     name: string
-    direction: 'inbound'
+    direction: 'incoming'
     phoneNumber: string
-    provider: 'twilio' | 'custom'
     sttModel: string
     inferenceModel: string
     ttsModel: string
@@ -73,7 +78,6 @@ export default function SaaSDashboard() {
         // Update existing agent - exclude name and phoneNumber
         const updateData = {
           direction: data.direction,
-          provider: data.provider,
           sttModel: data.sttModel,
           inferenceModel: data.inferenceModel,
           ttsModel: data.ttsModel,
@@ -144,83 +148,109 @@ export default function SaaSDashboard() {
   const loadAgents = async () => {
     try {
       setLoadingAgents(true)
-      console.log('Loading agents from MongoDB...')
-      const response = await fetch('/agents')
-      if (response.ok) {
-        const result = await response.json()
-        console.log('Agents API response:', result)
-        if (result.success && result.agents) {
-          // Transform MongoDB agents to UI format
-          // Format dates client-side only to avoid hydration mismatch
-          const transformedAgents: Agent[] = result.agents.map((agent: any) => {
-            let lastUpdated = 'Unknown'
-            if (agent.updated_at && typeof window !== 'undefined') {
-              try {
-                const date = new Date(agent.updated_at)
-                lastUpdated = date.toLocaleDateString('en-US', {
-                  month: 'short',
-                  day: 'numeric',
-                  year: 'numeric',
-                }) + ' ' + date.toLocaleTimeString('en-US', {
-                  hour: 'numeric',
-                  minute: '2-digit',
-                  hour12: true,
-                })
-              } catch (e) {
-                lastUpdated = agent.updated_at
-              }
-            }
-            
-            return {
-              id: agent.id,
-              name: agent.name,
-              direction: agent.direction || 'inbound',
-              phoneNumber: agent.phoneNumber,
-              lastUpdated,
-              status: (agent.active === true || agent.active === undefined) ? 'active' : 'idle',
-              active: agent.active !== false, // Default to true if undefined/null
-              phoneIsDeleted: agent.phoneIsDeleted || false, // Include phone deletion status
-              sttModel: agent.sttModel,
-              inferenceModel: agent.inferenceModel,
-              ttsModel: agent.ttsModel,
-              ttsVoice: agent.ttsVoice,
-              systemPrompt: agent.systemPrompt,
-              greeting: agent.greeting,
-              temperature: agent.temperature,
-              maxTokens: agent.maxTokens,
-              provider: agent.provider,
-              twilioAccountSid: agent.twilioAccountSid,
-              twilioAuthToken: agent.twilioAuthToken,
-            }
-          })
-          console.log(`✅ Loaded ${transformedAgents.length} agents from MongoDB`)
-          console.log('📋 Agent names:', transformedAgents.map(a => a.name))
-          setAgents(transformedAgents)
-          setLoadingAgents(false)
-        } else {
-          console.warn('⚠️ No agents found in response:', result)
-          setAgents([]) // Set empty array if no agents
-          setLoadingAgents(false)
-        }
-      } else {
+      console.log('🔍 Loading agents from MongoDB (including deleted to ensure we get all data)...')
+      // Fetch all agents from MongoDB including deleted ones, then filter in UI
+      const response = await fetch('/agents?include_deleted=true')
+      
+      if (!response.ok) {
         console.error('❌ Failed to load agents:', response.status, response.statusText)
-        setAgents([]) // Set empty array on error
+        setAgents([]) // Clear any existing data - only show MongoDB data
         setLoadingAgents(false)
+        return
+      }
+      
+      const result = await response.json()
+      console.log('📥 Agents API response:', result)
+      
+      // Check MongoDB availability from response
+      if (result.mongodb_available === false) {
+        console.warn('⚠️ MongoDB is not available - showing empty state')
+        setAgents([]) // Clear - MongoDB not connected
+        setLoadingAgents(false)
+        return
+      }
+      
+      // Only use data if MongoDB is available and response is valid
+      if (result.success && Array.isArray(result.agents)) {
+        // Transform MongoDB agents to UI format
+        // Format dates client-side only to avoid hydration mismatch
+        const transformedAgents: Agent[] = result.agents
+          .map((agent: any) => {
+          let lastUpdated = 'Unknown'
+          if (agent.updated_at && typeof window !== 'undefined') {
+            try {
+              const date = new Date(agent.updated_at)
+              lastUpdated = date.toLocaleDateString('en-US', {
+                month: 'short',
+                day: 'numeric',
+                year: 'numeric',
+              }) + ' ' + date.toLocaleTimeString('en-US', {
+                hour: 'numeric',
+                minute: '2-digit',
+                hour12: true,
+              })
+            } catch (e) {
+              lastUpdated = agent.updated_at
+            }
+          }
+          
+          // Filter out deleted agents in UI (but we fetched them to ensure we have all data)
+          if (agent.isDeleted === true) {
+            // Skip deleted agents in UI display
+            return null
+          }
+          
+          return {
+            id: agent.id,
+            name: agent.name,
+            direction: (agent.direction === 'inbound' ? 'incoming' : agent.direction) || 'incoming',
+            phoneNumber: agent.phoneNumber,
+            lastUpdated,
+            status: (agent.active === true || agent.active === undefined) ? 'active' : 'idle',
+            active: agent.active !== false, // Default to true if undefined/null
+            phoneIsDeleted: agent.phoneIsDeleted || false, // Include phone deletion status
+            sttModel: agent.sttModel,
+            inferenceModel: agent.inferenceModel,
+            ttsModel: agent.ttsModel,
+            ttsVoice: agent.ttsVoice,
+            systemPrompt: agent.systemPrompt,
+            greeting: agent.greeting,
+            temperature: agent.temperature,
+            maxTokens: agent.maxTokens,
+            twilioAccountSid: agent.twilioAccountSid,
+            twilioAuthToken: agent.twilioAuthToken,
+          }
+          })
+          .filter((agent: Agent | null) => agent !== null) as Agent[] // Filter out null (deleted) agents
+        console.log(`✅ Loaded ${transformedAgents.length} agent(s) from MongoDB`)
+        if (transformedAgents.length > 0) {
+          console.log('📋 Agent names:', transformedAgents.map(a => a.name))
+        }
+        setAgents(transformedAgents) // Only set agents from MongoDB
+      } else {
+        console.warn('⚠️ No agents found in MongoDB response:', result)
+        setAgents([]) // Clear - no data in MongoDB
       }
     } catch (error) {
-      console.error('❌ Error loading agents:', error)
-      setAgents([]) // Set empty array on error
+      console.error('❌ Error loading agents from MongoDB:', error)
+      setAgents([]) // Clear on error - only show MongoDB data
+    } finally {
       setLoadingAgents(false)
     }
   }
 
-  // Filter agents based on active/inactive filter
+  // Filter agents based on active/inactive filter (only incoming agents)
   const filteredAgents = agents.filter(agent => {
-    // Treat undefined/null as active (default behavior)
+    // Only show incoming agents
+    if (agent.direction !== 'incoming' && agent.direction !== 'inbound') {
+      return false
+    }
+    
+    // Filter by active/inactive status
     const isActive = agent.active !== false
     if (agentFilter === 'active') return isActive === true
     if (agentFilter === 'inactive') return isActive === false
-    return true // 'all' shows everything
+    return true // 'all' shows everything (after direction filter)
   })
 
   // Load registered phones (fetch ALL phones, not just active)
@@ -248,28 +278,29 @@ export default function SaaSDashboard() {
   // Load agents on mount and when section changes (client-side only to avoid hydration issues)
   useEffect(() => {
     if (mounted) {
-      if (activeSection === 'ai-agents') {
+      if (activeSection === 'incoming-agent') {
+        // Always clear agents first to ensure we only show MongoDB data
+        setAgents([])
         loadAgents()
         // Always load registered phones (for dropdown in CreateAgentModal and phones tab)
         loadRegisteredPhones()
+      } else if (activeSection === 'outgoing-agent') {
+        // Load registered phones for outgoing agent section
+        loadRegisteredPhones()
+      } else {
+        // Clear agents when leaving agent sections - only show data when in those sections
+        setAgents([])
       }
     }
   }, [mounted, activeSection])
   
   // Reload phones when phones tab is selected
   useEffect(() => {
-    if (mounted && activeSection === 'ai-agents' && agentFilter === 'phones') {
+    if (mounted && activeSection === 'incoming-agent' && agentFilter === 'phones') {
       console.log('📞 Phones tab selected, loading registered phones...')
       loadRegisteredPhones()
     }
   }, [mounted, activeSection, agentFilter])
-  
-  // Also load agents when component first mounts to ai-agents section
-  useEffect(() => {
-    if (mounted && activeSection === 'ai-agents' && agents.length === 0) {
-      loadAgents()
-    }
-  }, [mounted])
 
   const handleEdit = (agent: Agent) => {
     setEditAgent(agent)
@@ -358,15 +389,15 @@ export default function SaaSDashboard() {
       
       <div className="ml-60">
         <TopNav
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
+          activeTab=""
+          onTabChange={() => {}}
           onCreateAgent={() => setCreateModalOpen(true)}
           onRegisterPhone={() => setRegisterPhoneModalOpen(true)}
           activeSection={activeSection}
         />
 
         <main className="p-6">
-          {mounted && activeSection === 'ai-agents' && (
+          {mounted && activeSection === 'incoming-agent' && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -375,7 +406,7 @@ export default function SaaSDashboard() {
               {/* Header */}
               <div className="mb-6">
                 <h1 className="text-2xl font-semibold text-slate-800 mb-2">
-                  AI Agents
+                  Incoming Agent
                 </h1>
                 <p className="text-slate-600">
                   Create and manage Voice Agents for your Business.
@@ -450,6 +481,27 @@ export default function SaaSDashboard() {
             </motion.div>
           )}
 
+          {mounted && activeSection === 'outgoing-agent' && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.2 }}
+            >
+              {/* Header */}
+              <div className="mb-6">
+                <h1 className="text-2xl font-semibold text-slate-800 mb-2">
+                  Outgoing Agent
+                </h1>
+                <p className="text-slate-600">
+                  Make outbound calls using your registered phone numbers.
+                </p>
+              </div>
+
+              {/* Outgoing Agent Component */}
+              <OutgoingAgent registeredPhones={registeredPhones} />
+            </motion.div>
+          )}
+
           {mounted && activeSection === 'dashboard' && (
             <div>
               <div className="mb-6">
@@ -484,7 +536,7 @@ export default function SaaSDashboard() {
             </motion.div>
           )}
 
-          {activeSection !== 'ai-agents' && activeSection !== 'dashboard' && activeSection !== 'calls' && activeSection !== 'voice-customization' && (
+          {activeSection !== 'incoming-agent' && activeSection !== 'outgoing-agent' && activeSection !== 'dashboard' && activeSection !== 'calls' && activeSection !== 'voice-customization' && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -512,14 +564,15 @@ export default function SaaSDashboard() {
           }}
           onSubmit={handleCreateAgent}
           editAgent={editAgent}
+          activeSection={activeSection}
         />
 
       <RegisterPhoneModal
         open={registerPhoneModalOpen}
         onOpenChange={setRegisterPhoneModalOpen}
         onSuccess={() => {
-          // Reload agents and registered phones if in ai-agents section (to refresh phone dropdown)
-          if (activeSection === 'ai-agents') {
+          // Reload agents and registered phones if in incoming-agent section (to refresh phone dropdown)
+          if (activeSection === 'incoming-agent') {
             loadAgents()
             loadRegisteredPhones()
           }

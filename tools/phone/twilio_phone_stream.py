@@ -29,6 +29,7 @@ class TwilioStreamHandler:
         self.tts_tool = tts_tool
         self.conversation_tool = conversation_tool
         self.agent_config = agent_config  # Store agent configuration
+        self.is_outbound_call = False  # Track if this is an outbound call
         
         self.vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
         self.speech_buffer = bytearray()
@@ -62,8 +63,16 @@ class TwilioStreamHandler:
             event = data.get('event')
             if event == 'start':
                 await self._handle_start_event(data['start'])
-                # Asynchronously send the greeting message
-                asyncio.create_task(self._send_greeting())
+                # Asynchronously send the greeting message (only if agent_config was loaded)
+                if self.agent_config:
+                    call_type = "OUTBOUND" if self.is_outbound_call else "INBOUND"
+                    logger.info(f"✅ Agent config loaded, scheduling greeting for {call_type} call {self.call_sid}")
+                    # For outbound calls, send greeting immediately to drive the conversation
+                    if self.is_outbound_call:
+                        logger.info(f"🚀 Outbound call: AI will speak first to drive the conversation")
+                    asyncio.create_task(self._send_greeting())
+                else:
+                    logger.warning(f"⚠️ Agent config not loaded, skipping greeting for call {self.call_sid}")
             elif event == 'media':
                 self._process_media_event(data['media'])
             elif event == 'stop':
@@ -93,36 +102,84 @@ class TwilioStreamHandler:
         """Handles the 'start' event from Twilio stream."""
         self.stream_sid = start_data['streamSid']
         self.call_sid = start_data['callSid']
-        from_number = start_data.get('customParameters', {}).get('From', 'Unknown')
-        to_number = start_data.get('customParameters', {}).get('To', 'Unknown')
+        custom_params = start_data.get('customParameters', {})
+        from_number = custom_params.get('From', 'Unknown')
+        to_number = custom_params.get('To', 'Unknown')
+        agent_phone_number = custom_params.get('AgentPhoneNumber')  # For outbound calls
+        is_outbound = custom_params.get('IsOutbound', 'false').lower() == 'true'
+        self.is_outbound_call = is_outbound  # Store for later use
         self.to_number = to_number  # Store for credential lookup
         
         logger.info(f"Stream started: call_sid={self.call_sid}, stream_sid={self.stream_sid}")
         logger.info(f"Call from: {from_number} to: {to_number}")
+        if is_outbound:
+            logger.info(f"📤 Detected OUTBOUND call in stream handler - AI will drive the conversation")
         
         # Load agent config by phone number if not already provided
-        if not self.agent_config and to_number:
+        # For outbound calls, use AgentPhoneNumber; for inbound, use to_number
+        phone_number_to_use = agent_phone_number if agent_phone_number else to_number
+        
+        logger.info(f"🔍 Loading agent config for phone number: {phone_number_to_use} (agent_phone_number: {agent_phone_number}, to_number: {to_number})")
+        
+        if not self.agent_config and phone_number_to_use:
             try:
                 from databases.mongodb_agent_store import MongoDBAgentStore
                 agent_store = MongoDBAgentStore()
                 
                 # Normalize phone number (remove +1, spaces, dashes, etc.)
-                normalized_phone = to_number.replace("+1", "").replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
+                normalized_phone = phone_number_to_use.replace("+1", "").replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
+                logger.info(f"🔍 Normalized phone number for lookup: '{normalized_phone}'")
                 
                 # Try to find active agent with this phone number
                 agents = await agent_store.list_agents(active_only=True)
+                logger.info(f"🔍 Found {len(agents)} active agent(s) in database")
                 
                 for agent in agents:
                     agent_phone = agent.get("phoneNumber", "").replace("+1", "").replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
+                    logger.debug(f"🔍 Comparing: stored '{agent_phone}' with lookup '{normalized_phone}'")
                     if agent_phone == normalized_phone:
                         self.agent_config = agent
                         logger.info(f"✅ Loaded agent config by phone number: {agent.get('name')} (STT: {agent.get('sttModel')}, TTS: {agent.get('ttsModel')}, LLM: {agent.get('inferenceModel')})")
+                        logger.info(f"   Agent greeting: '{agent.get('greeting', 'No greeting set')[:50]}...'")
                         break
                 
                 if not self.agent_config:
-                    logger.warning(f"❌ No active agent found for phone number {to_number}")
+                    logger.error(f"❌ No active agent found for phone number {phone_number_to_use} (normalized: {normalized_phone})")
+                    logger.error(f"   Available agents: {[a.get('name') + ' (' + a.get('phoneNumber', 'no phone') + ')' for a in agents]}")
             except Exception as e:
-                logger.error(f"Error loading agent config by phone number: {e}", exc_info=True)
+                logger.error(f"❌ Error loading agent config by phone number: {e}", exc_info=True)
+        
+        # Check for custom context for outbound calls
+        if is_outbound and self.agent_config and from_number and to_number:
+            try:
+                from databases.mongodb_phone_store import normalize_phone_number
+                # Check if custom context was stored for this outbound call
+                # Access via twilio_phone_tool instance
+                from tools import TwilioPhoneTool
+                # Get the instance - we'll need to access it differently
+                # For now, check if we can get it from the conversation_tool or import it
+                try:
+                    import api_general
+                    if hasattr(api_general, 'twilio_phone_tool'):
+                        twilio_tool = api_general.twilio_phone_tool
+                        if hasattr(twilio_tool, 'outbound_call_contexts'):
+                            normalized_from = normalize_phone_number(from_number)
+                            normalized_to = normalize_phone_number(to_number)
+                            context_key = f"{normalized_from}_{normalized_to}"
+                            stored_context = twilio_tool.outbound_call_contexts.get(context_key)
+                            if stored_context:
+                                custom_context = stored_context.get("context")
+                                logger.info(f"✅ Found custom context for outbound call in stream: {context_key}")
+                                # Override system prompt with custom context
+                                self.agent_config = self.agent_config.copy()
+                                self.agent_config["systemPrompt"] = custom_context
+                                # Clean up stored context
+                                del twilio_tool.outbound_call_contexts[context_key]
+                                logger.info(f"🧹 Cleaned up stored context for {context_key}")
+                except Exception as e:
+                    logger.debug(f"Could not check for custom context: {e}")
+            except Exception as e:
+                logger.debug(f"Error checking for custom context: {e}")
         
         # If no agent config found, send error message and close stream
         if not self.agent_config:
@@ -413,26 +470,50 @@ class TwilioStreamHandler:
                 logger.error(f"Error processing user speech (Query #{current_query_id}): {e}", exc_info=True)
 
     async def _send_greeting(self):
-        """Generates and streams a greeting message to the caller."""
-        # Use agent's greeting if available, otherwise default
-        greeting_text = self.agent_config.get("greeting", "Hello! How can I help you today?") if self.agent_config else "Hello! How can I help you today?"
-        logger.info(f"Sending greeting: '{greeting_text}'")
-        
-        # Store greeting in MongoDB transcript
+        """Generates and streams a greeting message to the caller. For outbound calls, AI drives the conversation."""
         try:
-            from databases.mongodb_call_store import MongoDBCallStore
-            call_store = MongoDBCallStore()
-            await call_store.update_call_transcript(
-                call_sid=self.call_sid,
-                role="assistant",
-                text=greeting_text
-            )
+            # For outbound calls, send greeting immediately (AI drives the conversation)
+            # For inbound calls, wait a brief moment for call to fully connect
+            if not self.is_outbound_call:
+                await asyncio.sleep(0.5)  # Small delay for inbound calls
+            
+            # Check if agent_config is available
+            if not self.agent_config:
+                logger.error(f"❌ Cannot send greeting: agent_config is None for call {self.call_sid}")
+                return
+            
+            # For outbound calls, AI should drive the conversation
+            # Use agent's greeting if available, otherwise default
+            if self.is_outbound_call:
+                # For outbound calls, use greeting or a proactive message
+                greeting_text = self.agent_config.get("greeting", "Hello! This is an automated call. How can I help you today?")
+                logger.info(f"📢 Sending OUTBOUND call greeting for call {self.call_sid}: '{greeting_text}'")
+                logger.info(f"   🚀 AI will drive this conversation (outbound call - AI speaks first)")
+            else:
+                # For inbound calls, use standard greeting
+                greeting_text = self.agent_config.get("greeting", "Hello! How can I help you today?")
+                logger.info(f"📢 Sending INBOUND call greeting for call {self.call_sid}: '{greeting_text}'")
+            
+            # Store greeting in MongoDB transcript
+            try:
+                from databases.mongodb_call_store import MongoDBCallStore
+                call_store = MongoDBCallStore()
+                await call_store.update_call_transcript(
+                    call_sid=self.call_sid,
+                    role="assistant",
+                    text=greeting_text
+                )
+                logger.info(f"✅ Stored greeting in transcript for call {self.call_sid}")
+            except Exception as e:
+                logger.warning(f"Could not store greeting transcript: {e}")
+            
+            # Store TTS task for potential cancellation
+            logger.info(f"🎤 Starting TTS for greeting: '{greeting_text[:50]}...'")
+            self.tts_streaming_task = asyncio.create_task(self._synthesize_and_stream_tts(greeting_text))
+            await self.tts_streaming_task
+            logger.info(f"✅ Greeting TTS completed for call {self.call_sid}")
         except Exception as e:
-            logger.warning(f"Could not store greeting transcript: {e}")
-        
-        # Store TTS task for potential cancellation
-        self.tts_streaming_task = asyncio.create_task(self._synthesize_and_stream_tts(greeting_text))
-        await self.tts_streaming_task
+            logger.error(f"❌ Error sending greeting for call {self.call_sid}: {e}", exc_info=True)
 
     async def _synthesize_and_stream_tts(self, text: str):
         """Synthesizes text to speech and streams it back to Twilio using fast PCM conversion.
@@ -586,6 +667,15 @@ class TwilioStreamHandler:
                     client = Client(twilio_creds["account_sid"], twilio_creds["auth_token"])
                     call = client.calls(self.call_sid).update(status="completed")
                     logger.info(f"✅ Call {self.call_sid} status updated to completed via REST API")
+                    
+                    # Update call status in MongoDB immediately
+                    try:
+                        from databases.mongodb_call_store import MongoDBCallStore
+                        call_store = MongoDBCallStore()
+                        await call_store.end_call(self.call_sid)
+                        logger.info(f"✅ Updated call {self.call_sid} status to 'completed' in MongoDB")
+                    except Exception as e:
+                        logger.warning(f"Could not update call status in MongoDB: {e}")
             except Exception as e:
                 logger.warning(f"Could not update call status via REST API: {e}")
             

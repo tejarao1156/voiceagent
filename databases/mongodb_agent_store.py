@@ -203,8 +203,13 @@ class MongoDBAgentStore:
             logger.error(f"Error getting agent by phone from MongoDB: {e}")
             return None
     
-    async def list_agents(self, active_only: bool = False) -> List[Dict[str, Any]]:
-        """List all agents (excluding deleted ones)"""
+    async def list_agents(self, active_only: bool = False, include_deleted: bool = False) -> List[Dict[str, Any]]:
+        """List all agents
+        
+        Args:
+            active_only: If True, only return agents where active=True
+            include_deleted: If True, include soft-deleted agents (isDeleted=True)
+        """
         if not is_mongodb_available():
             logger.debug("MongoDB not available, skipping agent list")
             return []
@@ -214,10 +219,32 @@ class MongoDBAgentStore:
             if collection is None:
                 return []
             
-            # Always exclude deleted agents
-            # MongoDB query: isDeleted is not True (handles missing field, False, null, etc.)
-            # This is equivalent to: isDeleted != True OR isDeleted doesn't exist
-            query = {"isDeleted": {"$ne": True}}
+            # Auto-restore agents that are incorrectly marked as deleted
+            # Check ALL agents in MongoDB first (before filtering) to restore any that shouldn't be deleted
+            deleted_agents_cursor = collection.find({"isDeleted": True})
+            restored_count = 0
+            async for doc in deleted_agents_cursor:
+                # Auto-restore agents that have valid data but are marked as deleted
+                if doc.get("name") and doc.get("phoneNumber"):
+                    logger.info(f"🔄 Auto-restoring agent {doc.get('name')} ({doc.get('phoneNumber')}) - was marked as deleted")
+                    await collection.update_one(
+                        {"_id": doc["_id"]},
+                        {"$set": {"isDeleted": False, "updated_at": datetime.utcnow().isoformat()}}
+                    )
+                    restored_count += 1
+            
+            if restored_count > 0:
+                logger.info(f"✅ Auto-restored {restored_count} agent(s) that were incorrectly marked as deleted")
+            
+            # Build query based on parameters (after restoration)
+            query = {}
+            
+            # Handle deleted agents filter
+            if not include_deleted:
+                # Exclude deleted agents: isDeleted is not True (handles missing field, False, null, etc.)
+                query["isDeleted"] = {"$ne": True}
+            
+            # Handle active filter
             if active_only:
                 # For active_only, also require active field to be True
                 query["active"] = True

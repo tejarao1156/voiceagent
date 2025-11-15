@@ -7,6 +7,7 @@ import { SearchBar } from '@/components/SearchBar'
 import { useAppStore } from '@/lib/store'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Phone, Clock, Activity } from 'lucide-react'
+import { fetchPhoneNumbers } from '@/lib/api'
 
 interface DashboardContentProps {
   onAddNumber: () => void
@@ -45,17 +46,17 @@ export default function DashboardContent({ onAddNumber }: DashboardContentProps)
   const ongoingCalls = allCalls.filter((call) => call.status === 'ongoing')
   const totalCalls = allCalls.length
 
-  // Mock API calls - replace with actual API integration
+  // Load phone numbers from MongoDB
   useEffect(() => {
-    // Fetch phone numbers
-    // fetch('/api/numbers')
-    //   .then(res => res.json())
-    //   .then(data => setPhoneNumbers(data))
-    
-    // For demo, add a sample number if none exist
-    if (phoneNumbers.length === 0) {
-      // This would normally come from API
+    const loadPhoneNumbers = async () => {
+      try {
+        const phones = await fetchPhoneNumbers()
+        setPhoneNumbers(phones)
+      } catch (error) {
+        console.error('Error loading phone numbers:', error)
+      }
     }
+    loadPhoneNumbers()
   }, [])
 
   useEffect(() => {
