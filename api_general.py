@@ -1009,17 +1009,15 @@ async def twilio_incoming_call(request: Request):
                 return HTMLResponse(content=str(error_response))
             
             # Override system prompt with custom context if provided (for outbound calls)
+            # Note: For stream mode, we'll pass the context via stream parameters
+            # and let the stream handler use it (don't clean up yet)
             if custom_context and is_outbound_call:
-                logger.info(f"🔄 Using custom context instead of agent's default system prompt")
-                # Store custom context in agent_config temporarily
+                logger.info(f"🔄 Custom context available for outbound call (will be passed to stream handler)")
+                # Store custom context in agent_config temporarily for batch mode
                 agent_config = agent_config.copy()  # Don't modify original
                 agent_config["systemPrompt"] = custom_context
-                # Clean up stored context after use
-                if hasattr(twilio_phone_tool, 'outbound_call_contexts'):
-                    context_key = f"{normalize_phone_number(from_number)}_{normalize_phone_number(to_number)}"
-                    if context_key in twilio_phone_tool.outbound_call_contexts:
-                        del twilio_phone_tool.outbound_call_contexts[context_key]
-                        logger.info(f"🧹 Cleaned up stored context for {context_key}")
+                # For stream mode, we'll pass context via stream parameters
+                # Don't clean up stored context yet - stream handler needs it
 
         # Create call record in MongoDB
         try:
@@ -1064,6 +1062,19 @@ async def twilio_incoming_call(request: Request):
             stream.parameter(name="To", value=call_data.get("To"))
             stream.parameter(name="AgentPhoneNumber", value=agent_phone_number)
             stream.parameter(name="IsOutbound", value="true" if is_outbound_call else "false")
+            # Pass custom context via stream parameter if available
+            if custom_context and is_outbound_call:
+                # Encode context to avoid issues with special characters
+                import base64
+                encoded_context = base64.b64encode(custom_context.encode('utf-8')).decode('utf-8')
+                stream.parameter(name="CustomContext", value=encoded_context)
+                logger.info(f"📤 Passing custom context to stream handler via parameter")
+                # Clean up stored context after passing it via stream parameters
+                if hasattr(twilio_phone_tool, 'outbound_call_contexts'):
+                    context_key = f"{normalize_phone_number(from_number)}_{normalize_phone_number(to_number)}"
+                    if context_key in twilio_phone_tool.outbound_call_contexts:
+                        del twilio_phone_tool.outbound_call_contexts[context_key]
+                        logger.info(f"🧹 Cleaned up stored context for {context_key} (passed via stream parameters)")
 
             response.pause(length=120) # Keep call active while stream runs
         
@@ -1131,7 +1142,37 @@ async def twilio_call_status(request: Request):
                 if result:
                     logger.info(f"✅ Successfully updated call {call_sid} status to 'completed' in MongoDB")
                 else:
-                    logger.warning(f"⚠️ Failed to update call {call_sid} status in MongoDB (call may not exist in DB)")
+                    # Try to find the call and update it directly if end_call failed
+                    logger.warning(f"⚠️ end_call returned False for {call_sid}, attempting direct update...")
+                    try:
+                        collection = call_store._get_collection()
+                        if collection:
+                            call_doc = await collection.find_one({"call_sid": call_sid})
+                            if call_doc:
+                                # Calculate duration if available
+                                duration_seconds = None
+                                if call_doc.get("start_time"):
+                                    from datetime import datetime
+                                    start_time = datetime.fromisoformat(call_doc["start_time"])
+                                    end_time = datetime.utcnow()
+                                    duration_seconds = (end_time - start_time).total_seconds()
+                                
+                                await collection.update_one(
+                                    {"call_sid": call_sid},
+                                    {
+                                        "$set": {
+                                            "status": "completed",
+                                            "end_time": datetime.utcnow().isoformat(),
+                                            "duration_seconds": duration_seconds or 0,
+                                            "updated_at": datetime.utcnow().isoformat()
+                                        }
+                                    }
+                                )
+                                logger.info(f"✅ Directly updated call {call_sid} status to 'completed' in MongoDB")
+                            else:
+                                logger.warning(f"⚠️ Call {call_sid} not found in MongoDB (may have been created before call record was saved)")
+                    except Exception as e2:
+                        logger.error(f"❌ Error in direct update attempt: {e2}", exc_info=True)
             except Exception as e:
                 logger.error(f"❌ Error updating call status in MongoDB: {e}", exc_info=True)
         

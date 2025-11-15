@@ -150,7 +150,22 @@ class TwilioStreamHandler:
                 logger.error(f"❌ Error loading agent config by phone number: {e}", exc_info=True)
         
         # Check for custom context for outbound calls
-        if is_outbound and self.agent_config and from_number and to_number:
+        # First, try to get it from stream parameters (preferred method)
+        custom_context_param = custom_params.get('CustomContext')
+        if custom_context_param and is_outbound and self.agent_config:
+            try:
+                import base64
+                custom_context = base64.b64decode(custom_context_param.encode('utf-8')).decode('utf-8')
+                logger.info(f"✅ Found custom context in stream parameters for outbound call")
+                # Override system prompt with custom context
+                self.agent_config = self.agent_config.copy()
+                self.agent_config["systemPrompt"] = custom_context
+                logger.info(f"🔄 Using custom context instead of agent's default system prompt")
+            except Exception as e:
+                logger.warning(f"Error decoding custom context from stream parameters: {e}")
+        
+        # Fallback: Check if custom context was stored for this outbound call (legacy method)
+        if is_outbound and self.agent_config and from_number and to_number and not custom_context_param:
             try:
                 from databases.mongodb_phone_store import normalize_phone_number
                 # Check if custom context was stored for this outbound call
@@ -169,7 +184,7 @@ class TwilioStreamHandler:
                             stored_context = twilio_tool.outbound_call_contexts.get(context_key)
                             if stored_context:
                                 custom_context = stored_context.get("context")
-                                logger.info(f"✅ Found custom context for outbound call in stream: {context_key}")
+                                logger.info(f"✅ Found custom context for outbound call in stream (legacy method): {context_key}")
                                 # Override system prompt with custom context
                                 self.agent_config = self.agent_config.copy()
                                 self.agent_config["systemPrompt"] = custom_context
