@@ -9,7 +9,8 @@ import {
   FileText,
   Settings,
   ArrowUp,
-  PhoneCall
+  PhoneCall,
+  MessageSquare
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -23,6 +24,7 @@ const sidebarItems: SidebarItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard className="h-5 w-5" /> },
   { id: 'incoming-agent', label: 'Incoming Agent', icon: <Bot className="h-5 w-5" /> },
   { id: 'outgoing-agent', label: 'Outgoing Agent', icon: <PhoneCall className="h-5 w-5" /> },
+  { id: 'messaging-agent', label: 'Messaging Agent', icon: <MessageSquare className="h-5 w-5" /> },
   { id: 'calls', label: 'Calls', icon: <Phone className="h-5 w-5" /> },
   { id: 'voice-customization', label: 'Voice Customization', icon: <Volume2 className="h-5 w-5" /> },
   { id: 'endpoints', label: 'Endpoints', icon: <LinkIcon className="h-5 w-5" /> },

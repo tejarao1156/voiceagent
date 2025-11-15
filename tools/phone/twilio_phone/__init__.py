@@ -165,12 +165,13 @@ class TwilioPhoneTool:
             logger.error(f"Error handling incoming call {call_sid}: {e}", exc_info=True)
             return self._create_error_twiml(str(e))
     
-    async def _load_agent_config(self, phone_number: str) -> Optional[Dict[str, Any]]:
+    async def _load_agent_config(self, phone_number: str, direction: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Load active agent configuration for a phone number from MongoDB.
         
         Args:
             phone_number: Phone number to look up (e.g., "+15551234567" or "5551234567")
+            direction: Optional direction filter ("incoming", "outgoing", "messaging")
         
         Returns:
             Agent configuration dict or None if not found
@@ -187,12 +188,16 @@ class TwilioPhoneTool:
             agents = await agent_store.list_agents(active_only=True)
             
             for agent in agents:
+                # Filter by direction if specified
+                if direction and agent.get("direction") != direction:
+                    continue
+                
                 agent_phone = agent.get("phoneNumber", "").replace("+1", "").replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
                 if agent_phone == normalized_phone:
-                    logger.info(f"Found active agent for {phone_number}: {agent.get('name')}")
+                    logger.info(f"Found active agent for {phone_number} (direction: {direction or 'any'}): {agent.get('name')}")
                     return agent
             
-            logger.warning(f"No active agent found for phone number {phone_number}")
+            logger.warning(f"No active agent found for phone number {phone_number} (direction: {direction or 'any'})")
             return None
             
         except Exception as e:

@@ -19,7 +19,7 @@ interface CreateAgentModalProps {
   onOpenChange: (open: boolean) => void
   onSubmit: (data: {
     name: string
-    direction: 'incoming'
+    direction: 'incoming' | 'outgoing' | 'messaging'
     phoneNumber: string
     sttModel: string
     inferenceModel: string
@@ -36,7 +36,7 @@ interface CreateAgentModalProps {
   editAgent?: {
     id: string
     name: string
-    direction: 'incoming'
+    direction: 'incoming' | 'outgoing' | 'messaging'
     phoneNumber: string
     sttModel?: string
     inferenceModel?: string
@@ -51,7 +51,7 @@ interface CreateAgentModalProps {
     twilioAccountSid?: string
     twilioAuthToken?: string
   } | null
-  activeSection?: 'incoming-agent'
+  activeSection?: 'incoming-agent' | 'outgoing-agent' | 'messaging-agent'
 }
 
 export function CreateAgentModal({
@@ -70,7 +70,7 @@ export function CreateAgentModal({
   
   const [formData, setFormData] = useState({
     name: '',
-    direction: 'incoming' as 'incoming',
+    direction: 'incoming' as 'incoming' | 'outgoing' | 'messaging',
     phoneNumber: '',
     sttModel: 'whisper-1',
     inferenceModel: 'gpt-4o-mini',
@@ -93,6 +93,9 @@ export function CreateAgentModal({
   const [registeredPhones, setRegisteredPhones] = useState<RegisteredPhone[]>([])
   const [selectedPhoneId, setSelectedPhoneId] = useState<string>('')
   const [isTwilioPhone, setIsTwilioPhone] = useState(false)  // Auto-detect if phone is Twilio
+  
+  // Check if this is a messaging agent (after formData is initialized)
+  const isMessagingAgent = formData.direction === 'messaging'
 
   // Fetch webhook URLs and registered phones when modal opens
   useEffect(() => {
@@ -168,10 +171,13 @@ export function CreateAgentModal({
       // Check if phone is Twilio (has twilioAccountSid)
       setIsTwilioPhone(!!editAgent.twilioAccountSid)
     } else if (open && !editAgent) {
-      // Reset form for create mode - always incoming
+      // Reset form for create mode - set direction based on activeSection
+      const defaultDirection = activeSection === 'messaging-agent' ? 'messaging' 
+        : activeSection === 'outgoing-agent' ? 'outgoing' 
+        : 'incoming'
       setFormData({
         name: '',
-        direction: 'incoming',
+        direction: defaultDirection,
         phoneNumber: '',
         sttModel: 'whisper-1',
         inferenceModel: 'gpt-4o-mini',
@@ -229,10 +235,13 @@ export function CreateAgentModal({
     }
     
     onSubmit(formData)
-    // Reset form - always incoming
+    // Reset form - set direction based on activeSection
+    const defaultDirection = activeSection === 'messaging-agent' ? 'messaging' 
+      : activeSection === 'outgoing-agent' ? 'outgoing' 
+      : 'incoming'
     setFormData({
       name: '',
-      direction: 'incoming',
+      direction: defaultDirection,
       phoneNumber: '',
       sttModel: 'whisper-1',
       inferenceModel: 'gpt-4o-mini',
@@ -263,8 +272,12 @@ export function CreateAgentModal({
                   ? 'This agent is read-only because its associated phone number was deleted. You can view the configuration but cannot make changes.'
                   : 'This agent is inactive. You can view the configuration but cannot make changes.')
               : isEditMode 
-              ? 'Update your voice AI agent configuration (name and phone number cannot be changed)'
-              : 'Configure your voice AI agent with custom models and behavior settings'}
+              ? (isMessagingAgent 
+                  ? 'Update your messaging AI agent configuration (name and phone number cannot be changed)'
+                  : 'Update your voice AI agent configuration (name and phone number cannot be changed)')
+              : (isMessagingAgent
+                  ? 'Configure your messaging AI agent with phone number, prompt, and greeting'
+                  : 'Configure your voice AI agent with custom models and behavior settings')}
           </p>
           {isInactiveAgent && (
             <div className="mt-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
@@ -368,50 +381,139 @@ export function CreateAgentModal({
                     className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 disabled:cursor-not-allowed"
                   />
                   <label htmlFor="active" className="text-sm font-medium text-slate-700 cursor-pointer">
-                    Active (Enable agent to receive calls)
+                    {isMessagingAgent 
+                      ? 'Active (Enable agent to receive messages and respond)'
+                      : 'Active (Enable agent to receive calls)'}
                   </label>
                 </div>
               </div>
             )}
           </div>
 
-          {/* AI Model Configuration Section */}
-          <div className="border border-slate-200 rounded-lg overflow-hidden">
-            <button
-              type="button"
-              onClick={() => toggleSection('aiModels')}
-              className="w-full px-4 py-3 bg-slate-50 hover:bg-slate-100 transition-colors flex items-center justify-between"
-            >
-              <div className="flex items-center gap-2">
-                <Bot className="h-5 w-5 text-indigo-600" />
-                <span className="font-semibold text-slate-900">AI Model Configuration</span>
-              </div>
-              {expandedSections.aiModels ? (
-                <ChevronUp className="h-5 w-5 text-slate-600" />
-              ) : (
-                <ChevronDown className="h-5 w-5 text-slate-600" />
-              )}
-            </button>
-            {expandedSections.aiModels && (
-              <div className="p-4 space-y-4 bg-white">
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-sm font-medium text-slate-700 mb-1 block">
-                      STT Model <span className="text-red-500">*</span>
-                    </label>
-                    <select
-                      value={formData.sttModel}
-                      onChange={(e) =>
-                        setFormData({ ...formData, sttModel: e.target.value })
-                      }
-                      disabled={isInactiveAgent}
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900 disabled:bg-slate-100 disabled:cursor-not-allowed"
-                    >
-                      <option value="whisper-1">whisper-1</option>
-                    </select>
-                    <p className="text-xs text-slate-500 mt-1">Speech-to-Text model</p>
+          {/* AI Model Configuration Section - Hide STT/TTS for messaging agents */}
+          {!isMessagingAgent && (
+            <div className="border border-slate-200 rounded-lg overflow-hidden">
+              <button
+                type="button"
+                onClick={() => toggleSection('aiModels')}
+                className="w-full px-4 py-3 bg-slate-50 hover:bg-slate-100 transition-colors flex items-center justify-between"
+              >
+                <div className="flex items-center gap-2">
+                  <Bot className="h-5 w-5 text-indigo-600" />
+                  <span className="font-semibold text-slate-900">AI Model Configuration</span>
+                </div>
+                {expandedSections.aiModels ? (
+                  <ChevronUp className="h-5 w-5 text-slate-600" />
+                ) : (
+                  <ChevronDown className="h-5 w-5 text-slate-600" />
+                )}
+              </button>
+              {expandedSections.aiModels && (
+                <div className="p-4 space-y-4 bg-white">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-sm font-medium text-slate-700 mb-1 block">
+                        STT Model <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        value={formData.sttModel}
+                        onChange={(e) =>
+                          setFormData({ ...formData, sttModel: e.target.value })
+                        }
+                        disabled={isInactiveAgent}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900 disabled:bg-slate-100 disabled:cursor-not-allowed"
+                      >
+                        <option value="whisper-1">whisper-1</option>
+                      </select>
+                      <p className="text-xs text-slate-500 mt-1">Speech-to-Text model</p>
+                    </div>
+
+                    <div>
+                      <label className="text-sm font-medium text-slate-700 mb-1 block">
+                        Inference Model <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        value={formData.inferenceModel}
+                        onChange={(e) =>
+                          setFormData({ ...formData, inferenceModel: e.target.value })
+                        }
+                        disabled={isInactiveAgent}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900 disabled:bg-slate-100 disabled:cursor-not-allowed"
+                      >
+                        <option value="gpt-4o-mini">gpt-4o-mini (Fast, Cost-effective)</option>
+                        <option value="gpt-4o">gpt-4o (More Capable)</option>
+                        <option value="gpt-4o-realtime-preview-2024-12-17">gpt-4o-realtime-preview (Realtime)</option>
+                      </select>
+                      <p className="text-xs text-slate-500 mt-1">LLM for generating responses</p>
+                    </div>
                   </div>
 
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-sm font-medium text-slate-700 mb-1 block">
+                        TTS Model <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        value={formData.ttsModel}
+                        onChange={(e) =>
+                          setFormData({ ...formData, ttsModel: e.target.value })
+                        }
+                        disabled={isInactiveAgent}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900 disabled:bg-slate-100 disabled:cursor-not-allowed"
+                      >
+                        <option value="tts-1">tts-1 (Faster, Lower Latency)</option>
+                        <option value="tts-1-hd">tts-1-hd (Higher Quality)</option>
+                      </select>
+                      <p className="text-xs text-slate-500 mt-1">Text-to-Speech model</p>
+                    </div>
+
+                    <div>
+                      <label className="text-sm font-medium text-slate-700 mb-1 block">
+                        TTS Voice <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        value={formData.ttsVoice}
+                        onChange={(e) =>
+                          setFormData({ ...formData, ttsVoice: e.target.value })
+                        }
+                        disabled={isInactiveAgent}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900 disabled:bg-slate-100 disabled:cursor-not-allowed"
+                      >
+                        <option value="alloy">alloy</option>
+                        <option value="echo">echo</option>
+                        <option value="fable">fable</option>
+                        <option value="onyx">onyx</option>
+                        <option value="nova">nova</option>
+                        <option value="shimmer">shimmer</option>
+                      </select>
+                      <p className="text-xs text-slate-500 mt-1">Voice personality</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* LLM Model Configuration Section - For messaging agents only */}
+          {isMessagingAgent && (
+            <div className="border border-slate-200 rounded-lg overflow-hidden">
+              <button
+                type="button"
+                onClick={() => toggleSection('aiModels')}
+                className="w-full px-4 py-3 bg-slate-50 hover:bg-slate-100 transition-colors flex items-center justify-between"
+              >
+                <div className="flex items-center gap-2">
+                  <Bot className="h-5 w-5 text-indigo-600" />
+                  <span className="font-semibold text-slate-900">LLM Model Configuration</span>
+                </div>
+                {expandedSections.aiModels ? (
+                  <ChevronUp className="h-5 w-5 text-slate-600" />
+                ) : (
+                  <ChevronDown className="h-5 w-5 text-slate-600" />
+                )}
+              </button>
+              {expandedSections.aiModels && (
+                <div className="p-4 space-y-4 bg-white">
                   <div>
                     <label className="text-sm font-medium text-slate-700 mb-1 block">
                       Inference Model <span className="text-red-500">*</span>
@@ -428,54 +530,12 @@ export function CreateAgentModal({
                       <option value="gpt-4o">gpt-4o (More Capable)</option>
                       <option value="gpt-4o-realtime-preview-2024-12-17">gpt-4o-realtime-preview (Realtime)</option>
                     </select>
-                    <p className="text-xs text-slate-500 mt-1">LLM for generating responses</p>
+                    <p className="text-xs text-slate-500 mt-1">LLM for generating message responses</p>
                   </div>
                 </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-sm font-medium text-slate-700 mb-1 block">
-                      TTS Model <span className="text-red-500">*</span>
-                    </label>
-                    <select
-                      value={formData.ttsModel}
-                      onChange={(e) =>
-                        setFormData({ ...formData, ttsModel: e.target.value })
-                      }
-                      disabled={isInactiveAgent}
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900 disabled:bg-slate-100 disabled:cursor-not-allowed"
-                    >
-                      <option value="tts-1">tts-1 (Faster, Lower Latency)</option>
-                      <option value="tts-1-hd">tts-1-hd (Higher Quality)</option>
-                    </select>
-                    <p className="text-xs text-slate-500 mt-1">Text-to-Speech model</p>
-                  </div>
-
-                  <div>
-                    <label className="text-sm font-medium text-slate-700 mb-1 block">
-                      TTS Voice <span className="text-red-500">*</span>
-                    </label>
-                    <select
-                      value={formData.ttsVoice}
-                      onChange={(e) =>
-                        setFormData({ ...formData, ttsVoice: e.target.value })
-                      }
-                      disabled={isInactiveAgent}
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900 disabled:bg-slate-100 disabled:cursor-not-allowed"
-                    >
-                      <option value="alloy">alloy</option>
-                      <option value="echo">echo</option>
-                      <option value="fable">fable</option>
-                      <option value="onyx">onyx</option>
-                      <option value="nova">nova</option>
-                      <option value="shimmer">shimmer</option>
-                    </select>
-                    <p className="text-xs text-slate-500 mt-1">Voice personality</p>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          )}
 
           {/* Behavior Configuration Section */}
           <div className="border border-slate-200 rounded-lg overflow-hidden">
@@ -530,7 +590,9 @@ export function CreateAgentModal({
                     className="bg-white border-slate-300 text-slate-900 placeholder:text-slate-400 disabled:bg-slate-100 disabled:cursor-not-allowed"
                   />
                   <p className="text-xs text-slate-500 mt-1">
-                    Initial message when call starts (optional)
+                    {isMessagingAgent 
+                      ? 'Initial message sent when user first texts (optional)'
+                      : 'Initial message when call starts (optional)'}
                   </p>
                 </div>
               </div>

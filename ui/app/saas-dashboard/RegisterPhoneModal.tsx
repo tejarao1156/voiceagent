@@ -16,12 +16,14 @@ interface RegisterPhoneModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   onSuccess?: () => void
+  activeSection?: string  // To determine which webhooks to show
 }
 
 export function RegisterPhoneModal({
   open,
   onOpenChange,
   onSuccess,
+  activeSection = 'incoming-agent',
 }: RegisterPhoneModalProps) {
   const [formData, setFormData] = useState({
     phoneNumber: '',
@@ -36,6 +38,7 @@ export function RegisterPhoneModal({
   const [webhookConfig, setWebhookConfig] = useState<{
     incomingUrl: string
     statusCallbackUrl: string
+    smsWebhookUrl?: string
     steps: string[]
   } | null>(null)
   const [copiedField, setCopiedField] = useState<string | null>(null)
@@ -74,6 +77,7 @@ export function RegisterPhoneModal({
       setWebhookConfig({
         incomingUrl: result.webhookConfiguration.incomingUrl,
         statusCallbackUrl: result.webhookConfiguration.statusCallbackUrl,
+        smsWebhookUrl: result.webhookConfiguration.smsWebhookUrl,
         steps: result.webhookConfiguration.steps,
       })
 
@@ -246,65 +250,103 @@ export function RegisterPhoneModal({
             {/* Webhook URLs */}
             {webhookConfig && (
               <div className="space-y-4">
-                <div>
-                  <label className="text-sm font-medium text-slate-700 mb-1 block">
-                    Incoming Webhook URL
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <Input
-                      type="text"
-                      value={webhookConfig.incomingUrl}
-                      readOnly
-                      className="bg-slate-50 border-slate-300 text-slate-600 cursor-not-allowed font-mono text-xs"
-                    />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => copyToClipboard(webhookConfig.incomingUrl, 'incoming')}
-                      className="border-slate-300"
-                    >
-                      {copiedField === 'incoming' ? (
-                        <Check className="h-4 w-4 text-green-600" />
-                      ) : (
-                        <Copy className="h-4 w-4" />
-                      )}
-                    </Button>
-                  </div>
-                  <p className="text-xs text-slate-500 mt-1">
-                    Set this as "A CALL COMES IN" webhook in Twilio Console
-                  </p>
-                </div>
+                {/* Show call webhooks for incoming/outgoing agents, or all webhooks */}
+                {(activeSection === 'incoming-agent' || activeSection === 'outgoing-agent' || !activeSection) && (
+                  <>
+                    <div>
+                      <label className="text-sm font-medium text-slate-700 mb-1 block">
+                        Incoming Webhook URL (Calls)
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          type="text"
+                          value={webhookConfig.incomingUrl}
+                          readOnly
+                          className="bg-slate-50 border-slate-300 text-slate-600 cursor-not-allowed font-mono text-xs"
+                        />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => copyToClipboard(webhookConfig.incomingUrl, 'incoming')}
+                          className="border-slate-300"
+                        >
+                          {copiedField === 'incoming' ? (
+                            <Check className="h-4 w-4 text-green-600" />
+                          ) : (
+                            <Copy className="h-4 w-4" />
+                          )}
+                        </Button>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-1">
+                        Set this as "A CALL COMES IN" webhook in Twilio Console (Voice & Fax section)
+                      </p>
+                    </div>
 
-                <div>
-                  <label className="text-sm font-medium text-slate-700 mb-1 block">
-                    Status Callback URL
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <Input
-                      type="text"
-                      value={webhookConfig.statusCallbackUrl}
-                      readOnly
-                      className="bg-slate-50 border-slate-300 text-slate-600 cursor-not-allowed font-mono text-xs"
-                    />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => copyToClipboard(webhookConfig.statusCallbackUrl, 'status')}
-                      className="border-slate-300"
-                    >
-                      {copiedField === 'status' ? (
-                        <Check className="h-4 w-4 text-green-600" />
-                      ) : (
-                        <Copy className="h-4 w-4" />
-                      )}
-                    </Button>
+                    <div>
+                      <label className="text-sm font-medium text-slate-700 mb-1 block">
+                        Status Callback URL (Calls)
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          type="text"
+                          value={webhookConfig.statusCallbackUrl}
+                          readOnly
+                          className="bg-slate-50 border-slate-300 text-slate-600 cursor-not-allowed font-mono text-xs"
+                        />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => copyToClipboard(webhookConfig.statusCallbackUrl, 'status')}
+                          className="border-slate-300"
+                        >
+                          {copiedField === 'status' ? (
+                            <Check className="h-4 w-4 text-green-600" />
+                          ) : (
+                            <Copy className="h-4 w-4" />
+                          )}
+                        </Button>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-1">
+                        Set this as "STATUS CALLBACK URL" in Twilio Console (Voice & Fax section)
+                      </p>
+                    </div>
+                  </>
+                )}
+
+                {/* Show SMS webhook for messaging agents, or all webhooks */}
+                {(activeSection === 'messaging-agent' || !activeSection) && webhookConfig.smsWebhookUrl && (
+                  <div>
+                    <label className="text-sm font-medium text-slate-700 mb-1 block">
+                      SMS Webhook URL (Messaging)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        type="text"
+                        value={webhookConfig.smsWebhookUrl}
+                        readOnly
+                        className="bg-slate-50 border-slate-300 text-slate-600 cursor-not-allowed font-mono text-xs"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => copyToClipboard(webhookConfig.smsWebhookUrl!, 'sms')}
+                        className="border-slate-300"
+                      >
+                        {copiedField === 'sms' ? (
+                          <Check className="h-4 w-4 text-green-600" />
+                        ) : (
+                          <Copy className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Set this as "A MESSAGE COMES IN" webhook in Twilio Console (Messaging section)
+                    </p>
                   </div>
-                  <p className="text-xs text-slate-500 mt-1">
-                    Set this as "STATUS CALLBACK URL" in Twilio Console
-                  </p>
-                </div>
+                )}
 
                 {/* Instructions */}
                 <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">

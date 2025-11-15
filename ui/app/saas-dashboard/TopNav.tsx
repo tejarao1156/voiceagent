@@ -13,10 +13,10 @@ interface TopNavProps {
 }
 
 export function TopNav({ activeTab, onTabChange, onCreateAgent, onRegisterPhone, activeSection }: TopNavProps) {
-  // Show "Create Agent" for incoming section
-  const showCreateAgent = activeSection === 'incoming-agent'
-  // Show "Register Phone Number" for both incoming and outgoing sections
-  const showRegisterPhone = activeSection === 'incoming-agent' || activeSection === 'outgoing-agent'
+  // Show "Create Agent" for incoming and messaging sections
+  const showCreateAgent = activeSection === 'incoming-agent' || activeSection === 'messaging-agent'
+  // Show "Register Phone Number" for incoming, outgoing, and messaging sections
+  const showRegisterPhone = activeSection === 'incoming-agent' || activeSection === 'outgoing-agent' || activeSection === 'messaging-agent'
   
   return (
     <div className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-sm">
@@ -27,22 +27,22 @@ export function TopNav({ activeTab, onTabChange, onCreateAgent, onRegisterPhone,
         {/* Right Actions */}
         <div className="flex items-center gap-3">
           {showCreateAgent && (
-            <>
-              <Button
-                onClick={onCreateAgent}
-                className="bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white shadow-lg shadow-blue-500/50"
-              >
-                <Plus className="h-4 w-4 mr-2" />
-                Create Agent
-              </Button>
-              <Button
-                onClick={onRegisterPhone}
-                className="bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white shadow-lg shadow-blue-500/50"
-              >
-                <Phone className="h-4 w-4 mr-2" />
-                Register Phone Number
-              </Button>
-            </>
+            <Button
+              onClick={onCreateAgent}
+              className="bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white shadow-lg shadow-blue-500/50"
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              Create Agent
+            </Button>
+          )}
+          {showRegisterPhone && (
+            <Button
+              onClick={onRegisterPhone}
+              className="bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white shadow-lg shadow-blue-500/50"
+            >
+              <Phone className="h-4 w-4 mr-2" />
+              Register Phone Number
+            </Button>
           )}
           
           <button className="p-2 rounded-lg hover:bg-slate-100 transition-colors">

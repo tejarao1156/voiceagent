@@ -31,7 +31,9 @@ from personas import get_persona_config, list_personas
 
 # Streaming specific imports
 from tools.phone.twilio_phone_stream import TwilioStreamHandler
+from tools.phone.twilio_sms_handler import TwilioSMSHandler
 from twilio.twiml.voice_response import VoiceResponse as TwilioVoiceResponse
+from twilio.rest import Client as TwilioClient
 
 
 # Configure logging
@@ -103,6 +105,8 @@ twilio_phone_tool = TwilioPhoneTool(
     tts_tool=tts_tool,
     conversation_tool=conversation_tool
 )
+# Initialize SMS handler
+twilio_sms_handler = TwilioSMSHandler(conversation_tool)
 
 # Registry to track active stream handlers for hangup functionality
 active_stream_handlers: Dict[str, "TwilioStreamHandler"] = {}
@@ -1120,6 +1124,151 @@ async def twilio_incoming_call(request: Request):
 
 
 @app.post(
+    "/webhooks/twilio/sms",
+    summary="Twilio SMS Webhook",
+    description="Handle incoming SMS messages from Twilio. Automatically identifies messaging agent based on 'To' phone number.",
+    tags=["Twilio Phone Integration"],
+    response_class=HTMLResponse
+)
+async def twilio_incoming_sms(request: Request):
+    """
+    Handle incoming SMS messages from Twilio.
+    - Checks if the 'To' number is registered and active
+    - Loads messaging agent configuration for that number
+    - If agent is active: processes message with LLM and sends response
+    - If agent is inactive: no response sent
+    - Stores all messages in MongoDB for personalization
+    """
+    try:
+        from databases.mongodb_phone_store import MongoDBPhoneStore, normalize_phone_number
+        from databases.mongodb_db import is_mongodb_available
+        from databases.mongodb_message_store import MongoDBMessageStore
+        
+        form_data = await request.form()
+        sms_data = dict(form_data)
+        message_sid = sms_data.get("MessageSid")
+        from_number = sms_data.get("From")
+        to_number = sms_data.get("To")
+        message_body = sms_data.get("Body", "")
+        
+        logger.info(f"📱 Received incoming SMS webhook for MessageSid: {message_sid}")
+        logger.info(f"   From: {from_number}")
+        logger.info(f"   To: {to_number}")
+        logger.info(f"   Body: {message_body[:100]}...")
+        
+        if not is_mongodb_available():
+            logger.error("MongoDB is not available - cannot process SMS")
+            return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', status_code=503)
+        
+        phone_store = MongoDBPhoneStore()
+        message_store = MongoDBMessageStore()
+        
+        # Check if 'to' number is registered
+        if not to_number:
+            logger.warning("No 'To' number in SMS webhook")
+            return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
+        
+        normalized_to = normalize_phone_number(to_number)
+        registered_phone = await phone_store.get_phone_by_number(normalized_to)
+        
+        if not registered_phone or registered_phone.get("isActive") == False or registered_phone.get("isDeleted") == True:
+            logger.warning(f"❌ Phone number '{to_number}' is NOT registered or inactive")
+            return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
+        
+        # Store incoming message in MongoDB
+        await message_store.create_message(
+            message_sid=message_sid,
+            from_number=from_number,
+            to_number=to_number,
+            body=message_body,
+            agent_id=normalized_to
+        )
+        
+        # Load messaging agent configuration
+        agent_config = await twilio_phone_tool._load_agent_config(normalized_to, direction="messaging")
+        
+        if not agent_config:
+            logger.warning(f"❌ No active messaging agent found for phone number {normalized_to}")
+            # No response sent if no agent configured
+            return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
+        
+        # Check if agent is active
+        if not agent_config.get("active", False):
+            logger.info(f"📱 Messaging agent for {normalized_to} is inactive - no response sent")
+            return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
+        
+        # Get conversation history for personalization
+        conversation_history = await message_store.get_conversation_history(
+            from_number=from_number,
+            to_number=to_number,
+            limit=50
+        )
+        
+        # Process message and generate AI response
+        logger.info(f"🤖 Processing message with AI agent: {agent_config.get('name')}")
+        response_data = await twilio_sms_handler.process_incoming_message(
+            from_number=from_number,
+            to_number=to_number,
+            message_body=message_body,
+            agent_config=agent_config,
+            conversation_history=conversation_history
+        )
+        
+        response_text = response_data.get("response_text", "")
+        
+        if not response_text:
+            logger.warning("No response generated by AI")
+            return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
+        
+        # Send SMS response via Twilio
+        try:
+            # Get Twilio credentials for this phone number
+            from utils.twilio_credentials import get_twilio_credentials_for_phone
+            twilio_creds = await get_twilio_credentials_for_phone(normalized_to)
+            
+            if not twilio_creds:
+                logger.error(f"❌ Could not get Twilio credentials for {normalized_to}")
+                return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
+            
+            twilio_client = TwilioClient(
+                twilio_creds["account_sid"],
+                twilio_creds["auth_token"]
+            )
+            
+            # Send SMS response
+            sent_message = twilio_client.messages.create(
+                body=response_text,
+                from_=to_number,
+                to=from_number
+            )
+            
+            logger.info(f"✅ Sent SMS response (MessageSid: {sent_message.sid}): {response_text[:50]}...")
+            
+            # Store outbound message in MongoDB
+            await message_store.create_outbound_message(
+                message_sid=sent_message.sid,
+                from_number=to_number,
+                to_number=from_number,
+                body=response_text,
+                agent_id=normalized_to
+            )
+            
+        except Exception as send_error:
+            logger.error(f"❌ Error sending SMS response: {send_error}", exc_info=True)
+            # Still return success to Twilio (message was received)
+        
+        # Return empty TwiML response (we sent SMS via REST API)
+        return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
+        
+    except Exception as e:
+        logger.error(f"❌ CRITICAL ERROR handling incoming SMS webhook: {e}", exc_info=True)
+        import traceback
+        logger.error(f"Full traceback:\n{traceback.format_exc()}")
+        # Return empty response to avoid Twilio retries
+        return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', status_code=500)
+
+
+@app.post(
     "/webhooks/twilio/status",
     summary="Twilio Call Status Webhook",
     description="Handle call status updates from Twilio",
@@ -1155,30 +1304,48 @@ async def twilio_call_status(request: Request):
         logger.info(f"   From: {from_number}, To: {to_number}")
         
         # Update call status in MongoDB when call ends
+        # Handle all end states: completed, failed, busy, no-answer, canceled
         if status in ["completed", "failed", "busy", "no-answer", "canceled"]:
             try:
                 from databases.mongodb_call_store import MongoDBCallStore
+                from datetime import datetime
                 call_store = MongoDBCallStore()
+                
+                # EDGE CASE 1: Try normal end_call first
                 result = await call_store.end_call(call_sid)
                 if result:
                     logger.info(f"✅ Successfully updated call {call_sid} status to 'completed' in MongoDB")
                 else:
-                    # Try to find the call and update it directly if end_call failed
+                    # EDGE CASE 2: end_call failed - try direct update
                     logger.warning(f"⚠️ end_call returned False for {call_sid}, attempting direct update...")
                     try:
                         collection = call_store._get_collection()
-                        if collection:
-                            call_doc = await collection.find_one({"call_sid": call_sid})
-                            if call_doc:
+                        if collection is None:
+                            logger.error(f"❌ MongoDB collection not available for call {call_sid}")
+                            # EDGE CASE 3: MongoDB unavailable - log and continue
+                            return {"status": "ok", "message": "MongoDB unavailable, status logged", "call_sid": call_sid, "call_status": status}
+                        
+                        call_doc = await collection.find_one({"call_sid": call_sid})
+                        if call_doc:
+                            # EDGE CASE 4: Call already completed - check and skip if already done
+                            if call_doc.get("status") == "completed":
+                                logger.info(f"ℹ️ Call {call_sid} already marked as completed, skipping update")
+                            else:
                                 # Calculate duration if available
                                 duration_seconds = None
                                 if call_doc.get("start_time"):
-                                    from datetime import datetime
-                                    start_time = datetime.fromisoformat(call_doc["start_time"])
-                                    end_time = datetime.utcnow()
-                                    duration_seconds = (end_time - start_time).total_seconds()
+                                    try:
+                                        start_time = datetime.fromisoformat(call_doc["start_time"])
+                                        end_time = datetime.utcnow()
+                                        duration_seconds = max(0, (end_time - start_time).total_seconds())
+                                    except (ValueError, TypeError) as time_error:
+                                        logger.warning(f"⚠️ Could not parse start_time for {call_sid}: {time_error}")
+                                        duration_seconds = 0
+                                else:
+                                    duration_seconds = 0
                                 
-                                await collection.update_one(
+                                # EDGE CASE 5: Update with proper error handling
+                                update_result = await collection.update_one(
                                     {"call_sid": call_sid},
                                     {
                                         "$set": {
@@ -1189,13 +1356,79 @@ async def twilio_call_status(request: Request):
                                         }
                                     }
                                 )
-                                logger.info(f"✅ Directly updated call {call_sid} status to 'completed' in MongoDB")
-                            else:
-                                logger.warning(f"⚠️ Call {call_sid} not found in MongoDB (may have been created before call record was saved)")
+                                
+                                if update_result.modified_count > 0:
+                                    logger.info(f"✅ Directly updated call {call_sid} status to 'completed' in MongoDB")
+                                else:
+                                    logger.warning(f"⚠️ Call {call_sid} update returned modified_count=0 (may already be completed)")
+                        else:
+                            # EDGE CASE 6: Call record doesn't exist - create it from status webhook
+                            logger.warning(f"⚠️ Call {call_sid} not found in MongoDB - creating record from status webhook...")
+                            try:
+                                now = datetime.utcnow().isoformat()
+                                
+                                # EDGE CASE 7: Handle missing from/to numbers gracefully
+                                agent_id = from_number or to_number or "unknown"
+                                
+                                # EDGE CASE 8: Check if record was just created (race condition)
+                                # Try to find it one more time before creating
+                                retry_doc = await collection.find_one({"call_sid": call_sid})
+                                if retry_doc:
+                                    logger.info(f"ℹ️ Call {call_sid} found on retry, updating existing record")
+                                    await collection.update_one(
+                                        {"call_sid": call_sid},
+                                        {
+                                            "$set": {
+                                                "status": "completed",
+                                                "end_time": now,
+                                                "updated_at": now
+                                            }
+                                        }
+                                    )
+                                else:
+                                    # Create new record
+                                    await collection.insert_one({
+                                        "call_sid": call_sid,
+                                        "from_number": from_number or "unknown",
+                                        "to_number": to_number or "unknown",
+                                        "agent_id": agent_id,
+                                        "session_id": call_sid,
+                                        "status": "completed",  # Already completed
+                                        "start_time": now,  # Approximate (we don't have exact start time)
+                                        "end_time": now,
+                                        "duration_seconds": 0,  # Unknown duration
+                                        "transcript": [],
+                                        "created_at": now,
+                                        "updated_at": now,
+                                    })
+                                    logger.info(f"✅ Created call record for {call_sid} from status webhook")
+                            except Exception as create_error:
+                                # EDGE CASE 9: Duplicate key error (race condition - record created between check and insert)
+                                if "duplicate" in str(create_error).lower() or "E11000" in str(create_error):
+                                    logger.info(f"ℹ️ Call {call_sid} record created by another process (race condition), updating existing record")
+                                    try:
+                                        await collection.update_one(
+                                            {"call_sid": call_sid},
+                                            {
+                                                "$set": {
+                                                    "status": "completed",
+                                                    "end_time": datetime.utcnow().isoformat(),
+                                                    "updated_at": datetime.utcnow().isoformat()
+                                                }
+                                            }
+                                        )
+                                        logger.info(f"✅ Updated call {call_sid} after race condition")
+                                    except Exception as update_error:
+                                        logger.error(f"❌ Error updating after race condition: {update_error}", exc_info=True)
+                                else:
+                                    logger.error(f"❌ Could not create call record from status webhook: {create_error}", exc_info=True)
                     except Exception as e2:
+                        # EDGE CASE 10: Any other error in direct update
                         logger.error(f"❌ Error in direct update attempt: {e2}", exc_info=True)
             except Exception as e:
+                # EDGE CASE 11: Top-level error handling
                 logger.error(f"❌ Error updating call status in MongoDB: {e}", exc_info=True)
+                # Don't fail the webhook - return success to Twilio
         
         # Clean up stream handlers if call is ending
         if status in ["completed", "failed", "busy", "no-answer", "canceled"]:
@@ -1953,7 +2186,7 @@ async def create_agent(request: Request):
     
     **Request Body Fields:**
     - `name` (string, required): Agent name
-    - `direction` (string, required): "incoming" (only incoming agents are supported) 
+    - `direction` (string, required): "incoming", "outgoing", or "messaging" 
     - `phoneNumber` (string, required): Phone number (e.g., "+1 555 123 4567")
     - `userId` (string, optional): User/tenant ID (for multi-tenant support)
     - `sttModel` (string): Speech-to-text model (default: "whisper-1")
@@ -2247,9 +2480,11 @@ async def register_phone(request: Request):
         phone_store = MongoDBPhoneStore()
         
         # Generate webhook URLs (same for all phones)
+        # Phone numbers can be used for both calls and messaging
         from config import TWILIO_WEBHOOK_BASE_URL
         incoming_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/incoming"
         status_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/status"
+        sms_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/sms"
         
         # Prepare phone data
         registration_data = {
@@ -2260,6 +2495,7 @@ async def register_phone(request: Request):
             "twilioAccountName": phone_data.get("twilioAccountName", "Twilio 0"),  # Default to "Twilio 0"
             "webhookUrl": incoming_url,
             "statusCallbackUrl": status_url,
+            "smsWebhookUrl": sms_url,  # Add SMS webhook URL
             "userId": phone_data.get("userId")
         }
         
@@ -2284,10 +2520,11 @@ async def register_phone(request: Request):
         logger.info(f"✅ Phone number registered successfully with ID: {phone_id}")
         logger.info(f"📞 Phone: {phone_number}")
         logger.info(f"🔗 Webhook URLs:")
-        logger.info(f"   Incoming: {incoming_url}")
-        logger.info(f"   Status: {status_url}")
+        logger.info(f"   Incoming (Calls): {incoming_url}")
+        logger.info(f"   Status (Calls): {status_url}")
+        logger.info(f"   SMS: {sms_url}")
         
-        # Return response with webhook URLs
+        # Return response with webhook URLs (for both calls and messaging)
         return {
             "success": True,
             "phone_id": phone_id,
@@ -2296,14 +2533,17 @@ async def register_phone(request: Request):
             "webhookConfiguration": {
                 "incomingUrl": incoming_url,
                 "statusCallbackUrl": status_url,
+                "smsWebhookUrl": sms_url,
                 "instructions": "Configure these URLs in your Twilio Console",
                 "steps": [
                     "1. Go to Twilio Console → Phone Numbers",
                     f"2. Click on phone number: {phone_number}",
-                    "3. Scroll to 'Voice & Fax' section",
-                    f"4. Set 'A CALL COMES IN' to: {incoming_url} (POST)",
-                    f"5. Set 'STATUS CALLBACK URL' to: {status_url} (POST)",
-                    "6. Click Save"
+                    "3. For CALLS - Scroll to 'Voice & Fax' section:",
+                    f"   - Set 'A CALL COMES IN' to: {incoming_url} (POST)",
+                    f"   - Set 'STATUS CALLBACK URL' to: {status_url} (POST)",
+                    "4. For MESSAGING - Scroll to 'Messaging' section:",
+                    f"   - Set 'A MESSAGE COMES IN' to: {sms_url} (POST)",
+                    "5. Click Save"
                 ]
             }
         }
@@ -2946,7 +3186,7 @@ async def make_outbound_call(request: Request):
                 from_=normalized_from,
                 url=webhook_url,
                 status_callback=status_callback_url,
-                status_callback_event=['initiated', 'ringing', 'answered', 'completed'],
+                status_callback_event=['initiated', 'ringing', 'answered', 'completed', 'failed', 'busy', 'no-answer', 'canceled'],
                 method='POST'
             )
             
@@ -2958,18 +3198,33 @@ async def make_outbound_call(request: Request):
             logger.info(f"   Status: {call.status}")
             
             # Create call record in MongoDB
+            # EDGE CASE: Handle race condition where status webhook arrives before record is created
             try:
                 from databases.mongodb_call_store import MongoDBCallStore
                 call_store = MongoDBCallStore()
-                await call_store.create_call(
-                    call_sid=call_sid,
-                    from_number=normalized_from,
-                    to_number=normalized_to,
-                    agent_id=normalized_from  # Use 'from' number as agent_id for outbound calls
-                )
-                logger.info(f"✅ Created call record in MongoDB for {call_sid}")
+                
+                # EDGE CASE: Check if record already exists (race condition with status webhook)
+                existing_call = await call_store.get_call_by_sid(call_sid)
+                if existing_call:
+                    logger.info(f"ℹ️ Call record for {call_sid} already exists (likely created by status webhook)")
+                else:
+                    # Create new record
+                    success = await call_store.create_call(
+                        call_sid=call_sid,
+                        from_number=normalized_from,
+                        to_number=normalized_to,
+                        agent_id=normalized_from  # Use 'from' number as agent_id for outbound calls
+                    )
+                    if success:
+                        logger.info(f"✅ Created call record in MongoDB for {call_sid}")
+                    else:
+                        logger.warning(f"⚠️ create_call returned False for {call_sid} (may have been created by status webhook)")
             except Exception as e:
-                logger.warning(f"Could not create call record: {e}")
+                # EDGE CASE: Duplicate key error (race condition)
+                if "duplicate" in str(e).lower() or "E11000" in str(e):
+                    logger.info(f"ℹ️ Call record for {call_sid} already exists (race condition handled)")
+                else:
+                    logger.warning(f"Could not create call record: {e}")
             
             return {
                 "success": True,
