@@ -110,10 +110,14 @@ Current conversation state will be provided to help you understand context."""
                 conversation_history = []
                 session_data["conversation_history"] = conversation_history
             
+            # Get custom system prompt from session_data if available (for messaging agents)
+            custom_system_prompt = session_data.get("system_prompt")
+            
             # Generate response using OpenAI with conversation history
             response = await self._generate_response(
                 context, user_input, conversation_history, persona_config,
-                model=model, temperature=temperature, max_tokens=max_tokens
+                model=model, temperature=temperature, max_tokens=max_tokens,
+                custom_system_prompt=custom_system_prompt
             )
             
             # Update session based on response
@@ -165,11 +169,15 @@ Current conversation history: {len(session_data.get('conversation_history', []))
         persona_config: Optional[Dict[str, Any]] = None,
         model: Optional[str] = None,
         temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        custom_system_prompt: Optional[str] = None
     ) -> Dict[str, Any]:
         """Generate response using OpenAI with conversation history"""
         try:
-            if persona_config and persona_config.get("conversation_prompt"):
+            # Use custom system prompt if provided (from agent config for messaging)
+            if custom_system_prompt:
+                system_prompt = custom_system_prompt
+            elif persona_config and persona_config.get("conversation_prompt"):
                 system_prompt = (
                     self.system_prompt
                     + "\n\nPersona Style Instructions:\n"

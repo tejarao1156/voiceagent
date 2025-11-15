@@ -9,6 +9,7 @@ This file contains instructions that the AI assistant should follow for every co
 3. **Test Everything**: Test all features that are changed. If you change a function within a feature, test the entire feature.
 4. **Maintain Existing Flow**: Don't break existing functionality. If changes are required, make them carefully and test thoroughly.
 5. never add dummy data into ui for the testing
+6. when user asks to build something consider all the edge cases so that no error can occur for ui and backend
 
 ## Workflow for Every Request
 

@@ -25,7 +25,13 @@ class MongoDBCallStore:
     
     async def create_call(self, call_sid: str, from_number: str, to_number: str, 
                          agent_id: Optional[str] = None, session_id: Optional[str] = None) -> bool:
-        """Create a new call record when call starts"""
+        """Create a new call record when call starts
+        
+        Handles edge cases:
+        - Duplicate call_sid (race condition)
+        - MongoDB unavailable
+        - Missing required fields
+        """
         if not is_mongodb_available():
             logger.debug("MongoDB not available, skipping call creation")
             return False
@@ -35,13 +41,24 @@ class MongoDBCallStore:
             if collection is None:
                 return False
             
+            # EDGE CASE 1: Check if call already exists (race condition with status webhook)
+            existing = await collection.find_one({"call_sid": call_sid})
+            if existing:
+                logger.info(f"ℹ️ Call record for {call_sid} already exists, skipping creation")
+                return True  # Return True - record exists, that's fine
+            
+            # EDGE CASE 2: Validate required fields
+            if not call_sid:
+                logger.error("Cannot create call record: call_sid is required")
+                return False
+            
             now = datetime.utcnow().isoformat()
             
             call_doc = {
                 "call_sid": call_sid,
-                "from_number": from_number,
-                "to_number": to_number,
-                "agent_id": agent_id or to_number,
+                "from_number": from_number or "unknown",
+                "to_number": to_number or "unknown",
+                "agent_id": agent_id or to_number or "unknown",
                 "session_id": session_id or call_sid,
                 "status": "active",
                 "start_time": now,
@@ -57,8 +74,13 @@ class MongoDBCallStore:
             return True
             
         except Exception as e:
-            logger.error(f"Error creating call record: {e}")
-            return False
+            # EDGE CASE 3: Duplicate key error (race condition)
+            if "duplicate" in str(e).lower() or "E11000" in str(e):
+                logger.info(f"ℹ️ Call record for {call_sid} already exists (duplicate key error - race condition)")
+                return True  # Return True - record exists, that's fine
+            else:
+                logger.error(f"Error creating call record: {e}", exc_info=True)
+                return False
     
     async def update_call_transcript(self, call_sid: str, role: str, text: str) -> bool:
         """Add real-time transcript entry to active call"""
@@ -93,7 +115,15 @@ class MongoDBCallStore:
             return False
     
     async def end_call(self, call_sid: str, duration_seconds: Optional[float] = None) -> bool:
-        """Mark call as completed and store final duration"""
+        """Mark call as completed and store final duration
+        
+        Handles edge cases:
+        - Call already completed (idempotent)
+        - Missing call record
+        - Invalid duration calculation
+        - MongoDB connection issues
+        - Race conditions
+        """
         if not is_mongodb_available():
             logger.warning(f"MongoDB not available, cannot end call {call_sid}")
             return False
@@ -104,25 +134,40 @@ class MongoDBCallStore:
                 logger.warning(f"MongoDB collection not available, cannot end call {call_sid}")
                 return False
             
-            # First check if call exists
+            # EDGE CASE 1: Check if call exists
             call_doc = await collection.find_one({"call_sid": call_sid})
             if not call_doc:
                 logger.warning(f"Call {call_sid} not found in MongoDB - may have been created before call record was saved")
                 return False
             
+            # EDGE CASE 2: Call already completed (idempotent operation)
+            if call_doc.get("status") == "completed":
+                logger.info(f"ℹ️ Call {call_sid} already marked as completed, skipping update")
+                return True  # Return True - call is in correct state
+            
             now = datetime.utcnow().isoformat()
             
-            # If duration not provided, calculate from start_time
+            # EDGE CASE 3: Calculate duration safely
             if duration_seconds is None:
                 if call_doc.get("start_time"):
-                    start_time = datetime.fromisoformat(call_doc["start_time"])
-                    end_time = datetime.fromisoformat(now)
-                    duration_seconds = (end_time - start_time).total_seconds()
+                    try:
+                        start_time = datetime.fromisoformat(call_doc["start_time"])
+                        end_time = datetime.fromisoformat(now)
+                        calculated_duration = (end_time - start_time).total_seconds()
+                        # EDGE CASE 4: Handle negative duration (clock skew or invalid data)
+                        duration_seconds = max(0, calculated_duration)
+                        if calculated_duration < 0:
+                            logger.warning(f"⚠️ Negative duration calculated for {call_sid}: {calculated_duration}s, using 0")
+                    except (ValueError, TypeError) as time_error:
+                        logger.warning(f"⚠️ Could not parse start_time for {call_sid}: {time_error}, using duration 0")
+                        duration_seconds = 0
                 else:
                     duration_seconds = 0
+                    logger.info(f"ℹ️ No start_time for call {call_sid}, using duration 0")
             
+            # EDGE CASE 5: Update with proper error handling
             result = await collection.update_one(
-                {"call_sid": call_sid},
+                {"call_sid": call_sid, "status": {"$ne": "completed"}},  # Only update if not already completed
                 {
                     "$set": {
                         "status": "completed",
@@ -137,10 +182,18 @@ class MongoDBCallStore:
                 logger.info(f"✅ Ended call {call_sid}: duration {duration_seconds:.2f}s")
                 return True
             else:
-                logger.warning(f"⚠️ Call {call_sid} was not updated (may already be completed)")
-                return True  # Return True even if not modified - call is in correct state
+                # EDGE CASE 6: No modification - could be race condition or already completed
+                # Check current status
+                updated_doc = await collection.find_one({"call_sid": call_sid})
+                if updated_doc and updated_doc.get("status") == "completed":
+                    logger.info(f"ℹ️ Call {call_sid} was already completed (likely race condition)")
+                    return True
+                else:
+                    logger.warning(f"⚠️ Call {call_sid} was not updated (matched count: {result.matched_count}, modified: {result.modified_count})")
+                    return False  # Return False to trigger fallback in webhook handler
             
         except Exception as e:
+            # EDGE CASE 7: Any unexpected error
             logger.error(f"Error ending call {call_sid}: {e}", exc_info=True)
             return False
     

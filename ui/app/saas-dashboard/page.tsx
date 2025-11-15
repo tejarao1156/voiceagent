@@ -37,7 +37,7 @@ export default function SaaSDashboard() {
     
     // Set initial section from hash
     const hash = window.location.hash.replace('#', '')
-    if (hash && ['dashboard', 'incoming-agent', 'outgoing-agent', 'calls', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(hash)) {
+    if (hash && ['dashboard', 'incoming-agent', 'outgoing-agent', 'messaging-agent', 'calls', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(hash)) {
       setActiveSection(hash)
     } else if (hash === 'ai-agents') {
       // Legacy support: if hash is 'ai-agents', default to 'incoming-agent'
@@ -47,7 +47,7 @@ export default function SaaSDashboard() {
     // Listen for hash changes
     const handleHashChange = () => {
       const newHash = window.location.hash.replace('#', '')
-      if (newHash && ['dashboard', 'incoming-agent', 'outgoing-agent', 'calls', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(newHash)) {
+      if (newHash && ['dashboard', 'incoming-agent', 'outgoing-agent', 'messaging-agent', 'calls', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(newHash)) {
         setActiveSection(newHash)
       } else if (newHash === 'ai-agents') {
         // Legacy support: if hash is 'ai-agents', default to 'incoming-agent'
@@ -61,7 +61,7 @@ export default function SaaSDashboard() {
 
   const handleCreateAgent = async (data: {
     name: string
-    direction: 'incoming'
+    direction: 'incoming' | 'outgoing' | 'messaging'
     phoneNumber: string
     sttModel: string
     inferenceModel: string
@@ -241,11 +241,24 @@ export default function SaaSDashboard() {
     }
   }
 
-  // Filter agents based on active/inactive filter (only incoming agents)
+  // Filter agents based on active/inactive filter and direction
   const filteredAgents = agents.filter(agent => {
-    // Only show incoming agents
-    if (agent.direction !== 'incoming' && agent.direction !== 'inbound') {
-      return false
+    // Filter by direction based on active section
+    if (activeSection === 'incoming-agent') {
+      // Only show incoming agents
+      if (agent.direction !== 'incoming' && agent.direction !== 'inbound') {
+        return false
+      }
+    } else if (activeSection === 'outgoing-agent') {
+      // Only show outgoing agents
+      if (agent.direction !== 'outgoing') {
+        return false
+      }
+    } else if (activeSection === 'messaging-agent') {
+      // Only show messaging agents
+      if (agent.direction !== 'messaging') {
+        return false
+      }
     }
     
     // Filter by active/inactive status
@@ -291,6 +304,12 @@ export default function SaaSDashboard() {
         setAgents([])
         loadAgents()
         // Load registered phones for outgoing agent section
+        loadRegisteredPhones()
+      } else if (activeSection === 'messaging-agent') {
+        // Always clear agents first to ensure we only show MongoDB data
+        setAgents([])
+        loadAgents()
+        // Load registered phones for messaging agent section
         loadRegisteredPhones()
       } else {
         // Clear agents when leaving agent sections - only show data when in those sections
@@ -486,6 +505,72 @@ export default function SaaSDashboard() {
             </motion.div>
           )}
 
+          {mounted && activeSection === 'messaging-agent' && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.2 }}
+            >
+              {/* Header */}
+              <div className="mb-6">
+                <h1 className="text-2xl font-semibold text-slate-800 mb-2">
+                  Messaging Agent
+                </h1>
+                <p className="text-slate-600">
+                  Create and manage Messaging Agents for SMS conversations.
+                </p>
+              </div>
+
+              {/* Tabs */}
+              <div className="flex gap-1 mb-6 border-b border-slate-200">
+                <button
+                  onClick={() => setAgentFilter('all')}
+                  className={cn(
+                    "px-4 py-2 text-sm font-medium transition-colors",
+                    agentFilter === 'all'
+                      ? "text-indigo-600 border-b-2 border-indigo-600"
+                      : "text-slate-600 hover:text-slate-900"
+                  )}
+                >
+                  All Agents
+                </button>
+                <button
+                  onClick={() => setAgentFilter('active')}
+                  className={cn(
+                    "px-4 py-2 text-sm font-medium transition-colors",
+                    agentFilter === 'active'
+                      ? "text-indigo-600 border-b-2 border-indigo-600"
+                      : "text-slate-600 hover:text-slate-900"
+                  )}
+                >
+                  Active Agents
+                </button>
+                <button
+                  onClick={() => setAgentFilter('inactive')}
+                  className={cn(
+                    "px-4 py-2 text-sm font-medium transition-colors",
+                    agentFilter === 'inactive'
+                      ? "text-indigo-600 border-b-2 border-indigo-600"
+                      : "text-slate-600 hover:text-slate-900"
+                  )}
+                >
+                  Inactive Agents
+                </button>
+              </div>
+
+              {/* Content based on selected tab */}
+              {agentFilter !== 'phones' && agentFilter !== 'make-call' && (
+                <AgentTable
+                  agents={filteredAgents}
+                  loading={loadingAgents}
+                  onEdit={handleEdit}
+                  onDelete={handleDelete}
+                  onToggleActive={handleToggleActive}
+                />
+              )}
+            </motion.div>
+          )}
+
           {mounted && activeSection === 'outgoing-agent' && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
@@ -558,7 +643,7 @@ export default function SaaSDashboard() {
             </motion.div>
           )}
 
-          {activeSection !== 'incoming-agent' && activeSection !== 'outgoing-agent' && activeSection !== 'dashboard' && activeSection !== 'calls' && activeSection !== 'voice-customization' && (
+          {activeSection !== 'incoming-agent' && activeSection !== 'outgoing-agent' && activeSection !== 'messaging-agent' && activeSection !== 'dashboard' && activeSection !== 'calls' && activeSection !== 'voice-customization' && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -592,9 +677,10 @@ export default function SaaSDashboard() {
       <RegisterPhoneModal
         open={registerPhoneModalOpen}
         onOpenChange={setRegisterPhoneModalOpen}
+        activeSection={activeSection}
         onSuccess={() => {
           // Reload agents and registered phones if in incoming-agent section (to refresh phone dropdown)
-          if (activeSection === 'incoming-agent') {
+          if (activeSection === 'incoming-agent' || activeSection === 'messaging-agent') {
             loadAgents()
             loadRegisteredPhones()
           }
