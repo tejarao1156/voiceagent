@@ -19,9 +19,8 @@ interface CreateAgentModalProps {
   onOpenChange: (open: boolean) => void
   onSubmit: (data: {
     name: string
-    direction: 'inbound'
+    direction: 'incoming'
     phoneNumber: string
-    provider: 'twilio' | 'custom'
     sttModel: string
     inferenceModel: string
     ttsModel: string
@@ -37,9 +36,8 @@ interface CreateAgentModalProps {
   editAgent?: {
     id: string
     name: string
-    direction: 'inbound'
+    direction: 'incoming'
     phoneNumber: string
-    provider?: 'twilio' | 'custom' | 'plivo'
     sttModel?: string
     inferenceModel?: string
     ttsModel?: string
@@ -53,6 +51,7 @@ interface CreateAgentModalProps {
     twilioAccountSid?: string
     twilioAuthToken?: string
   } | null
+  activeSection?: 'incoming-agent'
 }
 
 export function CreateAgentModal({
@@ -60,6 +59,7 @@ export function CreateAgentModal({
   onOpenChange,
   onSubmit,
   editAgent,
+  activeSection = 'incoming-agent',
 }: CreateAgentModalProps) {
   const isEditMode = !!editAgent
   // Agent is read-only if: inactive (active=false) OR phone is deleted
@@ -70,9 +70,8 @@ export function CreateAgentModal({
   
   const [formData, setFormData] = useState({
     name: '',
-    direction: 'inbound' as 'inbound',
+    direction: 'incoming' as 'incoming',
     phoneNumber: '',
-    provider: 'twilio' as 'twilio' | 'custom',
     sttModel: 'whisper-1',
     inferenceModel: 'gpt-4o-mini',
     ttsModel: 'tts-1',
@@ -93,13 +92,14 @@ export function CreateAgentModal({
   } | null>(null)
   const [registeredPhones, setRegisteredPhones] = useState<RegisteredPhone[]>([])
   const [selectedPhoneId, setSelectedPhoneId] = useState<string>('')
+  const [isTwilioPhone, setIsTwilioPhone] = useState(false)  // Auto-detect if phone is Twilio
 
   // Fetch webhook URLs and registered phones when modal opens
   useEffect(() => {
     const fetchData = async () => {
-      if (open && formData.provider === 'twilio') {
+      if (open) {
         try {
-          // Fetch webhook URLs
+          // Fetch webhook URLs (always fetch, will show conditionally)
           const response = await fetch('/webhooks/twilio/urls')
           if (response.ok) {
             const data = await response.json()
@@ -118,6 +118,8 @@ export function CreateAgentModal({
                 phoneNumber: firstPhone.phoneNumber,
                 twilioAccountSid: firstPhone.twilioAccountSid,
               }))
+              // Check if phone is Twilio (has twilioAccountSid)
+              setIsTwilioPhone(!!firstPhone.twilioAccountSid)
             }
           }
         } catch (error) {
@@ -126,7 +128,7 @@ export function CreateAgentModal({
       }
     }
     fetchData()
-  }, [open, formData.provider, isEditMode])
+  }, [open, isEditMode])
   
   // Handle registered phone selection
   useEffect(() => {
@@ -138,6 +140,8 @@ export function CreateAgentModal({
           phoneNumber: selectedPhone.phoneNumber,
           twilioAccountSid: selectedPhone.twilioAccountSid,
         }))
+        // Auto-detect if phone is Twilio (has twilioAccountSid)
+        setIsTwilioPhone(!!selectedPhone.twilioAccountSid)
       }
     }
   }, [selectedPhoneId, isEditMode, registeredPhones])
@@ -147,9 +151,8 @@ export function CreateAgentModal({
     if (open && editAgent) {
       setFormData({
         name: editAgent.name || '',
-        direction: editAgent.direction || 'inbound',
+        direction: (editAgent.direction === 'inbound' ? 'incoming' : editAgent.direction) || 'incoming',
         phoneNumber: editAgent.phoneNumber || '',
-        provider: (editAgent.provider === 'plivo' ? 'twilio' : editAgent.provider) || 'twilio' as 'twilio' | 'custom',
         sttModel: editAgent.sttModel || 'whisper-1',
         inferenceModel: editAgent.inferenceModel || 'gpt-4o-mini',
         ttsModel: editAgent.ttsModel || 'tts-1',
@@ -162,13 +165,14 @@ export function CreateAgentModal({
         twilioAccountSid: editAgent.twilioAccountSid || '',
         twilioAuthToken: editAgent.twilioAuthToken || '',
       })
+      // Check if phone is Twilio (has twilioAccountSid)
+      setIsTwilioPhone(!!editAgent.twilioAccountSid)
     } else if (open && !editAgent) {
-      // Reset form for create mode
+      // Reset form for create mode - always incoming
       setFormData({
         name: '',
-        direction: 'inbound',
+        direction: 'incoming',
         phoneNumber: '',
-        provider: 'twilio',
         sttModel: 'whisper-1',
         inferenceModel: 'gpt-4o-mini',
         ttsModel: 'tts-1',
@@ -181,8 +185,9 @@ export function CreateAgentModal({
         twilioAccountSid: '',
         twilioAuthToken: '',
       })
+      setIsTwilioPhone(false)
     }
-  }, [open, editAgent])
+  }, [open, editAgent, activeSection])
 
   const [expandedSections, setExpandedSections] = useState({
     basic: true,
@@ -224,11 +229,11 @@ export function CreateAgentModal({
     }
     
     onSubmit(formData)
+    // Reset form - always incoming
     setFormData({
       name: '',
-      direction: 'inbound',
+      direction: 'incoming',
       phoneNumber: '',
-      provider: 'twilio',
       sttModel: 'whisper-1',
       inferenceModel: 'gpt-4o-mini',
       ttsModel: 'tts-1',
@@ -305,47 +310,6 @@ export function CreateAgentModal({
                     disabled={isEditMode || isInactiveAgent}
                     className="bg-white border-slate-300 text-slate-900 placeholder:text-slate-400 disabled:bg-slate-100 disabled:cursor-not-allowed"
                   />
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-sm font-medium text-slate-700 mb-1 block">
-                      Direction <span className="text-red-500">*</span>
-                    </label>
-                    <select
-                      value={formData.direction}
-                      onChange={(e) =>
-                        setFormData({
-                          ...formData,
-                          direction: e.target.value as 'inbound',
-                        })
-                      }
-                      disabled={isInactiveAgent}
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900 disabled:bg-slate-100 disabled:cursor-not-allowed"
-                    >
-                      <option value="inbound">Inbound</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="text-sm font-medium text-slate-700 mb-1 block">
-                      Provider <span className="text-red-500">*</span>
-                    </label>
-                    <select
-                      value={formData.provider}
-                      onChange={(e) =>
-                        setFormData({
-                          ...formData,
-                          provider: e.target.value as 'twilio' | 'custom',
-                        })
-                      }
-                      disabled={isInactiveAgent}
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900 disabled:bg-slate-100 disabled:cursor-not-allowed"
-                    >
-                      <option value="twilio">Twilio</option>
-                      <option value="custom">Custom</option>
-                    </select>
-                  </div>
                 </div>
 
                 <div>
@@ -637,8 +601,8 @@ export function CreateAgentModal({
             )}
           </div>
 
-          {/* Provider-Specific Configuration */}
-          {formData.provider === 'twilio' && (
+          {/* Twilio Configuration (shown only if phone is associated with Twilio) */}
+          {isTwilioPhone && (
             <div className="border border-slate-200 rounded-lg overflow-hidden">
               <button
                 type="button"
@@ -665,7 +629,7 @@ export function CreateAgentModal({
                           🌐 Environment: {webhookUrls.environment?.runtime?.toUpperCase() || 'UNKNOWN'}
                         </p>
                         <p className="text-xs text-indigo-700">
-                          These URLs are automatically generated based on your environment. Use the same URLs for all your Twilio phone numbers.
+                          This phone number is associated with Twilio. Configure these webhook URLs in your Twilio Console.
                         </p>
                       </div>
 

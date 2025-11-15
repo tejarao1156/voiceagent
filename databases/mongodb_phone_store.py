@@ -125,8 +125,10 @@ class MongoDBPhoneStore:
                 update_data = {
                     "phoneNumber": normalized_phone,
                     "originalPhoneNumber": phone_number,
+                    "provider": phone_data.get("provider", "twilio"),  # Store provider
                     "twilioAccountSid": phone_data.get("twilioAccountSid"),
                     "twilioAuthToken": phone_data.get("twilioAuthToken"),
+                    "twilioAccountName": phone_data.get("twilioAccountName", "Twilio 0"),
                     "webhookUrl": phone_data.get("webhookUrl"),
                     "statusCallbackUrl": phone_data.get("statusCallbackUrl"),
                     "userId": phone_data.get("userId"),

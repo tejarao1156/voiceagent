@@ -12,37 +12,17 @@ interface TopNavProps {
   activeSection?: string
 }
 
-const tabs = [
-  'AI Agents',
-]
-
 export function TopNav({ activeTab, onTabChange, onCreateAgent, onRegisterPhone, activeSection }: TopNavProps) {
-  const showCreateAgent = activeSection !== 'dashboard' && activeSection === 'ai-agents'
-  const showRegisterPhone = activeSection !== 'dashboard' && activeSection === 'ai-agents'
+  // Show "Create Agent" for incoming section
+  const showCreateAgent = activeSection === 'incoming-agent'
+  // Show "Register Phone Number" only for incoming section
+  const showRegisterPhone = activeSection === 'incoming-agent'
   
   return (
     <div className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-sm">
       <div className="flex items-center justify-between px-6 h-16">
-        {/* Tabs */}
-        <div className="flex items-center gap-1 overflow-x-auto">
-          {tabs.map((tab) => {
-            const isActive = activeTab === tab
-            return (
-              <button
-                key={tab}
-                onClick={() => onTabChange(tab)}
-                className={cn(
-                  "px-4 py-2 text-sm font-medium transition-colors whitespace-nowrap",
-                  isActive
-                    ? "text-indigo-600 border-b-2 border-indigo-600"
-                    : "text-slate-600 hover:text-slate-900"
-                )}
-              >
-                {tab}
-              </button>
-            )
-          })}
-        </div>
+        {/* Left side - empty for now */}
+        <div></div>
 
         {/* Right Actions */}
         <div className="flex items-center gap-3">

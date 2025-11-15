@@ -25,6 +25,7 @@ export function RegisterPhoneModal({
 }: RegisterPhoneModalProps) {
   const [formData, setFormData] = useState({
     phoneNumber: '',
+    provider: 'twilio' as 'twilio',  // For now only Twilio
     twilioAccountSid: '',
     twilioAuthToken: '',
   })
@@ -44,6 +45,7 @@ export function RegisterPhoneModal({
     if (open) {
       setFormData({
         phoneNumber: '',
+        provider: 'twilio' as 'twilio',
         twilioAccountSid: '',
         twilioAuthToken: '',
       })
@@ -63,6 +65,7 @@ export function RegisterPhoneModal({
     try {
       const result = await registerPhone({
         phoneNumber: formData.phoneNumber,
+        provider: formData.provider,
         twilioAccountSid: formData.twilioAccountSid,
         twilioAuthToken: formData.twilioAuthToken,
       })
@@ -112,6 +115,26 @@ export function RegisterPhoneModal({
 
         {!success ? (
           <form onSubmit={handleSubmit} className="space-y-4">
+            {/* Provider */}
+            <div>
+              <label className="text-sm font-medium text-slate-700 mb-1 block">
+                Provider <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={formData.provider}
+                onChange={(e) =>
+                  setFormData({ ...formData, provider: e.target.value as 'twilio' })
+                }
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-slate-900"
+                required
+              >
+                <option value="twilio">Twilio</option>
+              </select>
+              <p className="text-xs text-slate-500 mt-1">
+                Select the phone service provider (currently only Twilio is supported)
+              </p>
+            </div>
+
             {/* Phone Number */}
             <div>
               <label className="text-sm font-medium text-slate-700 mb-1 block">

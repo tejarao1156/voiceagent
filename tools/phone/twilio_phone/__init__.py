@@ -68,7 +68,7 @@ class TwilioPhoneTool:
 
         logger.info("TwilioPhoneTool initialized")
 
-    async def handle_incoming_call(self, call_data: Dict[str, Any]) -> str:
+    async def handle_incoming_call(self, call_data: Dict[str, Any], agent_config_override: Optional[Dict[str, Any]] = None) -> str:
         """
         Handle incoming call webhook from Twilio.
         
@@ -78,6 +78,7 @@ class TwilioPhoneTool:
                 - From: Caller's phone number
                 - To: Called number (phone number being called)
                 - CallStatus: Call status
+            agent_config_override: Optional pre-loaded agent config (used for outbound calls with custom context)
         
         Returns:
             TwiML XML string to instruct Twilio on how to handle the call
@@ -93,20 +94,30 @@ class TwilioPhoneTool:
         logger.info(f"Incoming call: {call_sid} from {from_number} to {to_number}")
 
         try:
-            # Load active agent configuration for this phone number
-            agent_config = await self._load_agent_config(to_number)
+            # Use provided agent config if available (for outbound calls with custom context)
+            # Otherwise, load agent configuration for this phone number
+            if agent_config_override:
+                agent_config = agent_config_override
+                logger.info(f"✅ Using provided agent config (may include custom context)")
+            else:
+                # For inbound calls, identify agent by 'to' number
+                # For outbound calls, this should have been handled in webhook handler
+                agent_phone_number = call_data.get("_agent_phone_number", to_number)
+                agent_config = await self._load_agent_config(agent_phone_number)
             
             if not agent_config:
-                logger.warning(f"❌ No active agent found for phone number {to_number}")
+                logger.warning(f"❌ No active agent found for phone number")
                 # Return error message saying number does not exist
                 response = VoiceResponse()
                 response.say("Sorry, this number does not exist. Please check the number and try again. Goodbye.", voice="alice")
                 response.hangup()
-                logger.info(f"Call {call_sid} rejected: Number {to_number} not found in agents collection")
+                logger.info(f"Call {call_sid} rejected: Number not found in agents collection")
                 return str(response)
             
-            logger.info(f"✅ Using agent config for {to_number}: {agent_config.get('name', 'Unknown')}")
+            logger.info(f"✅ Using agent config: {agent_config.get('name', 'Unknown')}")
             logger.info(f"   STT: {agent_config.get('sttModel')}, TTS: {agent_config.get('ttsModel')} ({agent_config.get('ttsVoice')}), LLM: {agent_config.get('inferenceModel')}")
+            if agent_config.get("systemPrompt") and agent_config_override:
+                logger.info(f"   Custom context: {agent_config.get('systemPrompt')[:100]}...")
             
             # Store agent config for this call
             self.call_agent_configs[call_sid] = agent_config

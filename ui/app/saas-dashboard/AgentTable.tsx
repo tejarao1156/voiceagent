@@ -4,7 +4,6 @@ import { useState } from 'react'
 import { motion } from 'framer-motion'
 import {
   ArrowDownLeft,
-  ArrowUpRight,
   MoreVertical,
   Edit,
   Trash2,
@@ -34,7 +33,7 @@ import { cn } from '@/lib/utils'
 export interface Agent {
   id: string
   name: string
-  direction: 'inbound'
+  direction: 'incoming'
   phoneNumber: string
   lastUpdated: string
   status: 'active' | 'idle' | 'upgraded'
@@ -49,7 +48,6 @@ export interface Agent {
   greeting?: string
   temperature?: number
   maxTokens?: number
-  provider?: 'twilio' | 'plivo' | 'custom'
   twilioAccountSid?: string
   twilioAuthToken?: string
 }
@@ -143,12 +141,8 @@ export function AgentTable({
               </TableCell>
               <TableCell>
                 <div className="flex items-center gap-2">
-                  {agent.direction === 'inbound' ? (
-                    <ArrowDownLeft className="h-4 w-4 text-green-600" />
-                  ) : (
-                    <ArrowUpRight className="h-4 w-4 text-blue-600" />
-                  )}
-                  <span className="text-slate-700 capitalize">{agent.direction}</span>
+                  <ArrowDownLeft className="h-4 w-4 text-green-600" />
+                  <span className="text-slate-700 capitalize">incoming</span>
                 </div>
               </TableCell>
               <TableCell className="text-slate-700 font-mono text-sm">

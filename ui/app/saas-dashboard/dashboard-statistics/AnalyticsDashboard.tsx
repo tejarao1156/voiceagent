@@ -8,33 +8,7 @@ import type { CallStatistics, CallsByDate, CallsByAgent } from './types'
 import { formatDuration, formatDate } from './utils'
 import { fetchCallStatistics, fetchCallsByDate, fetchCallsByAgent } from './api'
 
-// Sample data for demonstration
-const sampleStats: CallStatistics = {
-  total_calls: 247,
-  total_duration_seconds: 18450,
-  average_duration_seconds: 74.7,
-  min_duration_seconds: 12.3,
-  max_duration_seconds: 342.5,
-  active_calls: 3,
-  completed_calls: 244,
-}
-
-const sampleCallsByDate: CallsByDate[] = [
-  { date: '2025-11-04', count: 12, total_duration_seconds: 890 },
-  { date: '2025-11-05', count: 18, total_duration_seconds: 1340 },
-  { date: '2025-11-06', count: 25, total_duration_seconds: 1875 },
-  { date: '2025-11-07', count: 32, total_duration_seconds: 2390 },
-  { date: '2025-11-08', count: 28, total_duration_seconds: 2090 },
-  { date: '2025-11-09', count: 35, total_duration_seconds: 2615 },
-  { date: '2025-11-10', count: 42, total_duration_seconds: 3138 },
-  { date: '2025-11-11', count: 55, total_duration_seconds: 4112 },
-]
-
-const sampleCallsByAgent: CallsByAgent[] = [
-  { agent_id: '+1 555 202 2030', call_count: 142, total_duration_seconds: 10615, average_duration_seconds: 74.8 },
-  { agent_id: '+1 555 204 0090', call_count: 89, total_duration_seconds: 6645, average_duration_seconds: 74.7 },
-  { agent_id: '+1 555 301 4567', call_count: 16, total_duration_seconds: 1190, average_duration_seconds: 74.4 },
-]
+// Sample data removed - all data now comes from MongoDB
 
 export function AnalyticsDashboard() {
   const [stats, setStats] = useState<CallStatistics | null>(null)
@@ -42,7 +16,6 @@ export function AnalyticsDashboard() {
   const [callsByAgent, setCallsByAgent] = useState<CallsByAgent[]>([])
   const [loading, setLoading] = useState(false)
   const [selectedDays, setSelectedDays] = useState(7)
-  const [useSampleData, setUseSampleData] = useState(false)
 
   useEffect(() => {
     fetchAnalytics()
@@ -63,14 +36,12 @@ export function AnalyticsDashboard() {
         Promise.race([fetchCallsByAgent(), timeoutPromise]),
       ])
 
-      // Process stats response - Always use real data, fallback to empty if no data
+      // Process stats response - Always use real data from MongoDB, fallback to empty if no data
       if (statsResult.status === 'fulfilled' && !(statsResult.value instanceof Error)) {
         const realStats = statsResult.value as CallStatistics
         setStats(realStats)
-        setUseSampleData(realStats.total_calls === 0)
       } else {
         setStats({ total_calls: 0, total_duration_seconds: 0, average_duration_seconds: 0, min_duration_seconds: 0, max_duration_seconds: 0, active_calls: 0, completed_calls: 0 })
-        setUseSampleData(false)
       }
 
       // Process date response - Always use real data
@@ -90,11 +61,10 @@ export function AnalyticsDashboard() {
       }
     } catch (error) {
       console.error('Error fetching analytics:', error)
-      // Use empty data on error, not sample data
+      // Use empty data on error - all data comes from MongoDB
       setStats({ total_calls: 0, total_duration_seconds: 0, average_duration_seconds: 0, min_duration_seconds: 0, max_duration_seconds: 0, active_calls: 0, completed_calls: 0 })
       setCallsByDate([])
       setCallsByAgent([])
-      setUseSampleData(false)
     } finally {
       setLoading(false)
     }
@@ -115,8 +85,8 @@ export function AnalyticsDashboard() {
 
   return (
     <div className="space-y-6">
-      {/* Data Status Indicator */}
-      {useSampleData && displayStats.total_calls === 0 && (
+      {/* Data Status Indicator - Show when no data from MongoDB */}
+      {displayStats.total_calls === 0 && !loading && (
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Activity className="h-4 w-4 text-blue-600" />

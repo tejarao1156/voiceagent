@@ -31,9 +31,11 @@ def initialize_mongodb():
             return False
         
         # Create MongoDB client
+        # For mongodb+srv:// URLs, TLS is automatically enabled by MongoDB
+        # Increase timeout for better reliability
         _mongo_client = AsyncIOMotorClient(
             MONGODB_URL,
-            serverSelectionTimeoutMS=5000  # 5 second timeout
+            serverSelectionTimeoutMS=10000  # 10 second timeout (increased from 5s)
         )
         
         # Get database

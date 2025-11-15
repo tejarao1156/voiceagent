@@ -933,47 +933,93 @@ async def twilio_incoming_call(request: Request):
         logger.info(f"   To: {to_number}")
         logger.info(f"   Processing mode: {TWILIO_PROCESSING_MODE}")
 
-        # FIRST: Check if phone number is registered in MongoDB (REQUIRED)
-        if to_number:
-            from databases.mongodb_phone_store import MongoDBPhoneStore
-            from databases.mongodb_db import is_mongodb_available
-            
-            if is_mongodb_available():
-                phone_store = MongoDBPhoneStore()
-                logger.info(f"🔍 Looking up registered phone for: '{to_number}'")
-                registered_phone = await phone_store.get_phone_by_number(to_number)
+        # DETECT CALL TYPE: Inbound vs Outbound
+        # Inbound: 'to' number is registered (someone calling our number)
+        # Outbound: 'from' number is registered (we're calling someone)
+        from databases.mongodb_phone_store import MongoDBPhoneStore, normalize_phone_number
+        from databases.mongodb_db import is_mongodb_available
+        
+        is_outbound_call = False
+        agent_phone_number = None  # Phone number to use for agent lookup
+        custom_context = None  # Custom context for outbound calls
+        
+        if not is_mongodb_available():
+            logger.error("MongoDB is not available - cannot verify phone registration")
+            error_response = TwilioVoiceResponse()
+            error_response.say("Sorry, the system is temporarily unavailable. Please try again later. Goodbye.", voice="alice")
+            error_response.hangup()
+            logger.info(f"Call {call_sid} rejected: MongoDB not available")
+            return HTMLResponse(content=str(error_response))
+        
+        phone_store = MongoDBPhoneStore()
+        
+        # Check if 'from' number is registered (outbound call)
+        if from_number:
+            normalized_from = normalize_phone_number(from_number)
+            registered_from = await phone_store.get_phone_by_number(normalized_from)
+            if registered_from and registered_from.get("isActive") != False and registered_from.get("isDeleted") != True:
+                is_outbound_call = True
+                agent_phone_number = normalized_from
+                logger.info(f"📤 Detected OUTBOUND call: {normalized_from} -> {to_number}")
                 
-                if not registered_phone or registered_phone.get("isActive") == False:
-                    logger.warning(f"❌ Phone number '{to_number}' is NOT registered in MongoDB")
-                    logger.warning(f"   Please ensure the phone number is registered through the app UI")
-                    error_response = TwilioVoiceResponse()
-                    error_response.say("Sorry, this number is not registered. Please register the phone number through the app first. Goodbye.", voice="alice")
-                    error_response.hangup()
-                    logger.info(f"Call {call_sid} rejected: Phone number {to_number} not registered in MongoDB")
-                    return HTMLResponse(content=str(error_response))
-                else:
-                    logger.info(f"✅ Phone number '{to_number}' is registered in MongoDB")
-                    logger.info(f"   Registered phone ID: {registered_phone.get('id')}")
-                    logger.info(f"   Stored as: {registered_phone.get('phoneNumber')}")
+                # Check for custom context stored for this outbound call
+                if hasattr(twilio_phone_tool, 'outbound_call_contexts'):
+                    context_key = f"{normalized_from}_{normalize_phone_number(to_number)}"
+                    stored_context = twilio_phone_tool.outbound_call_contexts.get(context_key)
+                    if stored_context:
+                        custom_context = stored_context.get("context")
+                        logger.info(f"✅ Found custom context for outbound call: {context_key}")
+                        # Clean up after use (will be used when session is created)
+                        # Don't delete yet - we'll use it when creating the session
+        
+        # If not outbound, check if 'to' number is registered (inbound call)
+        if not is_outbound_call and to_number:
+            normalized_to = normalize_phone_number(to_number)
+            registered_to = await phone_store.get_phone_by_number(normalized_to)
+            if registered_to and registered_to.get("isActive") != False and registered_to.get("isDeleted") != True:
+                agent_phone_number = normalized_to
+                logger.info(f"📥 Detected INBOUND call: {from_number} -> {normalized_to}")
             else:
-                logger.error("MongoDB is not available - cannot verify phone registration")
+                logger.warning(f"❌ Phone number '{to_number}' is NOT registered in MongoDB")
+                logger.warning(f"   Please ensure the phone number is registered through the app UI")
                 error_response = TwilioVoiceResponse()
-                error_response.say("Sorry, the system is temporarily unavailable. Please try again later. Goodbye.", voice="alice")
+                error_response.say("Sorry, this number is not registered. Please register the phone number through the app first. Goodbye.", voice="alice")
                 error_response.hangup()
-                logger.info(f"Call {call_sid} rejected: MongoDB not available")
+                logger.info(f"Call {call_sid} rejected: Phone number {to_number} not registered in MongoDB")
                 return HTMLResponse(content=str(error_response))
-
+        
+        # Validate we have an agent phone number
+        if not agent_phone_number:
+            logger.error(f"❌ Cannot determine agent phone number for call {call_sid}")
+            error_response = TwilioVoiceResponse()
+            error_response.say("Sorry, the system cannot process this call. Please check your phone number registration. Goodbye.", voice="alice")
+            error_response.hangup()
+            return HTMLResponse(content=str(error_response))
+        
         # SECOND: Check if agent exists for this phone number (for both stream and batch modes)
         agent_config = None
-        if to_number:
-            agent_config = await twilio_phone_tool._load_agent_config(to_number)
+        if agent_phone_number:
+            agent_config = await twilio_phone_tool._load_agent_config(agent_phone_number)
             if not agent_config:
-                logger.warning(f"❌ No active agent found for phone number {to_number}")
+                logger.warning(f"❌ No active agent found for phone number {agent_phone_number}")
                 error_response = TwilioVoiceResponse()
                 error_response.say("Sorry, no agent is configured for this number. Please create an agent for this phone number. Goodbye.", voice="alice")
                 error_response.hangup()
-                logger.info(f"Call {call_sid} rejected: Number {to_number} not found in agents collection")
+                logger.info(f"Call {call_sid} rejected: Number {agent_phone_number} not found in agents collection")
                 return HTMLResponse(content=str(error_response))
+            
+            # Override system prompt with custom context if provided (for outbound calls)
+            if custom_context and is_outbound_call:
+                logger.info(f"🔄 Using custom context instead of agent's default system prompt")
+                # Store custom context in agent_config temporarily
+                agent_config = agent_config.copy()  # Don't modify original
+                agent_config["systemPrompt"] = custom_context
+                # Clean up stored context after use
+                if hasattr(twilio_phone_tool, 'outbound_call_contexts'):
+                    context_key = f"{normalize_phone_number(from_number)}_{normalize_phone_number(to_number)}"
+                    if context_key in twilio_phone_tool.outbound_call_contexts:
+                        del twilio_phone_tool.outbound_call_contexts[context_key]
+                        logger.info(f"🧹 Cleaned up stored context for {context_key}")
 
         # Create call record in MongoDB
         try:
@@ -1012,16 +1058,23 @@ async def twilio_incoming_call(request: Request):
             logger.info(f"🚀 Mode: STREAM. Initiating media stream to: {stream_url}")
             stream = connect.stream(url=stream_url)
             
-            # Pass call metadata to the stream handler (To number is used to identify agent)
+            # Pass call metadata to the stream handler
+            # Include agent_phone_number to help identify agent in stream handler
             stream.parameter(name="From", value=call_data.get("From"))
             stream.parameter(name="To", value=call_data.get("To"))
+            stream.parameter(name="AgentPhoneNumber", value=agent_phone_number)
+            stream.parameter(name="IsOutbound", value="true" if is_outbound_call else "false")
 
             response.pause(length=120) # Keep call active while stream runs
         
         else:
             # --- Batch (Recording) Logic ---
             logger.info(f"📞 Mode: BATCH. Using <Record> for processing.")
-            twiml_str = await twilio_phone_tool.handle_incoming_call(call_data)
+            # Pass custom context via call_data for batch mode
+            if custom_context and is_outbound_call:
+                call_data["_custom_context"] = custom_context
+                call_data["_agent_phone_number"] = agent_phone_number
+            twiml_str = await twilio_phone_tool.handle_incoming_call(call_data, agent_config_override=agent_config)
             return HTMLResponse(content=twiml_str)
 
         return HTMLResponse(content=str(response))
@@ -1063,17 +1116,24 @@ async def twilio_call_status(request: Request):
         
         call_sid = status_data.get("CallSid")
         status = status_data.get("CallStatus", "unknown")
+        from_number = status_data.get("From", "")
+        to_number = status_data.get("To", "")
         
         logger.info(f"📞 Call status update: {call_sid} -> {status}")
+        logger.info(f"   From: {from_number}, To: {to_number}")
         
         # Update call status in MongoDB when call ends
         if status in ["completed", "failed", "busy", "no-answer", "canceled"]:
             try:
                 from databases.mongodb_call_store import MongoDBCallStore
                 call_store = MongoDBCallStore()
-                await call_store.end_call(call_sid)
+                result = await call_store.end_call(call_sid)
+                if result:
+                    logger.info(f"✅ Successfully updated call {call_sid} status to 'completed' in MongoDB")
+                else:
+                    logger.warning(f"⚠️ Failed to update call {call_sid} status in MongoDB (call may not exist in DB)")
             except Exception as e:
-                logger.warning(f"Could not update call status: {e}")
+                logger.error(f"❌ Error updating call status in MongoDB: {e}", exc_info=True)
         
         # Clean up stream handlers if call is ending
         if status in ["completed", "failed", "busy", "no-answer", "canceled"]:
@@ -1831,9 +1891,8 @@ async def create_agent(request: Request):
     
     **Request Body Fields:**
     - `name` (string, required): Agent name
-    - `direction` (string, required): "inbound" 
+    - `direction` (string, required): "incoming" (only incoming agents are supported) 
     - `phoneNumber` (string, required): Phone number (e.g., "+1 555 123 4567")
-    - `provider` (string, required): "twilio" or "custom"
     - `userId` (string, optional): User/tenant ID (for multi-tenant support)
     - `sttModel` (string): Speech-to-text model (default: "whisper-1")
     - `inferenceModel` (string): LLM model (default: "gpt-4o-mini")
@@ -1959,27 +2018,39 @@ async def create_agent(request: Request):
         }
     }
 )
-async def list_agents(active_only: Optional[bool] = Query(False, description="Only return active agents (active=true)")):
+async def list_agents(
+    active_only: Optional[bool] = Query(False, description="Only return active agents (active=true)"),
+    include_deleted: Optional[bool] = Query(False, description="Include soft-deleted agents (isDeleted=true)")
+):
     """
     List all agents from MongoDB.
     
     **Query Parameters:**
     - `active_only` (boolean, optional): If true, only returns agents where active=true
+    - `include_deleted` (boolean, optional): If true, includes soft-deleted agents (isDeleted=true)
     
     **Returns:**
     - List of agent objects with all configuration fields
     """
     try:
         from databases.mongodb_agent_store import MongoDBAgentStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        # Check MongoDB availability first
+        if not is_mongodb_available():
+            logger.warning("MongoDB is not available - returning empty agents list")
+            return {"success": True, "agents": [], "count": 0, "mongodb_available": False}
         
         agent_store = MongoDBAgentStore()
-        agents = await agent_store.list_agents(active_only=active_only)
+        agents = await agent_store.list_agents(active_only=active_only, include_deleted=include_deleted)
         
-        return {"success": True, "agents": agents, "count": len(agents)}
+        logger.info(f"✅ Returning {len(agents)} agent(s) from MongoDB (include_deleted={include_deleted})")
+        return {"success": True, "agents": agents, "count": len(agents), "mongodb_available": True}
         
     except Exception as e:
-        logger.error(f"Error listing agents: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error listing agents: {e}", exc_info=True)
+        # Return empty list instead of raising error - UI should show empty state
+        return {"success": True, "agents": [], "count": 0, "error": str(e), "mongodb_available": False}
 
 @app.get(
     "/api/voices",
@@ -2075,8 +2146,10 @@ async def register_phone(request: Request):
     
     **Request Body Fields:**
     - `phoneNumber` (string, required): Phone number (e.g., "+1 555 123 4567")
+    - `provider` (string, required): Phone service provider (e.g., "twilio", "plivo", "vonage", "custom")
     - `twilioAccountSid` (string, required): Twilio Account SID
     - `twilioAuthToken` (string, required): Twilio Auth Token
+    - `twilioAccountName` (string, optional): Descriptive name for when to use this account (e.g., "Twilio 0", "Twilio 1", "Production")
     - `userId` (string, optional): User/tenant ID (for multi-tenant support)
     
     **Returns:**
@@ -2096,11 +2169,14 @@ async def register_phone(request: Request):
         
         # Validate required fields
         phone_number = phone_data.get("phoneNumber")
+        provider = phone_data.get("provider", "twilio")  # Default to twilio if not provided
         twilio_account_sid = phone_data.get("twilioAccountSid")
         twilio_auth_token = phone_data.get("twilioAuthToken")
         
         if not phone_number:
             raise HTTPException(status_code=400, detail="Phone number is required")
+        if not provider:
+            raise HTTPException(status_code=400, detail="Provider is required")
         if not twilio_account_sid:
             raise HTTPException(status_code=400, detail="Twilio Account SID is required")
         if not twilio_auth_token:
@@ -2116,8 +2192,10 @@ async def register_phone(request: Request):
         # Prepare phone data
         registration_data = {
             "phoneNumber": phone_number,
+            "provider": provider,
             "twilioAccountSid": twilio_account_sid,
             "twilioAuthToken": twilio_auth_token,
+            "twilioAccountName": phone_data.get("twilioAccountName", "Twilio 0"),  # Default to "Twilio 0"
             "webhookUrl": incoming_url,
             "statusCallbackUrl": status_url,
             "userId": phone_data.get("userId")
@@ -2565,6 +2643,15 @@ async def hangup_twilio_call(call_sid: str, reason: str = Query("Call ended by s
             handler = active_stream_handlers[call_sid]
             success = await handler.hangup_call(reason=reason)
             if success:
+                # Update call status in MongoDB (handler may have done this, but ensure it's done)
+                try:
+                    from databases.mongodb_call_store import MongoDBCallStore
+                    call_store = MongoDBCallStore()
+                    await call_store.end_call(call_sid)
+                    logger.info(f"✅ Updated call {call_sid} status to 'completed' in MongoDB after hangup")
+                except Exception as e:
+                    logger.warning(f"Could not update call status in MongoDB: {e}")
+                
                 return {
                     "status": "success",
                     "message": f"Call {call_sid} hung up successfully",
@@ -2584,6 +2671,15 @@ async def hangup_twilio_call(call_sid: str, reason: str = Query("Call ended by s
                 # Update call status to completed (this will hang up the call)
                 call = client.calls(call_sid).update(status="completed")
                 logger.info(f"✅ Call {call_sid} hung up via REST API: {reason}")
+                
+                # Update call status in MongoDB immediately
+                try:
+                    from databases.mongodb_call_store import MongoDBCallStore
+                    call_store = MongoDBCallStore()
+                    await call_store.end_call(call_sid)
+                    logger.info(f"✅ Updated call {call_sid} status to 'completed' in MongoDB")
+                except Exception as e:
+                    logger.warning(f"Could not update call status in MongoDB: {e}")
                 
                 # Clean up from batch mode if exists
                 if call_sid in twilio_phone_tool.active_calls:
@@ -2613,6 +2709,249 @@ async def hangup_twilio_call(call_sid: str, reason: str = Query("Call ended by s
     except Exception as e:
         logger.error(f"Error hanging up call {call_sid}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to hang up call: {str(e)}")
+
+@app.post(
+    "/api/calls/outbound",
+    summary="Make Outbound Call",
+    description="Initiate an outbound phone call with optional custom context. Validates that the 'from' phone number is registered and active.",
+    tags=["Twilio Phone Integration"],
+    responses={
+        200: {
+            "description": "Call initiated successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "call_sid": "CA1234567890abcdef",
+                        "message": "Call initiated successfully",
+                        "from": "+15551234567",
+                        "to": "+15559876543"
+                    }
+                }
+            }
+        },
+        400: {
+            "description": "Validation error",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Phone number +15551234567 is not registered or inactive"}
+                }
+            }
+        },
+        500: {
+            "description": "Failed to initiate call",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Failed to initiate call: Invalid phone number"}
+                }
+            }
+        }
+    }
+)
+async def make_outbound_call(request: Request):
+    """
+    Make an outbound phone call.
+    
+    **Request Body:**
+    ```json
+    {
+        "from": "+15551234567",  // Your registered Twilio number (required)
+        "to": "+15559876543",    // Destination number (required)
+        "context": "You are calling to follow up on a customer inquiry about product availability."  // Optional custom context
+    }
+    ```
+    
+    **Validation:**
+    - The 'from' phone number MUST be registered and active in MongoDB
+    - The 'to' phone number must be in valid E.164 format
+    - Custom context is optional - if not provided, uses agent's default system prompt
+    
+    **Flow:**
+    1. Validates 'from' number is registered and active
+    2. Gets Twilio credentials for the 'from' number
+    3. Initiates call via Twilio REST API
+    4. When call connects, webhook uses 'from' number to identify agent
+    5. Custom context (if provided) is used instead of agent's default prompt
+    """
+    try:
+        from databases.mongodb_phone_store import MongoDBPhoneStore, normalize_phone_number
+        from databases.mongodb_db import is_mongodb_available
+        from utils.twilio_credentials import get_twilio_credentials_for_phone
+        from config import TWILIO_WEBHOOK_BASE_URL
+        from datetime import datetime
+        import json
+        
+        # Parse request body
+        try:
+            body = await request.json()
+        except:
+            raise HTTPException(status_code=400, detail="Invalid JSON in request body")
+        
+        from_number = body.get("from")
+        to_number = body.get("to")
+        custom_context = body.get("context")  # Optional custom context
+        
+        # Validate required fields
+        if not from_number:
+            raise HTTPException(status_code=400, detail="'from' phone number is required")
+        if not to_number:
+            raise HTTPException(status_code=400, detail="'to' phone number is required")
+        
+        # Normalize phone numbers
+        normalized_from = normalize_phone_number(from_number)
+        normalized_to = normalize_phone_number(to_number)
+        
+        logger.info(f"📞 Initiating outbound call: {normalized_from} -> {normalized_to}")
+        if custom_context:
+            logger.info(f"   Custom context provided: {custom_context[:100]}...")
+        
+        # VALIDATION: Check if 'from' phone number is registered and active
+        if not is_mongodb_available():
+            raise HTTPException(
+                status_code=503,
+                detail="MongoDB is not available. Cannot validate phone registration."
+            )
+        
+        phone_store = MongoDBPhoneStore()
+        registered_phone = await phone_store.get_phone_by_number(normalized_from)
+        
+        if not registered_phone:
+            logger.warning(f"❌ Phone number '{normalized_from}' is NOT registered in MongoDB")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Phone number {normalized_from} is not registered. Please register the phone number through the app UI first."
+            )
+        
+        if registered_phone.get("isActive") == False:
+            logger.warning(f"❌ Phone number '{normalized_from}' is registered but INACTIVE")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Phone number {normalized_from} is registered but inactive. Please activate it first."
+            )
+        
+        if registered_phone.get("isDeleted") == True:
+            logger.warning(f"❌ Phone number '{normalized_from}' is DELETED")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Phone number {normalized_from} has been deleted. Please register it again."
+            )
+        
+        logger.info(f"✅ Phone number '{normalized_from}' is registered and active")
+        logger.info(f"   Registered phone ID: {registered_phone.get('id')}")
+        
+        # Get Twilio credentials for the 'from' number
+        twilio_creds = await get_twilio_credentials_for_phone(normalized_from)
+        
+        if not twilio_creds or not twilio_creds.get("account_sid") or not twilio_creds.get("auth_token"):
+            logger.error(f"❌ Twilio credentials not found for phone {normalized_from}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Twilio credentials not found for phone number {normalized_from}. Please ensure credentials are properly registered."
+            )
+        
+        # Store custom context temporarily if provided (will be used when webhook arrives)
+        # We'll store it in a temporary dict keyed by a combination we can identify later
+        # For now, we'll pass it via Twilio StatusCallback parameters
+        from twilio.rest import Client
+        client = Client(twilio_creds["account_sid"], twilio_creds["auth_token"])
+        
+        # Prepare webhook URLs
+        webhook_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/incoming"
+        status_callback_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/status"
+        
+        # If custom context is provided, we need to store it temporarily
+        # We'll use a simple in-memory store keyed by from+to combination
+        # When the webhook arrives, we can check if this is an outbound call and use the context
+        if custom_context:
+            # Store custom context temporarily (will be cleaned up after call starts)
+            # Use a simple dict: key = f"{normalized_from}_{normalized_to}", value = context
+            if not hasattr(twilio_phone_tool, 'outbound_call_contexts'):
+                twilio_phone_tool.outbound_call_contexts = {}
+            
+            context_key = f"{normalized_from}_{normalized_to}"
+            twilio_phone_tool.outbound_call_contexts[context_key] = {
+                "context": custom_context,
+                "from": normalized_from,
+                "to": normalized_to,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            logger.info(f"💾 Stored custom context for outbound call: {context_key}")
+        
+        # Initiate the call via Twilio REST API
+        try:
+            call = client.calls.create(
+                to=normalized_to,
+                from_=normalized_from,
+                url=webhook_url,
+                status_callback=status_callback_url,
+                status_callback_event=['initiated', 'ringing', 'answered', 'completed'],
+                method='POST'
+            )
+            
+            call_sid = call.sid
+            logger.info(f"✅ Outbound call initiated successfully")
+            logger.info(f"   Call SID: {call_sid}")
+            logger.info(f"   From: {normalized_from}")
+            logger.info(f"   To: {normalized_to}")
+            logger.info(f"   Status: {call.status}")
+            
+            # Create call record in MongoDB
+            try:
+                from databases.mongodb_call_store import MongoDBCallStore
+                call_store = MongoDBCallStore()
+                await call_store.create_call(
+                    call_sid=call_sid,
+                    from_number=normalized_from,
+                    to_number=normalized_to,
+                    agent_id=normalized_from  # Use 'from' number as agent_id for outbound calls
+                )
+                logger.info(f"✅ Created call record in MongoDB for {call_sid}")
+            except Exception as e:
+                logger.warning(f"Could not create call record: {e}")
+            
+            return {
+                "success": True,
+                "call_sid": call_sid,
+                "message": "Call initiated successfully",
+                "from": normalized_from,
+                "to": normalized_to,
+                "status": call.status,
+                "custom_context_provided": bool(custom_context)
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error initiating call via Twilio API: {e}", exc_info=True)
+            # Clean up stored context if call failed
+            if custom_context and hasattr(twilio_phone_tool, 'outbound_call_contexts'):
+                context_key = f"{normalized_from}_{normalized_to}"
+                if context_key in twilio_phone_tool.outbound_call_contexts:
+                    del twilio_phone_tool.outbound_call_contexts[context_key]
+            
+            error_msg = str(e)
+            if "Invalid" in error_msg or "not a valid" in error_msg.lower():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid phone number format or number: {error_msg}"
+                )
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to initiate call via Twilio: {error_msg}"
+                )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error making outbound call: {e}", exc_info=True)
+        error_detail = str(e)
+        # Provide more specific error messages
+        if "connection" in error_detail.lower() or "timeout" in error_detail.lower():
+            error_detail = f"Connection error: {error_detail}. Please check your network connection and Twilio credentials."
+        elif "authentication" in error_detail.lower() or "unauthorized" in error_detail.lower():
+            error_detail = f"Authentication error: {error_detail}. Please verify your Twilio credentials."
+        elif "not found" in error_detail.lower() or "404" in error_detail:
+            error_detail = f"Resource not found: {error_detail}. Please verify the phone numbers are correct."
+        raise HTTPException(status_code=500, detail=f"Failed to make outbound call: {error_detail}")
 
 # ============================================================================
 # ERROR HANDLERS
