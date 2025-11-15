@@ -91,11 +91,24 @@ class TwilioStreamHandler:
                     # If there's waiting interrupt speech, process it now
                     if was_interrupted and self.is_speaking and self.speech_buffer:
                         logger.info("🔄 AI stopped, processing waiting interrupt speech...")
-                        # Increment query sequence and cancel any existing speech processing task
-                        self.query_sequence += 1
+                        
+                        # CRITICAL: Wait for previous task to complete or be cancelled before starting new one
                         if self.speech_processing_task and not self.speech_processing_task.done():
-                            logger.info("🛑 Cancelling previous speech processing task (interrupt received)")
+                            logger.info("⏳ Waiting for previous query to finish before processing interrupt...")
+                            # Cancel the previous task
                             self.speech_processing_task.cancel()
+                            try:
+                                # Wait a short time for the task to handle cancellation
+                                await asyncio.wait_for(self.speech_processing_task, timeout=0.5)
+                            except (asyncio.CancelledError, asyncio.TimeoutError):
+                                # Task was cancelled or timed out - that's fine, we'll start new one
+                                logger.info("✅ Previous query cancelled, processing interrupt")
+                            except Exception as e:
+                                logger.warning(f"Error waiting for previous task: {e}")
+                        
+                        # Increment query sequence AFTER ensuring previous task is cancelled
+                        self.query_sequence += 1
+                        logger.info(f"🆕 Starting Interrupt Query #{self.query_sequence}")
                         self.speech_processing_task = asyncio.create_task(self._process_waiting_interrupt())
 
     async def _handle_start_event(self, start_data: Dict):
@@ -277,14 +290,13 @@ class TwilioStreamHandler:
                     # Validated interrupt - user is really speaking!
                     logger.info(f"🚨 INTERRUPT VALIDATED: {self.interrupt_speech_frames} frames of sustained speech!")
                     self.interrupt_detected = True
-                    # Stop TTS streaming immediately
+                    # CRITICAL: Stop TTS streaming immediately and forcefully
                     if self.tts_streaming_task and not self.tts_streaming_task.done():
                         self.tts_streaming_task.cancel()
-                        logger.info("🛑 Cancelled TTS streaming task due to interrupt.")
-                    
-                    # IMPORTANT: Keep ai_is_speaking = True for now to block audio processing
-                    # The TTS function will set it to False when it actually stops
-                    # This ensures we don't process the interrupt until TTS has fully stopped
+                        logger.info("🛑 Cancelled TTS streaming task due to interrupt - stopping story immediately.")
+                    # Set ai_is_speaking to False immediately so interrupt can be processed faster
+                    # This allows the interrupt speech to be captured and processed right away
+                    self.ai_is_speaking = False
                     self.ai_speech_start_time = None
                     # Clear any existing speech buffer to start fresh
                     self.speech_buffer = bytearray()
@@ -338,17 +350,35 @@ class TwilioStreamHandler:
                 # Reset interrupt flag after processing
                 was_interrupt = self.interrupt_detected
                 self.interrupt_detected = False
-                # Increment query sequence and cancel any existing speech processing task
-                self.query_sequence += 1
+                
+                # CRITICAL: Wait for previous task to complete or be cancelled before starting new one
+                # This ensures queries are processed in sequence, not out of order
                 if self.speech_processing_task and not self.speech_processing_task.done():
-                    logger.info("🛑 Cancelling previous speech processing task (new query received)")
+                    logger.info("⏳ Waiting for previous query to finish before starting new one...")
+                    # Cancel the previous task
                     self.speech_processing_task.cancel()
+                    try:
+                        # Wait a short time for the task to handle cancellation
+                        await asyncio.wait_for(self.speech_processing_task, timeout=0.5)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        # Task was cancelled or timed out - that's fine, we'll start new one
+                        logger.info("✅ Previous query cancelled, starting new query")
+                    except Exception as e:
+                        logger.warning(f"Error waiting for previous task: {e}")
+                
+                # Increment query sequence AFTER ensuring previous task is cancelled
+                self.query_sequence += 1
+                logger.info(f"🆕 Starting Query #{self.query_sequence}")
                 self.speech_processing_task = asyncio.create_task(self._process_user_speech(was_interrupt=was_interrupt))
 
     async def _process_waiting_interrupt(self):
-        """Process interrupt speech that was captured while waiting for TTS to stop."""
-        # Wait a tiny bit to ensure TTS has fully stopped
-        await asyncio.sleep(0.1)
+        """Process interrupt speech that was captured while waiting for TTS to stop.
+        This is called when user interrupts the AI (e.g., stops a story to ask a new question).
+        The interrupt speech contains the NEW question that should be answered, not the old response."""
+        # CRITICAL: Don't wait - process immediately since TTS is already stopped
+        # The interrupt was validated and TTS was cancelled, so we can process right away
+        # This ensures the new question is answered quickly, not the old story
+        logger.info("🔄 Processing interrupt - user asked a NEW question, ignoring previous response.")
         
         if not self.speech_buffer or self.speech_frames_count < 5:
             logger.info("⏭️ Interrupt speech too short, ignoring.")
@@ -371,6 +401,12 @@ class TwilioStreamHandler:
             # Capture the current query sequence at the start
             current_query_id = self.query_sequence
             
+            # CRITICAL: Check if this task was cancelled before we acquired the lock
+            # If query_sequence has changed, this query is outdated and should be skipped
+            if current_query_id != self.query_sequence:
+                logger.info(f"⏭️ Query #{current_query_id} is outdated (current: #{self.query_sequence}), skipping immediately")
+                return
+            
             # Get audio buffer snapshot (might be empty if already processed)
             if not self.speech_buffer or self.speech_frames_count < 5: # Ignore very short utterances
                 if self.is_speaking: logger.info("Ignoring short utterance.")
@@ -383,8 +419,14 @@ class TwilioStreamHandler:
             
             if was_interrupt:
                 logger.info(f"🔄 Processing INTERRUPT (Query #{current_query_id}): {len(audio_to_process)} bytes captured")
-                logger.info(f"📚 Current conversation history: {len(self.session_data.get('conversation_history', []))} interactions")
-                logger.info("🛑 AI stopped. 👂 Listening to interrupt...")
+                conversation_history = self.session_data.get("conversation_history", [])
+                logger.info(f"📚 Current conversation history: {len(conversation_history)} interactions")
+                if conversation_history:
+                    logger.info(f"   ✅ Interrupt question will use FULL conversation history for context")
+                    logger.info(f"   Last interaction: User: '{conversation_history[-1].get('user_input', '')[:50]}...' | AI: '{conversation_history[-1].get('agent_response', '')[:50]}...'")
+                else:
+                    logger.info("   ⚠️ No previous interactions - this is the first question")
+                logger.info("🛑 AI stopped answering previous question. 👂 Processing NEW interrupt question...")
             else:
                 logger.info(f"Processing Query #{current_query_id}: {len(audio_to_process)} bytes of speech.")
                 logger.info(f"📚 Current conversation history: {len(self.session_data.get('conversation_history', []))} interactions")
@@ -401,7 +443,8 @@ class TwilioStreamHandler:
                     logger.info("STT result is empty, skipping AI response.")
                     return
                 
-                # Verify this is still the current query (lock should prevent this, but double-check)
+                # CRITICAL: Verify this is still the current query before proceeding
+                # If query_sequence changed, this query is outdated and should be skipped
                 if current_query_id != self.query_sequence:
                     logger.info(f"⏭️ Skipping outdated query #{current_query_id} after STT (current: #{self.query_sequence})")
                     return
@@ -425,10 +468,26 @@ class TwilioStreamHandler:
                 
                 # Get the latest session_data right before generating response
                 # This ensures we have the most up-to-date conversation history
+                # CRITICAL: Log conversation history to verify it's being maintained
+                conversation_history = self.session_data.get("conversation_history", [])
+                logger.info(f"📚 Conversation history before Query #{current_query_id}: {len(conversation_history)} interactions")
+                if conversation_history:
+                    logger.info(f"   Last interaction: User: '{conversation_history[-1].get('user_input', '')[:50]}...' | AI: '{conversation_history[-1].get('agent_response', '')[:50]}...'")
+                else:
+                    logger.info("   No previous interactions (this is the first query)")
+                
                 # Use agent config for LLM if available
                 llm_model = self.agent_config.get("inferenceModel") if self.agent_config else None
                 temperature = self.agent_config.get("temperature") if self.agent_config else None
                 max_tokens = self.agent_config.get("maxTokens") if self.agent_config else None
+                
+                # CRITICAL: Pass the current session_data which contains the full conversation history
+                # The conversation_tool.generate_response will use this history to provide context
+                # For interrupts, this ensures the AI answers the NEW question using conversation history
+                if was_interrupt:
+                    logger.info(f"🔄 Generating response for INTERRUPT question using conversation history...")
+                    logger.info(f"   Question: '{user_text[:100]}...'")
+                    logger.info(f"   History: {len(conversation_history)} previous interactions will be used for context")
                 
                 ai_response = await self.conversation_tool.generate_response(
                     self.session_data, user_text, None,
@@ -438,20 +497,33 @@ class TwilioStreamHandler:
                 )
                 response_text = ai_response.get("response", "I'm sorry, I'm having trouble with that.")
                 
-                # Verify this is still the current query before updating session
+                # CRITICAL: Verify this is still the current query before updating session
+                # If query_sequence changed, this query is outdated and should be skipped
                 if current_query_id != self.query_sequence:
                     logger.info(f"⏭️ Skipping outdated query #{current_query_id} after AI response (current: #{self.query_sequence})")
                     return
                 
                 # CRITICAL: Update session_data with the latest conversation state
-                # This ensures interrupts have access to the full conversation history
+                # This ensures the next query has access to the full conversation history including this interaction
                 updated_session_data = ai_response.get("session_data")
                 if updated_session_data:
+                    # Verify the conversation history was updated
+                    old_history_count = len(self.session_data.get("conversation_history", []))
                     self.session_data = updated_session_data
-                    logger.info(f"✅ Updated session_data (Query #{current_query_id}): {len(self.session_data.get('conversation_history', []))} interactions")
+                    new_history_count = len(self.session_data.get("conversation_history", []))
+                    logger.info(f"✅ Updated session_data (Query #{current_query_id}): {old_history_count} -> {new_history_count} interactions")
+                    
+                    # Log the updated conversation history to verify it includes this interaction
+                    if new_history_count > old_history_count:
+                        logger.info(f"   ✅ New interaction added to history: User: '{user_text[:50]}...' | AI: '{response_text[:50]}...'")
+                    else:
+                        logger.warning(f"   ⚠️ Conversation history count did not increase (expected {old_history_count + 1}, got {new_history_count})")
+                else:
+                    logger.error(f"❌ No updated session_data returned from AI response (Query #{current_query_id})")
                 
                 if was_interrupt:
-                    logger.info(f"💬 AI responding to interrupt (Query #{current_query_id}): '{response_text[:70]}...'")
+                    logger.info(f"💬 AI responding to INTERRUPT question (Query #{current_query_id}): '{response_text[:70]}...'")
+                    logger.info(f"   ✅ Response generated using conversation history - answers NEW question, not previous story")
                 else:
                     logger.info(f"AI response (Query #{current_query_id}): '{response_text[:70]}...'")
                 
@@ -467,7 +539,8 @@ class TwilioStreamHandler:
                 except Exception as e:
                     logger.warning(f"Could not store AI transcript: {e}")
                 
-                # Final check before starting TTS
+                # CRITICAL: Final check before starting TTS
+                # If query_sequence changed, this query is outdated and should be skipped
                 if current_query_id != self.query_sequence:
                     logger.info(f"⏭️ Skipping outdated query #{current_query_id} before TTS (current: #{self.query_sequence})")
                     return
@@ -547,10 +620,13 @@ class TwilioStreamHandler:
         try:
             sentences = self.tts_tool._split_into_sentences(text)
             for sentence in sentences:
-                # Check for interrupt before processing each sentence
+                # CRITICAL: Check for interrupt before processing each sentence
+                # If interrupt detected, stop immediately and don't process any more sentences
                 if self.interrupt_detected:
-                    logger.info("🛑 TTS interrupted by user, stopping stream.")
+                    logger.info("🛑 TTS interrupted by user, stopping stream immediately.")
                     self.ai_is_speaking = False
+                    self.ai_speech_start_time = None
+                    # Don't send any more audio - user wants to ask a new question
                     return
                 
                 if not sentence.strip():
@@ -574,16 +650,30 @@ class TwilioStreamHandler:
                         return
                     
                     pcm_bytes = tts_result["audio_bytes"]
+                    # CRITICAL: Check for interrupt BEFORE conversion (saves processing time)
+                    if self.interrupt_detected:
+                        logger.info("🛑 Interrupt detected before audio conversion, stopping immediately.")
+                        self.ai_is_speaking = False
+                        return
+                    
                     # Fast conversion: PCM -> mu-law using only Python audioop (no ffmpeg)
                     mulaw_bytes = convert_pcm_to_mulaw(pcm_bytes, input_rate=24000, input_width=2)
                     if mulaw_bytes:
-                        # Check AGAIN right before sending (interrupt might have happened during conversion)
+                        # CRITICAL: Check AGAIN right before sending (interrupt might have happened during conversion)
+                        # This is the LAST chance to stop before audio is sent to user
                         if self.interrupt_detected:
-                            logger.info("🛑 Interrupt detected right before sending, aborting audio chunk.")
+                            logger.info("🛑 Interrupt detected right before sending, aborting audio chunk - STOPPING IMMEDIATELY.")
                             self.ai_is_speaking = False
                             return
                         
                         payload = base64.b64encode(mulaw_bytes).decode('utf-8')
+                        # CRITICAL: Final check right before sending to websocket
+                        # If interrupt happened, don't send this chunk - user wants to ask new question
+                        if self.interrupt_detected:
+                            logger.info("🛑 Interrupt detected during payload encoding, stopping - NO MORE AUDIO.")
+                            self.ai_is_speaking = False
+                            return
+                        
                         await self.websocket.send_json({
                             "event": "media",
                             "streamSid": self.stream_sid,
@@ -602,24 +692,32 @@ class TwilioStreamHandler:
                 })
                 logger.info("Finished streaming AI response.")
             else:
-                # If interrupted, manually clear the flag
+                # CRITICAL: If interrupted, stop immediately and process the new question
+                # Don't send end mark - we're stopping mid-response (e.g., story was interrupted)
                 self.ai_is_speaking = False
                 self.ai_speech_start_time = None
                 self.interrupt_speech_frames = 0
-                logger.info("✅ TTS stream interrupted, ready for user input.")
-                # Trigger processing of waiting interrupt speech
+                logger.info("✅ TTS stream interrupted - stopping story, ready for new question.")
+                # CRITICAL: Process interrupt speech immediately - user asked a new question
+                # Don't wait, process it right away
                 if self.is_speaking and self.speech_buffer:
-                    logger.info("🔄 TTS stopped, processing waiting interrupt speech...")
+                    logger.info("🔄 TTS stopped, processing interrupt question immediately...")
+                    # Process immediately instead of creating a task - ensures faster response
                     asyncio.create_task(self._process_waiting_interrupt())
+                else:
+                    logger.warning("⚠️ Interrupt detected but no speech buffer available")
         except asyncio.CancelledError:
-            logger.info("🛑 TTS streaming task was cancelled (interrupt).")
+            logger.info("🛑 TTS streaming task was cancelled (interrupt) - stopping story immediately.")
             self.ai_is_speaking = False
             self.ai_speech_start_time = None
             self.interrupt_speech_frames = 0
-            # Trigger processing of waiting interrupt speech
+            # CRITICAL: Process interrupt speech immediately - user asked a new question
+            # The story was interrupted, now process the new question
             if self.is_speaking and self.speech_buffer:
-                logger.info("🔄 TTS cancelled, processing waiting interrupt speech...")
+                logger.info("🔄 TTS cancelled, processing interrupt question immediately...")
                 asyncio.create_task(self._process_waiting_interrupt())
+            else:
+                logger.warning("⚠️ TTS cancelled but no interrupt speech buffer available")
             raise
         except Exception as e:
             logger.error(f"Error in TTS streaming: {e}", exc_info=True)

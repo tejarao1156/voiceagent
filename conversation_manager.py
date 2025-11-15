@@ -183,24 +183,30 @@ Current conversation history: {len(session_data.get('conversation_history', []))
                 {"role": "system", "content": system_prompt + "\n\nContext:\n" + context}
             ]
             
-            # Add ALL conversation history to maintain complete context
+            # CRITICAL: Add ALL conversation history to maintain complete context
+            # This ensures the AI has access to all previous questions and answers
             # Each interaction has user_input and agent_response
-            for interaction in conversation_history:
+            logger.info(f"📚 Building messages array with {len(conversation_history)} previous interactions")
+            for idx, interaction in enumerate(conversation_history):
                 # Add user message
                 if interaction.get("user_input"):
                     messages.append({
                         "role": "user",
                         "content": interaction["user_input"]
                     })
+                    logger.debug(f"   Added history[{idx}] user: '{interaction['user_input'][:50]}...'")
                 # Add assistant response
                 if interaction.get("agent_response"):
                     messages.append({
                         "role": "assistant",
                         "content": interaction["agent_response"]
                     })
+                    logger.debug(f"   Added history[{idx}] assistant: '{interaction['agent_response'][:50]}...'")
             
-            # Add current user input
+            # Add current user input (this is the question we're answering now)
             messages.append({"role": "user", "content": user_input})
+            logger.info(f"📝 Added current user input: '{user_input[:50]}...'")
+            logger.info(f"📊 Total messages being sent to AI: {len(messages)} (1 system + {len(conversation_history) * 2} history + 1 current)")
             
             # Use provided model/temperature/maxTokens or fall back to defaults
             inference_model = model or INFERENCE_MODEL
