@@ -187,6 +187,8 @@ class MongoDBCallStore:
                     "to_number": doc.get("to_number"),
                     "agent_id": doc.get("agent_id"),
                     "session_id": doc.get("session_id"),
+                    # Map MongoDB status to UI status
+                    # "active" -> "ongoing", everything else (completed, failed, etc.) -> "finished"
                     "status": "ongoing" if doc.get("status") == "active" else "finished",
                     "timestamp": doc.get("start_time"),
                     "duration": doc.get("duration_seconds"),
