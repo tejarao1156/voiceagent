@@ -1151,10 +1151,12 @@ async def twilio_incoming_sms(request: Request):
         to_number = sms_data.get("To")
         message_body = sms_data.get("Body", "")
         
-        logger.info(f"📱 Received incoming SMS webhook for MessageSid: {message_sid}")
-        logger.info(f"   From: {from_number}")
-        logger.info(f"   To: {to_number}")
-        logger.info(f"   Body: {message_body[:100]}...")
+        logger.info(f"📱 ========== INCOMING SMS WEBHOOK ==========")
+        logger.info(f"📱 MessageSid: {message_sid}")
+        logger.info(f"📱 From: {from_number}")
+        logger.info(f"📱 To: {to_number}")
+        logger.info(f"📱 Body: {message_body[:100]}...")
+        logger.info(f"📱 Full webhook data keys: {list(sms_data.keys())}")
         
         if not is_mongodb_available():
             logger.error("MongoDB is not available - cannot process SMS")
@@ -1175,8 +1177,9 @@ async def twilio_incoming_sms(request: Request):
             logger.warning(f"❌ Phone number '{to_number}' is NOT registered or inactive")
             return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
         
-        # Store incoming message in MongoDB
-        await message_store.create_message(
+        # Store incoming message in MongoDB (will get or create conversation_id with UUID)
+        logger.info(f"💾 Storing incoming message in MongoDB...")
+        message_stored = await message_store.create_message(
             message_sid=message_sid,
             from_number=from_number,
             to_number=to_number,
@@ -1184,23 +1187,41 @@ async def twilio_incoming_sms(request: Request):
             agent_id=normalized_to
         )
         
+        if not message_stored:
+            logger.error(f"❌ Failed to store incoming message {message_sid} in MongoDB")
+            # Continue processing even if storage fails (don't block response)
+        else:
+            logger.info(f"✅ Successfully stored incoming message {message_sid} in MongoDB")
+        
+        # Get conversation_id for this conversation (to use for outbound message)
+        conversation_id = await message_store.get_conversation_id(from_number, to_number, normalized_to)
+        logger.info(f"📝 Conversation ID: {conversation_id}")
+        
+        # Validate message body first - if empty, don't process (no response sent)
+        if not message_body or not message_body.strip():
+            logger.warning(f"⚠️ Empty message body received from {from_number} - no response sent")
+            return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
+        
         # Load messaging agent configuration
         agent_config = await twilio_phone_tool._load_agent_config(normalized_to, direction="messaging")
         
         if not agent_config:
-            logger.warning(f"❌ No active messaging agent found for phone number {normalized_to}")
+            logger.warning(f"❌ No messaging agent found for phone number {normalized_to}")
             # No response sent if no agent configured
             return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
         
-        # Check if agent is active
+        # Check if agent is active - messaging agents must be active to respond
         if not agent_config.get("active", False):
             logger.info(f"📱 Messaging agent for {normalized_to} is inactive - no response sent")
             return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
+        
+        logger.info(f"📱 Active messaging agent found for {normalized_to} - will process message and respond")
         
         # Get conversation history for personalization
         conversation_history = await message_store.get_conversation_history(
             from_number=from_number,
             to_number=to_number,
+            agent_id=normalized_to,
             limit=50
         )
         
@@ -1244,14 +1265,21 @@ async def twilio_incoming_sms(request: Request):
             
             logger.info(f"✅ Sent SMS response (MessageSid: {sent_message.sid}): {response_text[:50]}...")
             
-            # Store outbound message in MongoDB
-            await message_store.create_outbound_message(
+            # Store outbound message in MongoDB (use same conversation_id)
+            logger.info(f"💾 Storing outbound message in MongoDB...")
+            outbound_stored = await message_store.create_outbound_message(
                 message_sid=sent_message.sid,
                 from_number=to_number,
                 to_number=from_number,
                 body=response_text,
-                agent_id=normalized_to
+                agent_id=normalized_to,
+                conversation_id=conversation_id  # Use same conversation_id as inbound message
             )
+            
+            if not outbound_stored:
+                logger.error(f"❌ Failed to store outbound message {sent_message.sid} in MongoDB")
+            else:
+                logger.info(f"✅ Successfully stored outbound message {sent_message.sid} in MongoDB")
             
         except Exception as send_error:
             logger.error(f"❌ Error sending SMS response: {send_error}", exc_info=True)
@@ -2522,7 +2550,16 @@ async def register_phone(request: Request):
         logger.info(f"🔗 Webhook URLs:")
         logger.info(f"   Incoming (Calls): {incoming_url}")
         logger.info(f"   Status (Calls): {status_url}")
-        logger.info(f"   SMS: {sms_url}")
+        logger.info(f"   SMS (Messages): {sms_url}")
+        logger.info(f"")
+        logger.info(f"⚠️  IMPORTANT: You MUST configure these webhooks in Twilio Console:")
+        logger.info(f"   1. Go to Twilio Console → Phone Numbers → {phone_number}")
+        logger.info(f"   2. For CALLS - Set 'A CALL COMES IN' to: {incoming_url}")
+        logger.info(f"   3. For CALLS - Set 'STATUS CALLBACK URL' to: {status_url}")
+        logger.info(f"   4. For MESSAGING - Set 'A MESSAGE COMES IN' to: {sms_url}")
+        logger.info(f"   5. Click Save")
+        logger.info(f"")
+        logger.info(f"🔍 To test if SMS webhook is reachable, visit: {sms_url.replace('/sms', '/sms/test')}")
         
         # Return response with webhook URLs (for both calls and messaging)
         return {
@@ -3618,6 +3655,172 @@ async def get_call_by_id(call_sid: str):
         raise
     except Exception as e:
         logger.error(f"Error getting call: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# MESSAGES ENDPOINTS
+# ============================================================================
+
+@app.get(
+    "/api/messages/debug",
+    summary="Debug Messages Endpoint",
+    description="Debug endpoint to check if messages exist in MongoDB and diagnose issues",
+    tags=["Messages"]
+)
+async def debug_messages():
+    """Debug endpoint to check message storage"""
+    try:
+        from databases.mongodb_message_store import MongoDBMessageStore
+        from databases.mongodb_db import is_mongodb_available, get_mongo_db
+        
+        if not is_mongodb_available():
+            return {
+                "mongodb_available": False,
+                "message": "MongoDB is not available"
+            }
+        
+        db = get_mongo_db()
+        if db is None:
+            return {
+                "mongodb_available": False,
+                "message": "Failed to get MongoDB database"
+            }
+        
+        collection = db["messages"]
+        
+        # Get raw message count
+        total_messages = await collection.count_documents({})
+        
+        # Get sample messages
+        sample_messages = []
+        async for doc in collection.find({}).sort("timestamp", -1).limit(5):
+            sample_messages.append({
+                "message_sid": doc.get("message_sid"),
+                "from_number": doc.get("from_number"),
+                "to_number": doc.get("to_number"),
+                "body": doc.get("body", "")[:50],
+                "direction": doc.get("direction"),
+                "conversation_id": doc.get("conversation_id"),
+                "agent_id": doc.get("agent_id"),
+                "timestamp": doc.get("timestamp")
+            })
+        
+        # Get unique conversation_ids
+        conversation_ids = await collection.distinct("conversation_id")
+        
+        # Test get_conversations
+        message_store = MongoDBMessageStore()
+        conversations = await message_store.get_conversations(limit=10)
+        
+        return {
+            "mongodb_available": True,
+            "total_messages": total_messages,
+            "unique_conversation_ids": len(conversation_ids),
+            "conversation_ids": conversation_ids[:10],  # First 10
+            "sample_messages": sample_messages,
+            "conversations_from_get_conversations": len(conversations),
+            "sample_conversation": conversations[0] if conversations else None
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in debug endpoint: {e}", exc_info=True)
+        import traceback
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+@app.get(
+    "/api/messages",
+    summary="Get All Message Conversations",
+    description="Get all message conversations grouped by conversation_id. Supports filtering by agent.",
+    tags=["Messages"],
+    response_model=Dict[str, Any]
+)
+async def get_all_messages(
+    agent_id: Optional[str] = Query(None, description="Filter by agent/phone number"),
+    limit: int = Query(100, description="Maximum number of conversations to return", ge=1, le=1000)
+):
+    """Get all message conversations grouped by conversation_id"""
+    try:
+        from databases.mongodb_message_store import MongoDBMessageStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        logger.info(f"📨 GET /api/messages called - agent_id: {agent_id}, limit: {limit}")
+        
+        if not is_mongodb_available():
+            logger.warning("⚠️  MongoDB not available for get_all_messages")
+            return {"messages": []}
+        
+        message_store = MongoDBMessageStore()
+        
+        conversations = await message_store.get_conversations(
+            agent_id=agent_id,
+            limit=limit
+        )
+        
+        logger.info(f"✅ Retrieved {len(conversations)} conversation(s) from MongoDB")
+        if conversations:
+            logger.info(f"   Sample conversation_id: {conversations[0].get('conversation_id', 'N/A')}")
+            logger.info(f"   Sample message_count: {conversations[0].get('message_count', 0)}")
+        
+        return {"messages": conversations}
+        
+    except Exception as e:
+        logger.error(f"❌ Error getting messages: {e}", exc_info=True)
+        import traceback
+        logger.error(f"Full traceback:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/api/messages/{conversation_id}",
+    summary="Get Conversation by ID",
+    description="Get a specific conversation with all messages",
+    tags=["Messages"]
+)
+async def get_conversation_by_id(conversation_id: str):
+    """Get a specific conversation by conversation_id"""
+    try:
+        from databases.mongodb_message_store import MongoDBMessageStore
+        message_store = MongoDBMessageStore()
+        
+        messages = await message_store.get_all_messages(
+            conversation_id=conversation_id,
+            limit=1000
+        )
+        
+        if not messages:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Group messages into conversation format
+        conversation_messages = []
+        for msg in messages:
+            conversation_messages.append({
+                "role": "user" if msg.get("direction") == "inbound" else "assistant",
+                "text": msg.get("body", ""),
+                "timestamp": msg.get("timestamp")
+            })
+        
+        # Get conversation metadata from first message
+        first_message = messages[0] if messages else {}
+        
+        conversation = {
+            "id": conversation_id,
+            "conversation_id": conversation_id,
+            "phoneNumberId": first_message.get("agent_id"),
+            "callerNumber": first_message.get("from_number"),
+            "agentNumber": first_message.get("to_number"),
+            "status": "active",
+            "timestamp": first_message.get("timestamp"),
+            "conversation": conversation_messages
+        }
+        
+        return {"conversation": conversation}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting conversation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get(

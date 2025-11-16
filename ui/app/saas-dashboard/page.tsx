@@ -13,6 +13,7 @@ import { CreateAgentModal } from './CreateAgentModal'
 import { RegisterPhoneModal } from './RegisterPhoneModal'
 import { AnalyticsDashboard } from './dashboard-statistics'
 import { CallsSection } from './CallsSection'
+import { MessagesSection } from './MessagesSection'
 import { VoiceCustomization } from './VoiceCustomization'
 import { Button } from '@/components/ui/button'
 import { fetchRegisteredPhones } from '@/lib/api'
@@ -37,7 +38,7 @@ export default function SaaSDashboard() {
     
     // Set initial section from hash
     const hash = window.location.hash.replace('#', '')
-    if (hash && ['dashboard', 'incoming-agent', 'outgoing-agent', 'messaging-agent', 'calls', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(hash)) {
+    if (hash && ['dashboard', 'incoming-agent', 'outgoing-agent', 'messaging-agent', 'calls', 'messages', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(hash)) {
       setActiveSection(hash)
     } else if (hash === 'ai-agents') {
       // Legacy support: if hash is 'ai-agents', default to 'incoming-agent'
@@ -47,7 +48,7 @@ export default function SaaSDashboard() {
     // Listen for hash changes
     const handleHashChange = () => {
       const newHash = window.location.hash.replace('#', '')
-      if (newHash && ['dashboard', 'incoming-agent', 'outgoing-agent', 'messaging-agent', 'calls', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(newHash)) {
+      if (newHash && ['dashboard', 'incoming-agent', 'outgoing-agent', 'messaging-agent', 'calls', 'messages', 'voice-customization', 'endpoints', 'activity-logs', 'settings'].includes(newHash)) {
         setActiveSection(newHash)
       } else if (newHash === 'ai-agents') {
         // Legacy support: if hash is 'ai-agents', default to 'incoming-agent'
@@ -202,10 +203,20 @@ export default function SaaSDashboard() {
             return null
           }
           
+          // Normalize direction (handle legacy 'inbound' value)
+          let normalizedDirection: 'incoming' | 'outgoing' | 'messaging' = 'incoming'
+          if (agent.direction === 'inbound' || agent.direction === 'incoming') {
+            normalizedDirection = 'incoming'
+          } else if (agent.direction === 'outgoing') {
+            normalizedDirection = 'outgoing'
+          } else if (agent.direction === 'messaging') {
+            normalizedDirection = 'messaging'
+          }
+          
           return {
             id: agent.id,
             name: agent.name,
-            direction: (agent.direction === 'inbound' ? 'incoming' : agent.direction) || 'incoming',
+            direction: normalizedDirection,
             phoneNumber: agent.phoneNumber,
             lastUpdated,
             status: (agent.active === true || agent.active === undefined) ? 'active' : 'idle',
@@ -245,8 +256,11 @@ export default function SaaSDashboard() {
   const filteredAgents = agents.filter(agent => {
     // Filter by direction based on active section
     if (activeSection === 'incoming-agent') {
-      // Only show incoming agents
-      if (agent.direction !== 'incoming' && agent.direction !== 'inbound') {
+      // Only show incoming agents (handle both 'incoming' and legacy 'inbound')
+      // Type assertion needed because 'inbound' might come from MongoDB but isn't in TypeScript type
+      const direction = agent.direction as string
+      const isIncoming = direction === 'incoming' || direction === 'inbound'
+      if (!isIncoming) {
         return false
       }
     } else if (activeSection === 'outgoing-agent') {
@@ -562,7 +576,6 @@ export default function SaaSDashboard() {
               {agentFilter !== 'phones' && agentFilter !== 'make-call' && (
                 <AgentTable
                   agents={filteredAgents}
-                  loading={loadingAgents}
                   onEdit={handleEdit}
                   onDelete={handleDelete}
                   onToggleActive={handleToggleActive}
@@ -633,6 +646,16 @@ export default function SaaSDashboard() {
             </motion.div>
           )}
 
+          {mounted && activeSection === 'messages' && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.2 }}
+            >
+              <MessagesSection />
+            </motion.div>
+          )}
+
           {mounted && activeSection === 'voice-customization' && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
@@ -643,7 +666,7 @@ export default function SaaSDashboard() {
             </motion.div>
           )}
 
-          {activeSection !== 'incoming-agent' && activeSection !== 'outgoing-agent' && activeSection !== 'messaging-agent' && activeSection !== 'dashboard' && activeSection !== 'calls' && activeSection !== 'voice-customization' && (
+          {activeSection !== 'incoming-agent' && activeSection !== 'outgoing-agent' && activeSection !== 'messaging-agent' && activeSection !== 'dashboard' && activeSection !== 'calls' && activeSection !== 'messages' && activeSection !== 'voice-customization' && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -671,7 +694,7 @@ export default function SaaSDashboard() {
           }}
           onSubmit={handleCreateAgent}
           editAgent={editAgent}
-          activeSection={activeSection}
+          activeSection={activeSection as 'incoming-agent' | 'outgoing-agent' | 'messaging-agent'}
         />
 
       <RegisterPhoneModal

@@ -51,13 +51,19 @@ export default function DashboardContent({ onAddNumber }: DashboardContentProps)
     const loadPhoneNumbers = async () => {
       try {
         const phones = await fetchPhoneNumbers()
-        setPhoneNumbers(phones)
+        // Transform PhoneNumberResponse to PhoneNumber (convert strings to Dates)
+        const transformedPhones = phones.map(phone => ({
+          ...phone,
+          lastSync: phone.lastSync ? new Date(phone.lastSync) : undefined,
+          createdAt: new Date(phone.createdAt)
+        }))
+        setPhoneNumbers(transformedPhones)
       } catch (error) {
         console.error('Error loading phone numbers:', error)
       }
     }
     loadPhoneNumbers()
-  }, [])
+  }, [setPhoneNumbers])
 
   useEffect(() => {
     const fetchCalls = async () => {
@@ -71,7 +77,7 @@ export default function DashboardContent({ onAddNumber }: DashboardContentProps)
             id: call.id || call.call_sid,
             phoneNumberId: selectedNumber.id,
             callerNumber: call.from_number || call.callerNumber,
-            status: call.status === 'ongoing' ? 'ongoing' : 'finished',
+            status: (call.status === 'ongoing' ? 'ongoing' : 'finished') as 'ongoing' | 'finished',
             timestamp: new Date(call.timestamp || call.start_time),
             duration: call.duration,
             conversation: call.conversation || []

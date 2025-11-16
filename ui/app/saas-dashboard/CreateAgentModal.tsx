@@ -154,7 +154,7 @@ export function CreateAgentModal({
     if (open && editAgent) {
       setFormData({
         name: editAgent.name || '',
-        direction: (editAgent.direction === 'inbound' ? 'incoming' : editAgent.direction) || 'incoming',
+        direction: ((editAgent.direction as string) === 'inbound' ? 'incoming' : editAgent.direction) || 'incoming',
         phoneNumber: editAgent.phoneNumber || '',
         sttModel: editAgent.sttModel || 'whisper-1',
         inferenceModel: editAgent.inferenceModel || 'gpt-4o-mini',
