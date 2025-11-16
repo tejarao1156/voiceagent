@@ -77,7 +77,7 @@ export function RegisterPhoneModal({
       setWebhookConfig({
         incomingUrl: result.webhookConfiguration.incomingUrl,
         statusCallbackUrl: result.webhookConfiguration.statusCallbackUrl,
-        smsWebhookUrl: result.webhookConfiguration.smsWebhookUrl,
+        smsWebhookUrl: (result.webhookConfiguration as any).smsWebhookUrl,
         steps: result.webhookConfiguration.steps,
       })
 

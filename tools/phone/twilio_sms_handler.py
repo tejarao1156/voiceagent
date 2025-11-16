@@ -44,29 +44,27 @@ class TwilioSMSHandler:
                 - is_greeting: Whether this is the first message (should send greeting)
         """
         try:
-            # Create conversation ID from phone numbers (sorted for consistency)
-            phone_numbers = sorted([from_number, to_number])
-            conversation_id = f"conv_{phone_numbers[0]}_{phone_numbers[1]}"
+            # Determine if this is a new conversation based on MongoDB history
+            # If conversation_history is empty or None, it's a new conversation
+            is_new_conversation = not conversation_history or len(conversation_history) == 0
             
-            # Get or create session data for this conversation
-            if conversation_id not in self.active_conversations:
-                # Create new session
-                session_data = self.conversation_tool.conversation_manager.create_session(
-                    customer_id=from_number
-                )
-                # Override system prompt with agent's system prompt
-                if agent_config.get("systemPrompt"):
-                    session_data["system_prompt"] = agent_config.get("systemPrompt")
-                self.active_conversations[conversation_id] = session_data
-                is_first_message = True
-            else:
-                session_data = self.active_conversations[conversation_id]
-                is_first_message = False
+            logger.info(f"📝 Conversation status: {'NEW' if is_new_conversation else 'EXISTING'}")
+            if conversation_history:
+                logger.info(f"📝 Found {len(conversation_history)} previous message(s) in conversation history")
             
-            # If this is the first message, send greeting
-            if is_first_message:
+            # Create new session data
+            session_data = self.conversation_tool.conversation_manager.create_session(
+                customer_id=from_number
+            )
+            
+            # Override system prompt with agent's system prompt
+            if agent_config.get("systemPrompt"):
+                session_data["system_prompt"] = agent_config.get("systemPrompt")
+            
+            # If this is a NEW conversation, send greeting
+            if is_new_conversation:
                 greeting = agent_config.get("greeting", "Hello! How can I help you today?")
-                logger.info(f"📱 First message from {from_number}, sending greeting: {greeting[:50]}...")
+                logger.info(f"📱 NEW conversation with {from_number}, sending greeting: {greeting[:50]}...")
                 
                 # Update session with greeting
                 session_data = self.conversation_tool.conversation_manager.add_to_conversation_history(
@@ -74,7 +72,6 @@ class TwilioSMSHandler:
                     user_input=message_body,
                     agent_response=greeting
                 )
-                self.active_conversations[conversation_id] = session_data
                 
                 return {
                     "response_text": greeting,
@@ -82,35 +79,45 @@ class TwilioSMSHandler:
                     "is_greeting": True
                 }
             
-            # Build conversation history from previous messages for context
-            if conversation_history:
-                # Convert message history to conversation history format
-                for msg in conversation_history:
-                    if msg.get("role") == "user":
-                        # This is a user message - add to conversation history
-                        user_text = msg.get("body", "")
-                        # Find corresponding assistant response if available
-                        assistant_response = None
-                        for next_msg in conversation_history[conversation_history.index(msg) + 1:]:
-                            if next_msg.get("role") == "assistant":
-                                assistant_response = next_msg.get("body", "")
-                                break
-                        
-                        if user_text:
-                            if assistant_response:
-                                # Add both user input and assistant response
-                                session_data = self.conversation_tool.conversation_manager.add_to_conversation_history(
-                                    session_data,
-                                    user_input=user_text,
-                                    agent_response=assistant_response
-                                )
-                            else:
-                                # Only user input (no response yet)
-                                session_data["conversation_history"].append({
-                                    "timestamp": datetime.utcnow().isoformat(),
-                                    "user_input": user_text,
-                                    "agent_response": ""
-                                })
+            # EXISTING conversation - build conversation history from MongoDB messages
+            logger.info(f"📚 Building conversation history from {len(conversation_history)} previous message(s)")
+            
+            # Convert MongoDB message history to conversation history format
+            # Messages are already sorted by timestamp in get_conversation_history
+            # Format: [{"role": "user", "body": "...", ...}, {"role": "assistant", "body": "...", ...}]
+            user_message = None
+            for msg in conversation_history:
+                role = msg.get("role")  # "user" or "assistant"
+                text = msg.get("body", "")  # Message body from MongoDB
+                
+                if not text:
+                    continue
+                
+                if role == "user":
+                    # Store user message and look for assistant response
+                    user_message = text
+                elif role == "assistant" and user_message:
+                    # Found assistant response for previous user message
+                    # Add both user input and assistant response as a pair
+                    session_data = self.conversation_tool.conversation_manager.add_to_conversation_history(
+                        session_data,
+                        user_input=user_message,
+                        agent_response=text
+                    )
+                    user_message = None  # Reset for next pair
+                elif role == "assistant" and not user_message:
+                    # Assistant message without preceding user message (edge case)
+                    # This shouldn't happen in normal flow, but handle gracefully
+                    logger.warning(f"⚠️ Found assistant message without preceding user message")
+            
+            # If there's a user message without a response at the end, add it
+            if user_message:
+                logger.info(f"📝 Adding final user message without response to history")
+                session_data["conversation_history"].append({
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "user_input": user_message,
+                    "agent_response": ""
+                })
             
             # Get agent configuration and override system prompt
             system_prompt = agent_config.get("systemPrompt", "")
@@ -136,9 +143,6 @@ class TwilioSMSHandler:
             # Extract response text
             response_text = ai_response.get("response", "")
             updated_session_data = ai_response.get("session_data", session_data)
-            
-            # Update active conversation
-            self.active_conversations[conversation_id] = updated_session_data
             
             logger.info(f"✅ Generated response: {response_text[:50]}...")
             

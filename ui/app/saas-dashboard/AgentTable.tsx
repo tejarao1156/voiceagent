@@ -33,7 +33,7 @@ import { cn } from '@/lib/utils'
 export interface Agent {
   id: string
   name: string
-  direction: 'incoming'
+  direction: 'incoming' | 'outgoing' | 'messaging'
   phoneNumber: string
   lastUpdated: string
   status: 'active' | 'idle' | 'upgraded'

@@ -26,6 +26,7 @@ const sidebarItems: SidebarItem[] = [
   { id: 'outgoing-agent', label: 'Outgoing Agent', icon: <PhoneCall className="h-5 w-5" /> },
   { id: 'messaging-agent', label: 'Messaging Agent', icon: <MessageSquare className="h-5 w-5" /> },
   { id: 'calls', label: 'Calls', icon: <Phone className="h-5 w-5" /> },
+  { id: 'messages', label: 'Messages', icon: <MessageSquare className="h-5 w-5" /> },
   { id: 'voice-customization', label: 'Voice Customization', icon: <Volume2 className="h-5 w-5" /> },
   { id: 'endpoints', label: 'Endpoints', icon: <LinkIcon className="h-5 w-5" /> },
   { id: 'activity-logs', label: 'Activity Logs', icon: <FileText className="h-5 w-5" /> },
