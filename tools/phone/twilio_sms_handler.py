@@ -52,8 +52,8 @@ class TwilioSMSHandler:
             if conversation_history:
                 logger.info(f"📝 Found {len(conversation_history)} previous message(s) in conversation history")
             
-            # Create new session data
-            session_data = self.conversation_tool.conversation_manager.create_session(
+            # Create new session data using ConversationalResponseTool's create_session method
+            session_data = self.conversation_tool.create_session(
                 customer_id=from_number
             )
             
@@ -67,7 +67,7 @@ class TwilioSMSHandler:
                 logger.info(f"📱 NEW conversation with {from_number}, sending greeting: {greeting[:50]}...")
                 
                 # Update session with greeting
-                session_data = self.conversation_tool.conversation_manager.add_to_conversation_history(
+                session_data = self.conversation_tool.manager.add_to_conversation_history(
                     session_data,
                     user_input=message_body,
                     agent_response=greeting
@@ -83,38 +83,52 @@ class TwilioSMSHandler:
             logger.info(f"📚 Building conversation history from {len(conversation_history)} previous message(s)")
             
             # Convert MongoDB message history to conversation history format
-            # Messages are already sorted by timestamp in get_conversation_history
-            # Format: [{"role": "user", "body": "...", ...}, {"role": "assistant", "body": "...", ...}]
+            # Messages are already sorted by timestamp in get_all_messages_by_agent_id
+            # Format: [{"role": "user", "body": "...", "timestamp": "..."}, {"role": "assistant", "body": "...", "timestamp": "..."}]
+            # Process messages in chronological order, pairing user and assistant messages
             user_message = None
+            user_timestamp = None
             for msg in conversation_history:
-                role = msg.get("role")  # "user" or "assistant"
+                role = msg.get("role")  # "user" or "assistant" (from role field or derived from direction)
                 text = msg.get("body", "")  # Message body from MongoDB
+                timestamp = msg.get("timestamp", datetime.utcnow().isoformat())
                 
                 if not text:
                     continue
                 
                 if role == "user":
-                    # Store user message and look for assistant response
+                    # If we have a previous user message without response, add it with empty response
+                    if user_message:
+                        logger.debug(f"📝 Adding user message without response to history")
+                        session_data = self.conversation_tool.manager.add_to_conversation_history(
+                            session_data,
+                            user_input=user_message,
+                            agent_response=""
+                        )
+                    # Store current user message
                     user_message = text
-                elif role == "assistant" and user_message:
-                    # Found assistant response for previous user message
-                    # Add both user input and assistant response as a pair
-                    session_data = self.conversation_tool.conversation_manager.add_to_conversation_history(
-                        session_data,
-                        user_input=user_message,
-                        agent_response=text
-                    )
-                    user_message = None  # Reset for next pair
-                elif role == "assistant" and not user_message:
-                    # Assistant message without preceding user message (edge case)
-                    # This shouldn't happen in normal flow, but handle gracefully
-                    logger.warning(f"⚠️ Found assistant message without preceding user message")
+                    user_timestamp = timestamp
+                elif role == "assistant":
+                    if user_message:
+                        # Found assistant response for previous user message
+                        # Add both user input and assistant response as a pair
+                        session_data = self.conversation_tool.manager.add_to_conversation_history(
+                            session_data,
+                            user_input=user_message,
+                            agent_response=text
+                        )
+                        user_message = None  # Reset for next pair
+                        user_timestamp = None
+                    else:
+                        # Assistant message without preceding user message (edge case)
+                        # This shouldn't happen in normal flow, but handle gracefully
+                        logger.warning(f"⚠️ Found assistant message without preceding user message")
             
             # If there's a user message without a response at the end, add it
             if user_message:
                 logger.info(f"📝 Adding final user message without response to history")
                 session_data["conversation_history"].append({
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": user_timestamp or datetime.utcnow().isoformat(),
                     "user_input": user_message,
                     "agent_response": ""
                 })

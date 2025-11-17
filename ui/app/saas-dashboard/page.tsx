@@ -77,33 +77,61 @@ export default function SaaSDashboard() {
     twilioAuthToken?: string
   }) => {
     try {
+      // Check if this is a messaging agent - use message_agent API
+      const isMessagingAgent = data.direction === 'messaging'
+      
       if (editAgent) {
-        // Update existing agent - exclude name and phoneNumber
-        const updateData = {
-          direction: data.direction,
-          sttModel: data.sttModel,
-          inferenceModel: data.inferenceModel,
-          ttsModel: data.ttsModel,
-          ttsVoice: data.ttsVoice,
-          systemPrompt: data.systemPrompt,
-          greeting: data.greeting,
-          temperature: data.temperature,
-          maxTokens: data.maxTokens,
-          active: data.active,
-          twilioAccountSid: data.twilioAccountSid,
-          twilioAuthToken: data.twilioAuthToken,
-        }
+        // Update existing agent
+        if (isMessagingAgent) {
+          // Update message agent
+          const updateData = {
+            systemPrompt: data.systemPrompt,
+            greeting: data.greeting,
+            inferenceModel: data.inferenceModel,
+            temperature: data.temperature,
+            maxTokens: data.maxTokens,
+            active: data.active,
+          }
 
-        const response = await fetch(`/agents/${editAgent.id}`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(updateData),
-        })
+          const response = await fetch(`/api/message-agents/${editAgent.id}`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(updateData),
+          })
 
-        if (!response.ok) {
-          throw new Error('Failed to update agent')
+          if (!response.ok) {
+            throw new Error('Failed to update message agent')
+          }
+        } else {
+          // Update regular agent - exclude name and phoneNumber
+          const updateData = {
+            direction: data.direction,
+            sttModel: data.sttModel,
+            inferenceModel: data.inferenceModel,
+            ttsModel: data.ttsModel,
+            ttsVoice: data.ttsVoice,
+            systemPrompt: data.systemPrompt,
+            greeting: data.greeting,
+            temperature: data.temperature,
+            maxTokens: data.maxTokens,
+            active: data.active,
+            twilioAccountSid: data.twilioAccountSid,
+            twilioAuthToken: data.twilioAuthToken,
+          }
+
+          const response = await fetch(`/agents/${editAgent.id}`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(updateData),
+          })
+
+          if (!response.ok) {
+            throw new Error('Failed to update agent')
+          }
         }
 
         // Close modal and reset edit state
@@ -118,19 +146,49 @@ export default function SaaSDashboard() {
         alert('Agent updated successfully!')
       } else {
         // Create new agent
-        const response = await fetch('/agents', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(data),
-        })
+        if (isMessagingAgent) {
+          // Create message agent using message_agent API
+          const messageAgentData = {
+            name: data.name,
+            phoneNumber: data.phoneNumber,
+            systemPrompt: data.systemPrompt,
+            greeting: data.greeting,
+            inferenceModel: data.inferenceModel,
+            temperature: data.temperature,
+            maxTokens: data.maxTokens,
+            active: data.active,
+          }
 
-        if (!response.ok) {
-          throw new Error('Failed to create agent')
+          const response = await fetch('/api/message-agents', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(messageAgentData),
+          })
+
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: 'Failed to create message agent' }))
+            throw new Error(errorData.detail || 'Failed to create message agent')
+          }
+
+          const result = await response.json()
+        } else {
+          // Create regular agent
+          const response = await fetch('/agents', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(data),
+          })
+
+          if (!response.ok) {
+            throw new Error('Failed to create agent')
+          }
+
+          const result = await response.json()
         }
-
-        const result = await response.json()
         
         // Close modal
         setCreateModalOpen(false)
@@ -144,7 +202,8 @@ export default function SaaSDashboard() {
       }
     } catch (error) {
       console.error(`Error ${editAgent ? 'updating' : 'creating'} agent:`, error)
-      alert(`Failed to ${editAgent ? 'update' : 'create'} agent. Please try again.`)
+      const errorMessage = error instanceof Error ? error.message : `Failed to ${editAgent ? 'update' : 'create'} agent. Please try again.`
+      alert(errorMessage)
     }
   }
 
@@ -152,98 +211,164 @@ export default function SaaSDashboard() {
     try {
       setLoadingAgents(true)
       console.log('🔍 Loading agents from MongoDB (including deleted to ensure we get all data)...')
-      // Fetch all agents from MongoDB including deleted ones, then filter in UI
-      const response = await fetch('/agents?include_deleted=true')
       
-      if (!response.ok) {
-        console.error('❌ Failed to load agents:', response.status, response.statusText)
-        setAgents([]) // Clear any existing data - only show MongoDB data
-        setLoadingAgents(false)
-        return
-      }
+      // Fetch regular agents and message agents in parallel
+      const [regularAgentsResponse, messageAgentsResponse] = await Promise.all([
+        fetch('/agents?include_deleted=true').catch((err) => {
+          console.error('❌ Error fetching regular agents:', err)
+          return { ok: false, json: async () => ({ success: true, agents: [], mongodb_available: false, error: err.message }) }
+        }),
+        fetch('/api/message-agents?include_deleted=true').catch((err) => {
+          console.error('❌ Error fetching message agents:', err)
+          return { ok: false, json: async () => ({ success: true, agents: [], mongodb_available: false, error: err.message }) }
+        })
+      ])
       
-      const result = await response.json()
-      console.log('📥 Agents API response:', result)
+      const allAgents: Agent[] = []
       
-      // Check MongoDB availability from response
-      if (result.mongodb_available === false) {
-        console.warn('⚠️ MongoDB is not available - showing empty state')
-        setAgents([]) // Clear - MongoDB not connected
-        setLoadingAgents(false)
-        return
-      }
-      
-      // Only use data if MongoDB is available and response is valid
-      if (result.success && Array.isArray(result.agents)) {
-        // Transform MongoDB agents to UI format
-        // Format dates client-side only to avoid hydration mismatch
-        const transformedAgents: Agent[] = result.agents
-          .map((agent: any) => {
-          let lastUpdated = 'Unknown'
-          if (agent.updated_at && typeof window !== 'undefined') {
-            try {
-              const date = new Date(agent.updated_at)
-              lastUpdated = date.toLocaleDateString('en-US', {
-                month: 'short',
-                day: 'numeric',
-                year: 'numeric',
-              }) + ' ' + date.toLocaleTimeString('en-US', {
-                hour: 'numeric',
-                minute: '2-digit',
-                hour12: true,
-              })
-            } catch (e) {
-              lastUpdated = agent.updated_at
-            }
-          }
+      // Process regular agents
+      if (regularAgentsResponse.ok) {
+        try {
+          const result = await regularAgentsResponse.json()
+          console.log('📥 Regular Agents API response:', result)
           
-          // Filter out deleted agents in UI (but we fetched them to ensure we have all data)
-          if (agent.isDeleted === true) {
-            // Skip deleted agents in UI display
-            return null
-          }
+          if (result.mongodb_available !== false && result.success && Array.isArray(result.agents)) {
+          const transformedAgents: Agent[] = result.agents
+            .map((agent: any) => {
+              // Filter out deleted agents and messaging agents (messaging agents come from message_agent collection)
+              if (agent.isDeleted === true || agent.direction === 'messaging') {
+                return null
+              }
+              
+              let lastUpdated = 'Unknown'
+              if (agent.updated_at && typeof window !== 'undefined') {
+                try {
+                  const date = new Date(agent.updated_at)
+                  lastUpdated = date.toLocaleDateString('en-US', {
+                    month: 'short',
+                    day: 'numeric',
+                    year: 'numeric',
+                  }) + ' ' + date.toLocaleTimeString('en-US', {
+                    hour: 'numeric',
+                    minute: '2-digit',
+                    hour12: true,
+                  })
+                } catch (e) {
+                  lastUpdated = agent.updated_at
+                }
+              }
+              
+              // Normalize direction (handle legacy 'inbound' value)
+              let normalizedDirection: 'incoming' | 'outgoing' | 'messaging' = 'incoming'
+              if (agent.direction === 'inbound' || agent.direction === 'incoming') {
+                normalizedDirection = 'incoming'
+              } else if (agent.direction === 'outgoing') {
+                normalizedDirection = 'outgoing'
+              }
+              
+              return {
+                id: agent.id,
+                name: agent.name,
+                direction: normalizedDirection,
+                phoneNumber: agent.phoneNumber,
+                lastUpdated,
+                status: (agent.active === true || agent.active === undefined) ? 'active' : 'idle',
+                active: agent.active !== false,
+                phoneIsDeleted: agent.phoneIsDeleted || false,
+                sttModel: agent.sttModel,
+                inferenceModel: agent.inferenceModel,
+                ttsModel: agent.ttsModel,
+                ttsVoice: agent.ttsVoice,
+                systemPrompt: agent.systemPrompt,
+                greeting: agent.greeting,
+                temperature: agent.temperature,
+                maxTokens: agent.maxTokens,
+                twilioAccountSid: agent.twilioAccountSid,
+                twilioAuthToken: agent.twilioAuthToken,
+              }
+            })
+            .filter((agent: Agent | null) => agent !== null) as Agent[]
           
-          // Normalize direction (handle legacy 'inbound' value)
-          let normalizedDirection: 'incoming' | 'outgoing' | 'messaging' = 'incoming'
-          if (agent.direction === 'inbound' || agent.direction === 'incoming') {
-            normalizedDirection = 'incoming'
-          } else if (agent.direction === 'outgoing') {
-            normalizedDirection = 'outgoing'
-          } else if (agent.direction === 'messaging') {
-            normalizedDirection = 'messaging'
+          allAgents.push(...transformedAgents)
           }
-          
-          return {
-            id: agent.id,
-            name: agent.name,
-            direction: normalizedDirection,
-            phoneNumber: agent.phoneNumber,
-            lastUpdated,
-            status: (agent.active === true || agent.active === undefined) ? 'active' : 'idle',
-            active: agent.active !== false, // Default to true if undefined/null
-            phoneIsDeleted: agent.phoneIsDeleted || false, // Include phone deletion status
-            sttModel: agent.sttModel,
-            inferenceModel: agent.inferenceModel,
-            ttsModel: agent.ttsModel,
-            ttsVoice: agent.ttsVoice,
-            systemPrompt: agent.systemPrompt,
-            greeting: agent.greeting,
-            temperature: agent.temperature,
-            maxTokens: agent.maxTokens,
-            twilioAccountSid: agent.twilioAccountSid,
-            twilioAuthToken: agent.twilioAuthToken,
-          }
-          })
-          .filter((agent: Agent | null) => agent !== null) as Agent[] // Filter out null (deleted) agents
-        console.log(`✅ Loaded ${transformedAgents.length} agent(s) from MongoDB`)
-        if (transformedAgents.length > 0) {
-          console.log('📋 Agent names:', transformedAgents.map(a => a.name))
+        } catch (error) {
+          console.error('❌ Error parsing regular agents response:', error)
         }
-        setAgents(transformedAgents) // Only set agents from MongoDB
       } else {
-        console.warn('⚠️ No agents found in MongoDB response:', result)
-        setAgents([]) // Clear - no data in MongoDB
+        const status = 'status' in regularAgentsResponse ? regularAgentsResponse.status : 'unknown'
+        console.warn('⚠️ Regular agents fetch failed or returned non-ok status:', status)
       }
+      
+      // Process message agents
+      if (messageAgentsResponse.ok) {
+        try {
+          const result = await messageAgentsResponse.json()
+          console.log('📥 Message Agents API response:', result)
+          
+          if (result.mongodb_available !== false && result.success && Array.isArray(result.agents)) {
+          const transformedAgents: Agent[] = result.agents
+            .map((agent: any) => {
+              // Filter out deleted message agents
+              if (agent.isDeleted === true) {
+                return null
+              }
+              
+              let lastUpdated = 'Unknown'
+              if (agent.updated_at && typeof window !== 'undefined') {
+                try {
+                  const date = new Date(agent.updated_at)
+                  lastUpdated = date.toLocaleDateString('en-US', {
+                    month: 'short',
+                    day: 'numeric',
+                    year: 'numeric',
+                  }) + ' ' + date.toLocaleTimeString('en-US', {
+                    hour: 'numeric',
+                    minute: '2-digit',
+                    hour12: true,
+                  })
+                } catch (e) {
+                  lastUpdated = agent.updated_at
+                }
+              }
+              
+              return {
+                id: agent.id,
+                name: agent.name,
+                direction: 'messaging' as const,
+                phoneNumber: agent.phoneNumber,
+                lastUpdated,
+                status: (agent.active === true || agent.active === undefined) ? 'active' : 'idle',
+                active: agent.active !== false,
+                phoneIsDeleted: false, // Message agents always have registered phones
+                sttModel: undefined, // Not used for messaging
+                inferenceModel: agent.inferenceModel,
+                ttsModel: undefined, // Not used for messaging
+                ttsVoice: undefined, // Not used for messaging
+                systemPrompt: agent.systemPrompt,
+                greeting: agent.greeting,
+                temperature: agent.temperature,
+                maxTokens: agent.maxTokens,
+                twilioAccountSid: undefined,
+                twilioAuthToken: undefined,
+              }
+            })
+            .filter((agent: Agent | null) => agent !== null) as Agent[]
+          
+          allAgents.push(...transformedAgents)
+          }
+        } catch (error) {
+          console.error('❌ Error parsing message agents response:', error)
+        }
+      } else {
+        const status = 'status' in messageAgentsResponse ? messageAgentsResponse.status : 'unknown'
+        console.warn('⚠️ Message agents fetch failed or returned non-ok status:', status)
+      }
+      
+      console.log(`✅ Loaded ${allAgents.length} agent(s) from MongoDB (regular + message agents)`)
+      if (allAgents.length > 0) {
+        console.log('📋 Agent names:', allAgents.map(a => `${a.name} (${a.direction})`))
+      }
+      setAgents(allAgents)
     } catch (error) {
       console.error('❌ Error loading agents from MongoDB:', error)
       setAgents([]) // Clear on error - only show MongoDB data
@@ -353,7 +478,13 @@ export default function SaaSDashboard() {
     }
     
     try {
-      const response = await fetch(`/agents/${agent.id}`, {
+      // Check if this is a messaging agent
+      const isMessagingAgent = agent.direction === 'messaging'
+      const endpoint = isMessagingAgent 
+        ? `/api/message-agents/${agent.id}`
+        : `/agents/${agent.id}`
+      
+      const response = await fetch(endpoint, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -366,18 +497,26 @@ export default function SaaSDashboard() {
         await loadAgents()
         console.log(`Agent ${agent.name} ${active ? 'activated' : 'deactivated'}`)
       } else {
-        throw new Error('Failed to update agent')
+        const errorData = await response.json().catch(() => ({ detail: 'Failed to update agent' }))
+        throw new Error(errorData.detail || 'Failed to update agent')
       }
     } catch (error) {
       console.error('Error toggling agent active status:', error)
-      alert('Failed to update agent status. Please try again.')
+      const errorMessage = error instanceof Error ? error.message : 'Failed to update agent status. Please try again.'
+      alert(errorMessage)
     }
   }
 
   const handleDelete = async (agent: Agent) => {
     if (confirm(`Are you sure you want to delete ${agent.name}?`)) {
       try {
-        const response = await fetch(`/agents/${agent.id}`, {
+        // Check if this is a messaging agent
+        const isMessagingAgent = agent.direction === 'messaging'
+        const endpoint = isMessagingAgent 
+          ? `/api/message-agents/${agent.id}`
+          : `/agents/${agent.id}`
+        
+        const response = await fetch(endpoint, {
           method: 'DELETE',
         })
         
@@ -386,11 +525,13 @@ export default function SaaSDashboard() {
           await loadAgents()
           alert('Agent deleted successfully!')
         } else {
-          throw new Error('Failed to delete agent')
+          const errorData = await response.json().catch(() => ({ detail: 'Failed to delete agent' }))
+          throw new Error(errorData.detail || 'Failed to delete agent')
         }
       } catch (error) {
         console.error('Error deleting agent:', error)
-        alert('Failed to delete agent. Please try again.')
+        const errorMessage = error instanceof Error ? error.message : 'Failed to delete agent. Please try again.'
+        alert(errorMessage)
       }
     }
   }

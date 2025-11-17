@@ -1,6 +1,6 @@
 """
-MongoDB Agent Store
-Handles saving and loading agents from MongoDB
+MongoDB Voice Agent Store
+Handles saving and loading voice agents from MongoDB
 """
 
 from typing import Optional, Dict, Any, List
@@ -12,10 +12,10 @@ from .mongodb_phone_store import normalize_phone_number
 logger = logging.getLogger(__name__)
 
 class MongoDBAgentStore:
-    """Store and retrieve agents from MongoDB"""
+    """Store and retrieve voice agents from MongoDB"""
     
     def __init__(self):
-        self.collection_name = "agents"
+        self.collection_name = "voice_agents"
     
     def _get_collection(self):
         """Get MongoDB collection"""

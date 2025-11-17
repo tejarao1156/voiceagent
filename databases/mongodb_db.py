@@ -79,6 +79,47 @@ def is_mongodb_available():
     """Check if MongoDB is available"""
     return _mongo_available
 
+async def list_collections() -> List[Dict[str, Any]]:
+    """List all MongoDB collections with their document counts"""
+    global _mongo_db, _mongo_available
+    
+    if not _mongo_available or _mongo_db is None:
+        return []
+    
+    try:
+        collections_info = []
+        collection_names = await _mongo_db.list_collection_names()
+        
+        for collection_name in collection_names:
+            collection = _mongo_db[collection_name]
+            count = await collection.count_documents({})
+            collections_info.append({
+                "name": collection_name,
+                "document_count": count
+            })
+        
+        # Sort by name
+        collections_info.sort(key=lambda x: x["name"])
+        
+        return collections_info
+    except Exception as e:
+        logger.error(f"Error listing collections: {e}", exc_info=True)
+        return []
+
+async def verify_collection_exists(collection_name: str) -> bool:
+    """Verify if a MongoDB collection exists"""
+    global _mongo_db, _mongo_available
+    
+    if not _mongo_available or _mongo_db is None:
+        return False
+    
+    try:
+        collection_names = await _mongo_db.list_collection_names()
+        return collection_name in collection_names
+    except Exception as e:
+        logger.error(f"Error verifying collection existence: {e}", exc_info=True)
+        return False
+
 async def close_mongodb():
     """Close MongoDB connection"""
     global _mongo_client, _mongo_available

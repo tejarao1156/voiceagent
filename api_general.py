@@ -1009,7 +1009,7 @@ async def twilio_incoming_call(request: Request):
                 error_response = TwilioVoiceResponse()
                 error_response.say("Sorry, no agent is configured for this number. Please create an agent for this phone number. Goodbye.", voice="alice")
                 error_response.hangup()
-                logger.info(f"Call {call_sid} rejected: Number {agent_phone_number} not found in agents collection")
+                logger.info(f"Call {call_sid} rejected: Number {agent_phone_number} not found in voice_agents collection")
                 return HTMLResponse(content=str(error_response))
             
             # Override system prompt with custom context if provided (for outbound calls)
@@ -1029,12 +1029,17 @@ async def twilio_incoming_call(request: Request):
             call_store = MongoDBCallStore()
             # For outbound calls, use 'from' number as agent_id; for inbound, use 'to' number
             agent_id_for_call = agent_phone_number if agent_phone_number else (to_number or "unknown")
-            await call_store.create_call(
+            success = await call_store.create_call(
                 call_sid=call_sid,
                 from_number=from_number or "unknown",
                 to_number=to_number or "unknown",
                 agent_id=agent_id_for_call
             )
+            
+            if success:
+                logger.info(f"✅ Created call record in MongoDB: {call_sid} (agent_id: {agent_id_for_call})")
+            else:
+                logger.warning(f"⚠️ create_call returned False for {call_sid} - may already exist or MongoDB unavailable")
             
             # Store greeting in transcript for batch mode (stream mode handles it in _send_greeting)
             if TWILIO_PROCESSING_MODE != "stream" and agent_config:
@@ -1049,7 +1054,8 @@ async def twilio_incoming_call(request: Request):
                 except Exception as e:
                     logger.warning(f"Could not store greeting transcript: {e}")
         except Exception as e:
-            logger.warning(f"Could not create call record: {e}")
+            logger.error(f"❌ Error creating call record for {call_sid}: {e}", exc_info=True)
+            # Don't fail the webhook - continue processing even if call record creation fails
 
         response = TwilioVoiceResponse()
 
@@ -1123,6 +1129,37 @@ async def twilio_incoming_call(request: Request):
             )
 
 
+@app.get(
+    "/webhooks/twilio/sms",
+    summary="SMS Webhook Health Check",
+    description="GET endpoint to verify SMS webhook is reachable. Returns webhook status and configuration.",
+    tags=["Twilio Phone Integration"],
+    response_model=Dict[str, Any]
+)
+async def sms_webhook_health_check():
+    """Health check endpoint for SMS webhook - verifies webhook is reachable"""
+    from config import TWILIO_WEBHOOK_BASE_URL
+    logger.info(f"🔍 SMS webhook health check requested")
+    print(f"🔍 SMS webhook health check - webhook URL: {TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/sms")
+    return {
+        "status": "ok",
+        "webhook_type": "SMS",
+        "endpoint": "/webhooks/twilio/sms",
+        "method": "POST",
+        "base_url": TWILIO_WEBHOOK_BASE_URL,
+        "full_url": f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/sms",
+        "message": "SMS webhook is reachable. Configure this URL in Twilio Console as SMS webhook.",
+        "timestamp": datetime.utcnow().isoformat(),
+        "instructions": {
+            "step1": "Go to Twilio Console → Phone Numbers → Your Number",
+            "step2": "Scroll to 'Messaging' section",
+            "step3": f"Set 'A MESSAGE COMES IN' to: {TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/sms (POST)",
+            "step4": "Click Save",
+            "step5": "Send a test SMS to your registered number"
+        }
+    }
+
+
 @app.post(
     "/webhooks/twilio/sms",
     summary="Twilio SMS Webhook",
@@ -1151,12 +1188,25 @@ async def twilio_incoming_sms(request: Request):
         to_number = sms_data.get("To")
         message_body = sms_data.get("Body", "")
         
-        logger.info(f"📱 ========== INCOMING SMS WEBHOOK ==========")
+        # CRITICAL: Log immediately when webhook is received
+        logger.info(f"📱 ========== INCOMING SMS WEBHOOK RECEIVED ==========")
         logger.info(f"📱 MessageSid: {message_sid}")
         logger.info(f"📱 From: {from_number}")
         logger.info(f"📱 To: {to_number}")
-        logger.info(f"📱 Body: {message_body[:100]}...")
+        logger.info(f"📱 Body length: {len(message_body)} chars")
+        logger.info(f"📱 Body: {message_body}")  # Log full body for debugging
         logger.info(f"📱 Full webhook data keys: {list(sms_data.keys())}")
+        logger.info(f"📱 Full webhook data: {sms_data}")  # Log all data for debugging
+        logger.info(f"📱 Timestamp: {datetime.utcnow().isoformat()}")
+        # Also print to stdout for immediate visibility
+        print(f"\n{'='*60}")
+        print(f"📱 ========== INCOMING SMS WEBHOOK RECEIVED ==========")
+        print(f"📱 MessageSid: {message_sid}")
+        print(f"📱 From: {from_number}")
+        print(f"📱 To: {to_number}")
+        print(f"📱 Body: {message_body}")
+        print(f"📱 Timestamp: {datetime.utcnow().isoformat()}")
+        print(f"{'='*60}\n")
         
         if not is_mongodb_available():
             logger.error("MongoDB is not available - cannot process SMS")
@@ -1171,59 +1221,109 @@ async def twilio_incoming_sms(request: Request):
             return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
         
         normalized_to = normalize_phone_number(to_number)
+        logger.info(f"🔍 Looking up registered phone: {normalized_to}")
         registered_phone = await phone_store.get_phone_by_number(normalized_to)
         
         if not registered_phone or registered_phone.get("isActive") == False or registered_phone.get("isDeleted") == True:
             logger.warning(f"❌ Phone number '{to_number}' is NOT registered or inactive")
             return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
         
-        # Store incoming message in MongoDB (will get or create conversation_id with UUID)
-        logger.info(f"💾 Storing incoming message in MongoDB...")
-        message_stored = await message_store.create_message(
-            message_sid=message_sid,
-            from_number=from_number,
-            to_number=to_number,
-            body=message_body,
-            agent_id=normalized_to
-        )
-        
-        if not message_stored:
-            logger.error(f"❌ Failed to store incoming message {message_sid} in MongoDB")
-            # Continue processing even if storage fails (don't block response)
-        else:
-            logger.info(f"✅ Successfully stored incoming message {message_sid} in MongoDB")
-        
-        # Get conversation_id for this conversation (to use for outbound message)
-        conversation_id = await message_store.get_conversation_id(from_number, to_number, normalized_to)
-        logger.info(f"📝 Conversation ID: {conversation_id}")
-        
         # Validate message body first - if empty, don't process (no response sent)
         if not message_body or not message_body.strip():
             logger.warning(f"⚠️ Empty message body received from {from_number} - no response sent")
             return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
         
-        # Load messaging agent configuration
-        agent_config = await twilio_phone_tool._load_agent_config(normalized_to, direction="messaging")
+        # STEP 1: Search MongoDB for messages by phone number (agent_id)
+        logger.info(f"📚 Searching MongoDB for messages by phone number (agent_id): {normalized_to}")
+        all_messages = await message_store.get_all_messages_by_agent_id(agent_id=normalized_to, limit=100)
+        logger.info(f"📚 Found {len(all_messages)} existing message(s) for phone number: {normalized_to}")
+        
+        # STEP 2: Store incoming message in MongoDB (with duplicate check)
+        logger.info(f"💾 Storing incoming message in MongoDB...")
+        conversation_id = None
+        try:
+            message_stored = await message_store.create_message(
+                message_sid=message_sid,
+                from_number=from_number,
+                to_number=to_number,
+                body=message_body,
+                agent_id=normalized_to
+            )
+            
+            if not message_stored:
+                logger.warning(f"⚠️ Message {message_sid} not stored (may be duplicate or error)")
+                # Try to get conversation_id anyway for response storage
+                conversation_id = await message_store.get_or_create_conversation_id(from_number, to_number, normalized_to)
+            else:
+                logger.info(f"✅ Successfully stored incoming message {message_sid} in MongoDB")
+                # Get conversation_id for this conversation (to use for outbound message)
+                conversation_id = await message_store.get_conversation_id(from_number, to_number, normalized_to)
+                if not conversation_id:
+                    logger.warning(f"⚠️ Could not retrieve conversation_id after storing message - will try to get/create again")
+                    conversation_id = await message_store.get_or_create_conversation_id(from_number, to_number, normalized_to)
+        except Exception as store_error:
+            logger.error(f"❌ Exception storing incoming message {message_sid}: {store_error}", exc_info=True)
+            # Try to get conversation_id anyway
+            conversation_id = await message_store.get_or_create_conversation_id(from_number, to_number, normalized_to)
+        
+        logger.info(f"📝 Conversation ID: {conversation_id}")
+        
+        # Load messaging agent configuration from messaging_agents collection
+        logger.info(f"🔍 ========== LOADING MESSAGING AGENT ==========")
+        logger.info(f"🔍 Phone number to lookup: {normalized_to}")
+        logger.info(f"🔍 Collection: messaging_agents")
+        from databases.mongodb_message_agent_store import MongoDBMessageAgentStore
+        message_agent_store = MongoDBMessageAgentStore()
+        logger.info(f"🔍 Querying MongoDB for messaging agent with phoneNumber={normalized_to}...")
+        agent_config = await message_agent_store.get_message_agent_by_phone(normalized_to)
         
         if not agent_config:
-            logger.warning(f"❌ No messaging agent found for phone number {normalized_to}")
+            logger.warning(f"❌ ========== NO MESSAGING AGENT FOUND ==========")
+            logger.warning(f"❌ Phone number: {normalized_to}")
+            logger.warning(f"❌ Collection searched: messaging_agents")
+            logger.warning(f"❌ Make sure you have created a messaging agent for this number")
+            logger.warning(f"❌ No response will be sent to user")
             # No response sent if no agent configured
             return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
         
+        logger.info(f"✅ ========== MESSAGING AGENT FOUND ==========")
+        logger.info(f"✅ Agent ID: {agent_config.get('id', 'N/A')}")
+        logger.info(f"✅ Agent name: {agent_config.get('name', 'Unknown')}")
+        logger.info(f"✅ Agent phone: {agent_config.get('phoneNumber', 'N/A')}")
+        logger.info(f"✅ Agent active status: {agent_config.get('active', False)}")
+        logger.info(f"✅ Agent direction: {agent_config.get('direction', 'N/A')}")
+        logger.info(f"✅ Agent inference model: {agent_config.get('inferenceModel', 'N/A')}")
+        
         # Check if agent is active - messaging agents must be active to respond
         if not agent_config.get("active", False):
-            logger.info(f"📱 Messaging agent for {normalized_to} is inactive - no response sent")
+            logger.warning(f"⚠️ ========== AGENT IS INACTIVE ==========")
+            logger.warning(f"⚠️ Messaging agent '{agent_config.get('name')}' for {normalized_to} is INACTIVE")
+            logger.warning(f"⚠️ No response will be sent to user")
+            logger.warning(f"⚠️ To enable responses, activate the agent in the UI")
             return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
         
-        logger.info(f"📱 Active messaging agent found for {normalized_to} - will process message and respond")
+        logger.info(f"✅ ========== AGENT IS ACTIVE - PROCESSING MESSAGE ==========")
+        logger.info(f"✅ Active messaging agent '{agent_config.get('name')}' found for {normalized_to}")
+        logger.info(f"✅ Will process message and generate AI response")
         
-        # Get conversation history for personalization
-        conversation_history = await message_store.get_conversation_history(
-            from_number=from_number,
-            to_number=to_number,
-            agent_id=normalized_to,
-            limit=50
-        )
+        # STEP 3: Get conversation history for this specific conversation (from_number <-> to_number)
+        # Filter all messages for this phone number to get this specific conversation
+        conversation_history = []
+        if conversation_id:
+            # Filter messages for this conversation_id from all messages for this phone number
+            conversation_history = [msg for msg in all_messages if msg.get("conversation_id") == conversation_id]
+            logger.info(f"📚 Filtered {len(conversation_history)} message(s) for conversation_id: {conversation_id}")
+        else:
+            # Fallback: get conversation history using the method
+            conversation_history = await message_store.get_conversation_history(
+                from_number=from_number,
+                to_number=to_number,
+                agent_id=normalized_to,
+                limit=50
+            )
+            logger.info(f"📚 Retrieved {len(conversation_history)} message(s) using fallback method")
+        
+        logger.info(f"📚 Using {len(conversation_history)} message(s) from conversation history for LLM")
         
         # Process message and generate AI response
         logger.info(f"🤖 Processing message with AI agent: {agent_config.get('name')}")
@@ -1244,12 +1344,16 @@ async def twilio_incoming_sms(request: Request):
         # Send SMS response via Twilio
         try:
             # Get Twilio credentials for this phone number
+            logger.info(f"🔑 Getting Twilio credentials for {normalized_to}...")
             from utils.twilio_credentials import get_twilio_credentials_for_phone
             twilio_creds = await get_twilio_credentials_for_phone(normalized_to)
             
             if not twilio_creds:
                 logger.error(f"❌ Could not get Twilio credentials for {normalized_to}")
+                logger.error(f"   Make sure the phone number is registered with valid Twilio credentials")
                 return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
+            
+            logger.info(f"✅ Got Twilio credentials (Account SID: {twilio_creds.get('account_sid', 'N/A')[:10]}...)")
             
             twilio_client = TwilioClient(
                 twilio_creds["account_sid"],
@@ -1257,43 +1361,139 @@ async def twilio_incoming_sms(request: Request):
             )
             
             # Send SMS response
+            logger.info(f"📤 Sending SMS response to {from_number} from {to_number}...")
+            logger.info(f"   Response text: {response_text[:100]}...")
             sent_message = twilio_client.messages.create(
                 body=response_text,
                 from_=to_number,
                 to=from_number
             )
             
-            logger.info(f"✅ Sent SMS response (MessageSid: {sent_message.sid}): {response_text[:50]}...")
+            logger.info(f"✅ Sent SMS response successfully!")
+            logger.info(f"   MessageSid: {sent_message.sid}")
+            logger.info(f"   Status: {sent_message.status}")
+            logger.info(f"   Response preview: {response_text[:50]}...")
             
             # Store outbound message in MongoDB (use same conversation_id)
-            logger.info(f"💾 Storing outbound message in MongoDB...")
-            outbound_stored = await message_store.create_outbound_message(
-                message_sid=sent_message.sid,
-                from_number=to_number,
-                to_number=from_number,
-                body=response_text,
-                agent_id=normalized_to,
-                conversation_id=conversation_id  # Use same conversation_id as inbound message
-            )
-            
-            if not outbound_stored:
-                logger.error(f"❌ Failed to store outbound message {sent_message.sid} in MongoDB")
+            if conversation_id:
+                logger.info(f"💾 Storing outbound message in MongoDB with conversation_id: {conversation_id}...")
+                outbound_stored = await message_store.create_outbound_message(
+                    message_sid=sent_message.sid,
+                    from_number=to_number,
+                    to_number=from_number,
+                    body=response_text,
+                    agent_id=normalized_to,
+                    conversation_id=conversation_id  # Use same conversation_id as inbound message
+                )
+                
+                if not outbound_stored:
+                    logger.error(f"❌ Failed to store outbound message {sent_message.sid} in MongoDB")
+                    logger.error(f"   This won't affect the SMS delivery, but message won't appear in UI")
+                else:
+                    logger.info(f"✅ Successfully stored outbound message {sent_message.sid} in MongoDB")
             else:
-                logger.info(f"✅ Successfully stored outbound message {sent_message.sid} in MongoDB")
+                logger.warning(f"⚠️ No conversation_id available, skipping outbound message storage")
+                logger.warning(f"   Message was sent but won't appear in UI without conversation_id")
             
         except Exception as send_error:
             logger.error(f"❌ Error sending SMS response: {send_error}", exc_info=True)
             # Still return success to Twilio (message was received)
         
         # Return empty TwiML response (we sent SMS via REST API)
+        logger.info(f"📱 ========== SMS WEBHOOK PROCESSING COMPLETE ==========")
         return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
         
     except Exception as e:
-        logger.error(f"❌ CRITICAL ERROR handling incoming SMS webhook: {e}", exc_info=True)
+        logger.error(f"❌ ========== CRITICAL ERROR IN SMS WEBHOOK ==========")
+        logger.error(f"❌ Error: {e}", exc_info=True)
         import traceback
-        logger.error(f"Full traceback:\n{traceback.format_exc()}")
+        logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
         # Return empty response to avoid Twilio retries
         return HTMLResponse(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', status_code=500)
+
+
+@app.post(
+    "/webhooks/twilio/sms/test",
+    summary="Test SMS Webhook (Simulate Incoming SMS)",
+    description="Test endpoint to simulate receiving an SMS message. Useful for testing the messaging flow without sending actual SMS.",
+    tags=["Twilio Phone Integration", "Testing"],
+    response_model=Dict[str, Any]
+)
+async def test_sms_webhook(
+    from_number: str = Form(..., description="From phone number (e.g., +15551234567)"),
+    to_number: str = Form(..., description="To phone number (your registered number, e.g., +15559876543)"),
+    body: str = Form(..., description="Message body"),
+    message_sid: Optional[str] = Form("SM_TEST_" + datetime.utcnow().strftime("%Y%m%d%H%M%S"), description="Test MessageSid")
+):
+    """
+    Test endpoint to simulate an incoming SMS webhook.
+    
+    This endpoint simulates what Twilio sends when an SMS is received.
+    It processes the message through the same flow as the real webhook.
+    
+    **Usage:**
+    ```bash
+    curl -X POST "http://localhost:4002/webhooks/twilio/sms/test" \\
+      -F "from_number=+15551234567" \\
+      -F "to_number=+15559876543" \\
+      -F "body=Hello, this is a test message"
+    ```
+    
+    **Note:** The 'to_number' must be a registered phone number with an active messaging agent.
+    """
+    try:
+        logger.info(f"🧪 ========== TEST SMS WEBHOOK CALLED ==========")
+        logger.info(f"🧪 This is a TEST endpoint - simulating incoming SMS")
+        logger.info(f"🧪 From: {from_number}")
+        logger.info(f"🧪 To: {to_number}")
+        logger.info(f"🧪 Body: {body}")
+        logger.info(f"🧪 MessageSid: {message_sid}")
+        
+        # Create a mock request with form data that mimics Twilio's webhook
+        from starlette.datastructures import FormData
+        
+        # Create form data that mimics Twilio's webhook format
+        form_items = [
+            ("MessageSid", message_sid),
+            ("From", from_number),
+            ("To", to_number),
+            ("Body", body),
+            ("AccountSid", "TEST_ACCOUNT_SID"),
+            ("NumMedia", "0")
+        ]
+        
+        # Create a mock request object that returns FormData
+        class MockRequest:
+            def __init__(self, form_items):
+                self._form_items = form_items
+            
+            async def form(self):
+                form_data = FormData(self._form_items)
+                return form_data
+        
+        mock_request = MockRequest(form_items)
+        
+        # Call the actual SMS webhook handler
+        logger.info(f"🧪 Calling actual SMS webhook handler...")
+        response = await twilio_incoming_sms(mock_request)
+        
+        logger.info(f"🧪 ========== TEST SMS WEBHOOK COMPLETE ==========")
+        
+        return {
+            "success": True,
+            "message": "Test SMS webhook processed",
+            "test_data": {
+                "from": from_number,
+                "to": to_number,
+                "body": body,
+                "message_sid": message_sid
+            },
+            "note": "Check server logs for detailed processing information"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error in test SMS webhook: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Test webhook error: {str(e)}")
 
 
 @app.post(
@@ -2183,7 +2383,7 @@ async def nextjs_session_api(request: Request, path: str = ""):
 @app.post(
     "/agents",
     summary="Create Agent",
-    description="Create a new voice agent with configuration. Stores agent in MongoDB 'agents' collection. All configuration fields are stored including STT model, TTS model, inference model, prompts, and Twilio credentials.",
+    description="Create a new voice agent with configuration. Stores agent in MongoDB 'voice_agents' collection. All configuration fields are stored including STT model, TTS model, inference model, prompts, and Twilio credentials.",
     tags=["Agents"],
     responses={
         200: {
@@ -2231,7 +2431,7 @@ async def create_agent(request: Request):
     
     **Stores in MongoDB:**
     - Database: `voiceagent` (from MONGODB_DATABASE config)
-    - Collection: `agents`
+    - Collection: `voice_agents`
     - All configuration fields are persisted
     - Webhook URLs are automatically generated and stored
     """
@@ -2269,7 +2469,7 @@ async def create_agent(request: Request):
         
         logger.info(f"✅ Agent created successfully with ID: {agent_id}")
         logger.info(f"📞 Agent will be automatically identified by phone number: {agent_data.get('phoneNumber')}")
-        logger.info(f"💾 Agent saved to MongoDB: database='voiceagent', collection='agents'")
+        logger.info(f"💾 Agent saved to MongoDB: database='voiceagent', collection='voice_agents'")
         logger.info(f"🔗 Webhook URLs saved to MongoDB:")
         logger.info(f"   Incoming: {single_incoming_url}")
         logger.info(f"   Status: {single_status_url}")
@@ -2281,7 +2481,7 @@ async def create_agent(request: Request):
             "message": "Agent created successfully and stored in MongoDB",
             "mongodb": {
                 "database": "voiceagent",
-                "collection": "agents",
+                "collection": "voice_agents",
                 "saved": True
             },
             "webhookConfiguration": {
@@ -2300,7 +2500,7 @@ async def create_agent(request: Request):
                 ]
             },
             "database": "voiceagent",
-            "collection": "agents"
+            "collection": "voice_agents"
         }
             
     except HTTPException:
@@ -2374,6 +2574,190 @@ async def list_agents(
         logger.error(f"Error listing agents: {e}", exc_info=True)
         # Return empty list instead of raising error - UI should show empty state
         return {"success": True, "agents": [], "count": 0, "error": str(e), "mongodb_available": False}
+
+@app.post(
+    "/api/message-agents",
+    summary="Create Message Agent",
+    description="Create a new messaging agent. Stores in messaging_agents collection. Requires registered phone number.",
+    tags=["Message Agents"],
+    response_model=Dict[str, Any]
+)
+async def create_message_agent(request: Request):
+    """
+    Create a new messaging agent with configuration.
+    
+    **Request Body Fields:**
+    - `name` (string, required): Agent name
+    - `phoneNumber` (string, required): Phone number (must be registered)
+    - `systemPrompt` (string): System prompt for the agent
+    - `greeting` (string): Initial greeting message
+    - `inferenceModel` (string): LLM model (default: "gpt-4o-mini")
+    - `temperature` (number): LLM temperature (0-2, default: 0.7)
+    - `maxTokens` (number): Max response tokens (default: 500)
+    - `active` (boolean): Enable agent to receive messages (default: true)
+    
+    **Stores in MongoDB:**
+    - Database: `voiceagent`
+    - Collection: `messaging_agents`
+    """
+    try:
+        agent_data = await request.json()
+        logger.info(f"Received message agent creation request: {agent_data.get('name')} ({agent_data.get('phoneNumber')})")
+        
+        from databases.mongodb_message_agent_store import MongoDBMessageAgentStore
+        from databases.mongodb_db import is_mongodb_available
+        from databases.mongodb_phone_store import MongoDBPhoneStore
+        
+        # Check MongoDB availability
+        if not is_mongodb_available():
+            logger.error("MongoDB is not available for message agent storage")
+            raise HTTPException(status_code=503, detail="MongoDB is not available. Please check MongoDB connection.")
+        
+        # Verify phone number is registered
+        phone_number = agent_data.get("phoneNumber")
+        if not phone_number:
+            raise HTTPException(status_code=400, detail="Phone number is required")
+        
+        phone_store = MongoDBPhoneStore()
+        from databases.mongodb_phone_store import normalize_phone_number
+        normalized_phone = normalize_phone_number(phone_number)
+        registered_phone = await phone_store.get_phone_by_number(normalized_phone)
+        
+        if not registered_phone or registered_phone.get("isActive") == False or registered_phone.get("isDeleted") == True:
+            raise HTTPException(status_code=400, detail=f"Phone number {phone_number} is not registered or inactive. Please register the phone number first.")
+        
+        message_agent_store = MongoDBMessageAgentStore()
+        
+        # Create message agent
+        agent_id = await message_agent_store.create_message_agent(agent_data)
+        
+        if not agent_id:
+            logger.error("Failed to create message agent - create_message_agent returned None")
+            raise HTTPException(status_code=500, detail="Failed to create message agent in MongoDB")
+        
+        logger.info(f"✅ Message agent created successfully with ID: {agent_id}")
+        logger.info(f"💾 Message agent saved to MongoDB: database='voiceagent', collection='messaging_agents'")
+        
+        return {
+            "success": True,
+            "agent_id": agent_id,
+            "message": "Message agent created successfully and stored in MongoDB",
+            "mongodb": {
+                "database": "voiceagent",
+                "collection": "messaging_agents",
+                "saved": True
+            }
+        }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating message agent: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error creating message agent: {str(e)}")
+
+@app.get(
+    "/api/message-agents",
+    summary="List Message Agents",
+    description="Get all messaging agents from MongoDB. Returns list of all messaging agents with their configurations.",
+    tags=["Message Agents"],
+    response_model=Dict[str, Any]
+)
+async def list_message_agents(
+    active_only: Optional[bool] = Query(False, description="Only return active agents (active=true)"),
+    include_deleted: Optional[bool] = Query(False, description="Include soft-deleted agents (isDeleted=true)")
+):
+    """
+    List all messaging agents from MongoDB.
+    
+    **Query Parameters:**
+    - `active_only` (boolean, optional): If true, only returns agents where active=true
+    - `include_deleted` (boolean, optional): If true, includes soft-deleted agents (isDeleted=true)
+    
+    **Returns:**
+    - List of message agent objects with all configuration fields
+    """
+    try:
+        from databases.mongodb_message_agent_store import MongoDBMessageAgentStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        # Check MongoDB availability first
+        if not is_mongodb_available():
+            logger.warning("MongoDB is not available - returning empty message agents list")
+            return {"success": True, "agents": [], "count": 0, "mongodb_available": False}
+        
+        message_agent_store = MongoDBMessageAgentStore()
+        agents = await message_agent_store.list_message_agents(active_only=active_only, include_deleted=include_deleted)
+        
+        logger.info(f"✅ Returning {len(agents)} message agent(s) from MongoDB (include_deleted={include_deleted})")
+        return {"success": True, "agents": agents, "count": len(agents), "mongodb_available": True}
+        
+    except Exception as e:
+        logger.error(f"Error listing message agents: {e}", exc_info=True)
+        # Return empty list instead of raising error - UI should show empty state
+        return {"success": True, "agents": [], "count": 0, "error": str(e), "mongodb_available": False}
+
+@app.put(
+    "/api/message-agents/{agent_id}",
+    summary="Update Message Agent",
+    description="Update a messaging agent configuration.",
+    tags=["Message Agents"],
+    response_model=Dict[str, Any]
+)
+async def update_message_agent(agent_id: str, request: Request):
+    """Update a messaging agent"""
+    try:
+        update_data = await request.json()
+        logger.info(f"Updating message agent {agent_id}")
+        
+        from databases.mongodb_message_agent_store import MongoDBMessageAgentStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        if not is_mongodb_available():
+            raise HTTPException(status_code=503, detail="MongoDB is not available")
+        
+        message_agent_store = MongoDBMessageAgentStore()
+        success = await message_agent_store.update_message_agent(agent_id, update_data)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Message agent not found")
+        
+        return {"success": True, "message": "Message agent updated successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating message agent: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error updating message agent: {str(e)}")
+
+@app.delete(
+    "/api/message-agents/{agent_id}",
+    summary="Delete Message Agent",
+    description="Soft delete a messaging agent (sets isDeleted=True).",
+    tags=["Message Agents"],
+    response_model=Dict[str, Any]
+)
+async def delete_message_agent(agent_id: str):
+    """Delete a messaging agent (soft delete)"""
+    try:
+        from databases.mongodb_message_agent_store import MongoDBMessageAgentStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        if not is_mongodb_available():
+            raise HTTPException(status_code=503, detail="MongoDB is not available")
+        
+        message_agent_store = MongoDBMessageAgentStore()
+        success = await message_agent_store.delete_message_agent(agent_id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Message agent not found")
+        
+        return {"success": True, "message": "Message agent deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting message agent: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error deleting message agent: {str(e)}")
 
 @app.get(
     "/api/voices",
@@ -3692,17 +4076,20 @@ async def debug_messages():
         total_messages = await collection.count_documents({})
         
         # Get sample messages
+        # Note: Messages are stored in an array within documents (one doc per agent_id)
         sample_messages = []
-        async for doc in collection.find({}).sort("timestamp", -1).limit(5):
+        message_store = MongoDBMessageStore()
+        all_messages = await message_store.get_all_messages(limit=5)
+        for msg in all_messages[:5]:
             sample_messages.append({
-                "message_sid": doc.get("message_sid"),
-                "from_number": doc.get("from_number"),
-                "to_number": doc.get("to_number"),
-                "body": doc.get("body", "")[:50],
-                "direction": doc.get("direction"),
-                "conversation_id": doc.get("conversation_id"),
-                "agent_id": doc.get("agent_id"),
-                "timestamp": doc.get("timestamp")
+                "message_sid": msg.get("message_sid"),
+                "agent_number": msg.get("agent_number"),
+                "user_number": msg.get("user_number"),
+                "body": msg.get("body", "")[:50],
+                "direction": msg.get("direction"),
+                "conversation_id": msg.get("conversation_id"),
+                "agent_id": msg.get("agent_id"),
+                "timestamp": msg.get("timestamp")
             })
         
         # Get unique conversation_ids
@@ -3763,6 +4150,11 @@ async def get_all_messages(
         if conversations:
             logger.info(f"   Sample conversation_id: {conversations[0].get('conversation_id', 'N/A')}")
             logger.info(f"   Sample message_count: {conversations[0].get('message_count', 0)}")
+            logger.info(f"   Sample phoneNumberId: {conversations[0].get('phoneNumberId', 'N/A')}")
+            logger.info(f"   Sample callerNumber: {conversations[0].get('callerNumber', 'N/A')}")
+            logger.info(f"   Sample conversation length: {len(conversations[0].get('conversation', []))}")
+        else:
+            logger.warning("⚠️ No conversations returned from get_conversations - check if messages exist in MongoDB")
         
         return {"messages": conversations}
         
@@ -3808,8 +4200,8 @@ async def get_conversation_by_id(conversation_id: str):
             "id": conversation_id,
             "conversation_id": conversation_id,
             "phoneNumberId": first_message.get("agent_id"),
-            "callerNumber": first_message.get("from_number"),
-            "agentNumber": first_message.get("to_number"),
+            "callerNumber": first_message.get("user_number"),  # User is the caller
+            "agentNumber": first_message.get("agent_number"),  # Agent number
             "status": "active",
             "timestamp": first_message.get("timestamp"),
             "conversation": conversation_messages
@@ -3822,6 +4214,357 @@ async def get_conversation_by_id(conversation_id: str):
     except Exception as e:
         logger.error(f"Error getting conversation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(
+    "/api/messages/send",
+    summary="Send SMS Message",
+    description="Send an SMS message from a registered phone number. Validates that the 'from' phone number is registered and active.",
+    tags=["Messages"],
+    responses={
+        200: {
+            "description": "Message sent successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "message_sid": "SM1234567890abcdef",
+                        "message": "SMS sent successfully",
+                        "from": "+15551234567",
+                        "to": "+15559876543"
+                    }
+                }
+            }
+        },
+        400: {
+            "description": "Validation error",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Phone number +15551234567 is not registered or inactive"}
+                }
+            }
+        },
+        500: {
+            "description": "Failed to send message",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Failed to send SMS: Invalid phone number"}
+                }
+            }
+        }
+    }
+)
+async def send_sms_message(request: Request):
+    """
+    Send an SMS message from a registered phone number.
+    
+    **Request Body:**
+    ```json
+    {
+        "from": "+15551234567",  // Your registered Twilio number (required)
+        "to": "+15559876543",    // Destination number (required)
+        "body": "Hello, this is a test message!"  // Message text (required)
+    }
+    ```
+    
+    **Validation:**
+    - The 'from' phone number MUST be registered and active in MongoDB
+    - The 'to' phone number must be in valid E.164 format
+    - Message body is required and cannot be empty
+    
+    **Flow:**
+    1. Validates 'from' number is registered and active
+    2. Gets Twilio credentials for the 'from' number
+    3. Sends SMS via Twilio REST API
+    4. Stores message in MongoDB for conversation tracking
+    """
+    try:
+        from databases.mongodb_phone_store import MongoDBPhoneStore, normalize_phone_number
+        from databases.mongodb_db import is_mongodb_available
+        from databases.mongodb_message_store import MongoDBMessageStore
+        from utils.twilio_credentials import get_twilio_credentials_for_phone
+        
+        if not is_mongodb_available():
+            raise HTTPException(status_code=503, detail="MongoDB is not available. Please check MongoDB connection.")
+        
+        request_data = await request.json()
+        from_number = request_data.get("from")
+        to_number = request_data.get("to")
+        message_body = request_data.get("body", "")
+        
+        # Validate required fields
+        if not from_number:
+            raise HTTPException(status_code=400, detail="'from' phone number is required")
+        if not to_number:
+            raise HTTPException(status_code=400, detail="'to' phone number is required")
+        if not message_body or not message_body.strip():
+            raise HTTPException(status_code=400, detail="Message body is required and cannot be empty")
+        
+        # Normalize phone numbers
+        normalized_from = normalize_phone_number(from_number)
+        normalized_to = normalize_phone_number(to_number)
+        
+        logger.info(f"📤 Sending SMS: {normalized_from} -> {normalized_to}")
+        logger.info(f"   Message: {message_body[:100]}...")
+        
+        # Check if 'from' number is registered and active
+        phone_store = MongoDBPhoneStore()
+        registered_phone = await phone_store.get_phone_by_number(normalized_from)
+        
+        if not registered_phone:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Phone number {from_number} is not registered. Please register it first."
+            )
+        
+        if registered_phone.get("isActive") == False or registered_phone.get("isDeleted") == True:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Phone number {from_number} is not active. Please activate it first."
+            )
+        
+        # Get Twilio credentials
+        twilio_creds = await get_twilio_credentials_for_phone(normalized_from)
+        if not twilio_creds:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not get Twilio credentials for {from_number}. Please check phone registration."
+            )
+        
+        # Create Twilio client
+        twilio_client = TwilioClient(
+            twilio_creds["account_sid"],
+            twilio_creds["auth_token"]
+        )
+        
+        # Send SMS via Twilio
+        try:
+            sent_message = twilio_client.messages.create(
+                body=message_body,
+                from_=normalized_from,
+                to=normalized_to
+            )
+            
+            logger.info(f"✅ SMS sent successfully!")
+            logger.info(f"   MessageSid: {sent_message.sid}")
+            logger.info(f"   Status: {sent_message.status}")
+            
+            # Store outbound message in MongoDB
+            message_store = MongoDBMessageStore()
+            try:
+                # Get or create conversation_id
+                # For outbound messages: from_number is the agent, to_number is the user
+                conversation_id = await message_store.get_or_create_conversation_id(
+                    from_number=normalized_to,  # User's number (recipient)
+                    to_number=normalized_from,  # Agent's number (sender)
+                    agent_id=normalized_from
+                )
+                
+                if conversation_id:
+                    await message_store.create_outbound_message(
+                        message_sid=sent_message.sid,
+                        from_number=normalized_from,
+                        to_number=normalized_to,
+                        body=message_body,
+                        agent_id=normalized_from,
+                        conversation_id=conversation_id
+                    )
+                    logger.info(f"✅ Stored outbound message in MongoDB")
+                else:
+                    logger.warning(f"⚠️ Could not get conversation_id, message sent but not stored")
+            except Exception as store_error:
+                logger.error(f"❌ Error storing message in MongoDB: {store_error}", exc_info=True)
+                # Don't fail the request - message was sent successfully
+            
+            return {
+                "success": True,
+                "message_sid": sent_message.sid,
+                "message": "SMS sent successfully",
+                "from": normalized_from,
+                "to": normalized_to,
+                "status": sent_message.status
+            }
+            
+        except Exception as twilio_error:
+            logger.error(f"❌ Twilio error sending SMS: {twilio_error}", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to send SMS via Twilio: {str(twilio_error)}"
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending SMS: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")
+
+@app.get(
+    "/api/debug/calls",
+    summary="Debug Calls Endpoint",
+    description="Debug endpoint to check if calls exist in MongoDB and diagnose issues",
+    tags=["Debug"]
+)
+async def debug_calls():
+    """Debug endpoint to check call storage"""
+    try:
+        from databases.mongodb_call_store import MongoDBCallStore
+        from databases.mongodb_db import is_mongodb_available, get_mongo_db
+        
+        if not is_mongodb_available():
+            return {
+                "mongodb_available": False,
+                "message": "MongoDB is not available"
+            }
+        
+        db = get_mongo_db()
+        if db is None:
+            return {
+                "mongodb_available": False,
+                "message": "Failed to get MongoDB database"
+            }
+        
+        collection = db["calls"]
+        
+        # Get raw call count
+        total_calls = await collection.count_documents({})
+        active_calls = await collection.count_documents({"status": "active"})
+        completed_calls = await collection.count_documents({"status": "completed"})
+        
+        # Get sample calls
+        sample_calls = []
+        async for doc in collection.find({}).sort("created_at", -1).limit(5):
+            sample_calls.append({
+                "call_sid": doc.get("call_sid"),
+                "from_number": doc.get("from_number"),
+                "to_number": doc.get("to_number"),
+                "agent_id": doc.get("agent_id"),
+                "status": doc.get("status"),
+                "start_time": doc.get("start_time"),
+                "end_time": doc.get("end_time"),
+                "duration_seconds": doc.get("duration_seconds"),
+                "transcript_count": len(doc.get("transcript", [])),
+                "created_at": doc.get("created_at")
+            })
+        
+        # Test get_all_calls
+        call_store = MongoDBCallStore()
+        all_calls = await call_store.get_all_calls(limit=10)
+        active_calls_list = await call_store.get_active_calls()
+        
+        return {
+            "mongodb_available": True,
+            "total_calls": total_calls,
+            "active_calls_count": active_calls,
+            "completed_calls_count": completed_calls,
+            "sample_calls": sample_calls,
+            "calls_from_get_all_calls": len(all_calls),
+            "active_calls_from_get_active": len(active_calls_list),
+            "sample_call": all_calls[0] if all_calls else None
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in debug calls endpoint: {e}", exc_info=True)
+        import traceback
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+@app.get(
+    "/api/debug/collections",
+    summary="Debug Collections Endpoint",
+    description="List all MongoDB collections and their document counts",
+    tags=["Debug"]
+)
+async def debug_collections():
+    """Debug endpoint to list all MongoDB collections"""
+    try:
+        from databases.mongodb_db import is_mongodb_available, get_mongo_db, list_collections
+        
+        if not is_mongodb_available():
+            return {
+                "mongodb_available": False,
+                "message": "MongoDB is not available"
+            }
+        
+        collections_info = await list_collections()
+        
+        return {
+            "mongodb_available": True,
+            "collections": collections_info
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in debug collections endpoint: {e}", exc_info=True)
+        import traceback
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+@app.get(
+    "/api/debug/mongodb",
+    summary="Debug MongoDB Connection",
+    description="Test MongoDB connection and provide comprehensive diagnostics",
+    tags=["Debug"]
+)
+async def debug_mongodb():
+    """Debug endpoint to test MongoDB connection and provide diagnostics"""
+    try:
+        from databases.mongodb_db import is_mongodb_available, get_mongo_db, list_collections, test_connection
+        from config import MONGODB_URL, MONGODB_DATABASE
+        
+        # Test connection
+        connection_test = await test_connection()
+        
+        if not is_mongodb_available():
+            return {
+                "mongodb_available": False,
+                "connection_test": connection_test,
+                "message": "MongoDB is not available"
+            }
+        
+        db = get_mongo_db()
+        if db is None:
+            return {
+                "mongodb_available": False,
+                "connection_test": connection_test,
+                "message": "Failed to get MongoDB database"
+            }
+        
+        # List all collections
+        collections_info = await list_collections()
+        
+        # Expected collections
+        expected_collections = [
+            "calls",
+            "messages",
+            "messaging_agents",
+            "voice_agents",
+            "registered_phone_numbers",
+            "conversations"
+        ]
+        
+        existing_collection_names = [c["name"] for c in collections_info]
+        missing_collections = [c for c in expected_collections if c not in existing_collection_names]
+        
+        return {
+            "mongodb_available": True,
+            "connection_test": connection_test,
+            "database": MONGODB_DATABASE,
+            "mongodb_url_preview": MONGODB_URL[:50] + "..." if len(MONGODB_URL) > 50 else MONGODB_URL,
+            "collections": collections_info,
+            "expected_collections": expected_collections,
+            "missing_collections": missing_collections,
+            "all_collections_exist": len(missing_collections) == 0
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in debug mongodb endpoint: {e}", exc_info=True)
+        import traceback
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 @app.get(
     "/api/calls/{call_sid}/verify",

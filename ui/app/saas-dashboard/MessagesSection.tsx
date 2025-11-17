@@ -2,12 +2,13 @@
 
 import { useState, useEffect, useMemo } from 'react'
 import { motion } from 'framer-motion'
-import { MessageSquare, Clock, Search } from 'lucide-react'
+import { MessageSquare, Clock, Search, Phone } from 'lucide-react'
 import { CallList } from '@/components/CallList'
-import { Message } from '@/lib/api'
+import { Message, fetchRegisteredPhones } from '@/lib/api'
 import { fetchMessages } from '@/lib/api'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { SendMessageForm } from './SendMessageForm'
 import { cn } from '@/lib/utils'
 
 export function MessagesSection() {
@@ -15,6 +16,8 @@ export function MessagesSection() {
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
+  const [registeredPhones, setRegisteredPhones] = useState<any[]>([])
+  const [showSendForm, setShowSendForm] = useState(false)
 
   // Helper function to compare messages and detect changes
   const messagesHaveChanged = (oldMessages: Message[], newMessages: Message[]): boolean => {
@@ -57,12 +60,12 @@ export function MessagesSection() {
       const transformedMessages: Message[] = fetchedMessages.map((msg: any) => ({
         id: msg.id || msg.conversation_id,
         phoneNumberId: msg.phoneNumberId || msg.agent_id,
-        callerNumber: msg.callerNumber || msg.from_number,
+        callerNumber: msg.callerNumber || msg.user_number || msg.from_number, // Use new field name (user_number) with backward compatibility
         status: 'active' as const, // Messages are always active (ongoing conversations)
         timestamp: msg.timestamp || msg.latest_timestamp,
         conversation: msg.conversation || [],
         conversation_id: msg.conversation_id || msg.id,
-        agentNumber: msg.agentNumber || msg.to_number,
+        agentNumber: msg.agentNumber || msg.agent_number || msg.to_number, // Use new field name (agent_number) with backward compatibility
         latest_message: msg.latest_message,
         message_count: msg.message_count
       }))
@@ -100,11 +103,10 @@ export function MessagesSection() {
     return () => clearInterval(interval)
   }, [selectedAgent])
 
-  // Filter messages based on search query
-  const filteredMessages = useMemo(() => {
+  // Group messages by phone number (agent_id) and filter
+  const groupedMessages = useMemo(() => {
+    // First filter by search query
     let filtered = messages
-
-    // Filter by search query (search in caller number, latest message, or conversation)
     if (searchQuery.trim()) {
       const query = searchQuery.toLowerCase()
       filtered = filtered.filter(msg => {
@@ -117,13 +119,36 @@ export function MessagesSection() {
       })
     }
 
-    // Sort by timestamp (most recent first)
-    return filtered.sort((a, b) => {
-      const timeA = new Date(a.timestamp || 0).getTime()
-      const timeB = new Date(b.timestamp || 0).getTime()
-      return timeB - timeA
+    // Group by phoneNumberId (agent_id)
+    const grouped = new Map<string, Message[]>()
+    filtered.forEach(msg => {
+      const phoneId = msg.phoneNumberId || 'unknown'
+      if (!grouped.has(phoneId)) {
+        grouped.set(phoneId, [])
+      }
+      grouped.get(phoneId)!.push(msg)
     })
+
+    // Sort messages within each group by timestamp (most recent first)
+    grouped.forEach((msgs, phoneId) => {
+      msgs.sort((a, b) => {
+        const timeA = new Date(a.timestamp || 0).getTime()
+        const timeB = new Date(b.timestamp || 0).getTime()
+        return timeB - timeA
+      })
+    })
+
+    return grouped
   }, [messages, searchQuery])
+
+  // Flatten grouped messages for display (but keep grouping info)
+  const filteredMessages = useMemo(() => {
+    const result: Message[] = []
+    groupedMessages.forEach((msgs, phoneId) => {
+      result.push(...msgs)
+    })
+    return result
+  }, [groupedMessages])
 
   // Get unique agents for filter dropdown
   const uniqueAgents = useMemo(() => {
@@ -135,6 +160,19 @@ export function MessagesSection() {
     })
     return Array.from(agents).sort()
   }, [messages])
+
+  // Load registered phones on mount
+  useEffect(() => {
+    const loadPhones = async () => {
+      try {
+        const phones = await fetchRegisteredPhones(false)
+        setRegisteredPhones(phones)
+      } catch (error) {
+        console.error('Error loading registered phones:', error)
+      }
+    }
+    loadPhones()
+  }, [])
 
   return (
     <div className="space-y-6">
@@ -148,7 +186,28 @@ export function MessagesSection() {
             View and manage SMS conversations
           </p>
         </div>
+        <button
+          onClick={() => setShowSendForm(!showSendForm)}
+          className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-2"
+        >
+          <MessageSquare className="h-4 w-4" />
+          {showSendForm ? 'Hide Send Form' : 'Send Message'}
+        </button>
       </div>
+
+      {/* Send Message Form */}
+      {showSendForm && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.2 }}
+        >
+          <SendMessageForm 
+            registeredPhones={registeredPhones} 
+            onMessageSent={() => loadMessages(false)}
+          />
+        </motion.div>
+      )}
 
       {/* Filters */}
       <Card className="p-4">
@@ -207,17 +266,34 @@ export function MessagesSection() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.2 }}
+          className="space-y-6"
         >
-            <CallList
-              calls={filteredMessages.map(msg => ({
-                id: msg.id,
-                phoneNumberId: msg.phoneNumberId,
-                callerNumber: msg.callerNumber,
-                status: 'ongoing' as const, // Messages are always ongoing (active conversations)
-                timestamp: msg.timestamp,
-                conversation: msg.conversation || []
-              }))}
-          />
+          {Array.from(groupedMessages.entries()).map(([phoneNumberId, phoneMessages]) => (
+            <div key={phoneNumberId} className="space-y-3">
+              {/* Phone Number Header */}
+              <div className="flex items-center gap-3 pb-2 border-b border-slate-200">
+                <Phone className="h-5 w-5 text-indigo-600" />
+                <h3 className="text-lg font-semibold text-slate-800">
+                  {phoneNumberId}
+                </h3>
+                <span className="text-sm text-slate-500">
+                  ({phoneMessages.length} conversation{phoneMessages.length !== 1 ? 's' : ''})
+                </span>
+              </div>
+              
+              {/* Messages for this phone number */}
+              <CallList
+                calls={phoneMessages.map(msg => ({
+                  id: msg.id,
+                  phoneNumberId: msg.phoneNumberId,
+                  callerNumber: msg.callerNumber,
+                  status: 'ongoing' as const, // Messages are always ongoing (active conversations)
+                  timestamp: msg.timestamp,
+                  conversation: msg.conversation || []
+                }))}
+              />
+            </div>
+          ))}
         </motion.div>
       )}
 
