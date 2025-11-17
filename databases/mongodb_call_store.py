@@ -17,11 +17,19 @@ class MongoDBCallStore:
         self.collection_name = "calls"
     
     def _get_collection(self):
-        """Get MongoDB collection"""
+        """Get MongoDB collection - creates collection if it doesn't exist"""
         db = get_mongo_db()
         if db is None:
+            logger.warning(f"MongoDB database not available, cannot get collection '{self.collection_name}'")
             return None
-        return db[self.collection_name]
+        # Accessing the collection will create it if it doesn't exist (MongoDB auto-creates)
+        try:
+            collection = db[self.collection_name]
+            logger.debug(f"Accessed MongoDB collection '{self.collection_name}'")
+            return collection
+        except Exception as e:
+            logger.error(f"Error accessing collection '{self.collection_name}': {e}", exc_info=True)
+            return None
     
     async def create_call(self, call_sid: str, from_number: str, to_number: str, 
                          agent_id: Optional[str] = None, session_id: Optional[str] = None) -> bool:
