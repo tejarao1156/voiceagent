@@ -13,29 +13,31 @@ logger = logging.getLogger(__name__)
 def normalize_phone_number(phone_number: str) -> str:
     """
     Normalize phone number to E.164 format (e.g., "+15551234567")
-    
+
     Args:
         phone_number: Phone number in any format (e.g., "+1 555 123 4567", "555-123-4567", etc.)
-    
+
     Returns:
         Normalized phone number in E.164 format (e.g., "+15551234567")
     """
     if not phone_number:
         return ""
-    
+
     # Remove all formatting characters (spaces, dashes, parentheses, dots)
     normalized = phone_number.replace(" ", "").replace("-", "").replace("(", "").replace(")", "").replace(".", "")
-    
-    # Ensure it starts with +
-    if not normalized.startswith("+"):
-        # If it starts with 1, add +
-        if normalized.startswith("1") and len(normalized) == 11:
-            normalized = "+" + normalized
-        else:
-            # Assume US number, add +1
-            normalized = "+1" + normalized
-    
-    return normalized
+
+    # If it already starts with +, it's already in E.164 format
+    if normalized.startswith("+"):
+        return normalized
+
+    # If it starts with 1 and is 11 digits (US format without +), add +
+    if normalized.startswith("1") and len(normalized) == 11:
+        return "+" + normalized
+
+    # For all other cases, add +1 prefix (assuming US numbers by default)
+    # This handles 10-digit US numbers and maintains backward compatibility
+    # Note: For international numbers, users should provide them in + format
+    return "+1" + normalized
 
 class MongoDBPhoneStore:
     """Store and retrieve registered phone numbers from MongoDB"""
