@@ -86,12 +86,13 @@ app = FastAPI(
 )
 
 # Add CORS middleware
+from config import CORS_ORIGINS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=CORS_ORIGINS if CORS_ORIGINS != "*" else ["*"],  # Use configured origins
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "WEBSOCKET"],  # Restrict to needed methods
+    allow_headers=["*"],  # Keep headers open for API compatibility
 )
 
 # Initialize modular tools and core managers
@@ -2438,15 +2439,45 @@ async def create_agent(request: Request):
     try:
         agent_data = await request.json()
         logger.info(f"Received agent creation request: {agent_data.get('name')} ({agent_data.get('phoneNumber')})")
-        
+
+        # Validate required fields
+        required_fields = ["name", "direction", "phoneNumber"]
+        missing_fields = [field for field in required_fields if not agent_data.get(field)]
+        if missing_fields:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing required fields: {', '.join(missing_fields)}"
+            )
+
+        # Validate direction field
+        valid_directions = ["incoming", "outgoing", "messaging"]
+        if agent_data.get("direction") not in valid_directions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid direction. Must be one of: {', '.join(valid_directions)}"
+            )
+
+        # Validate phone number format (basic validation)
+        phone_number = agent_data.get("phoneNumber", "").strip()
+        if not phone_number:
+            raise HTTPException(status_code=400, detail="Phone number cannot be empty")
+
+        # Basic phone number validation (should start with + or be digits)
+        import re
+        if not (phone_number.startswith("+") or phone_number.replace(" ", "").replace("-", "").replace("(", "").replace(")", "").isdigit()):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid phone number format. Should be in E.164 format (e.g., +15551234567) or digits only."
+            )
+
         from databases.mongodb_agent_store import MongoDBAgentStore
         from databases.mongodb_db import is_mongodb_available
-        
+
         # Check MongoDB availability
         if not is_mongodb_available():
             logger.error("MongoDB is not available for agent storage")
             raise HTTPException(status_code=503, detail="MongoDB is not available. Please check MongoDB connection.")
-        
+
         agent_store = MongoDBAgentStore()
         
         # Create agent first (this returns the agent_id)
