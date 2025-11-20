@@ -179,7 +179,7 @@ async def root():
                 padding: 20px;
             }
             .container {
-                background: white;
+                background: white;W
                 border-radius: 20px;
                 box-shadow: 0 20px 40px rgba(0,0,0,0.1);
                 padding: 40px;
@@ -187,7 +187,7 @@ async def root():
                 width: 100%;
             }
             h1 {
-                color: #333;
+                color: #333;W
                 margin-bottom: 10px;
                 font-size: 2rem;
             }
@@ -227,6 +227,7 @@ async def root():
             <h1>🎧 Voice Agent</h1>
             <p class="subtitle">AI-powered voice conversation system</p>
             <div class="links">
+                <a href="/demo" class="link">✨ New Demo UI - Futuristic Interface</a>
                 <a href="/saas-dashboard" class="link">🚀 SaaS Dashboard - Voice Agent Management</a>
                 <a href="/docs" class="link link-docs">📚 API Documentation (Swagger)</a>
                 <a href="/redoc" class="link link-docs">📖 API Documentation (ReDoc)</a>
@@ -2343,6 +2344,19 @@ async def saas_dashboard_proxy(request: Request, path: str = ""):
     """Proxy SaaS Dashboard routes to Next.js"""
     full_path = f"saas-dashboard/{path}" if path else "saas-dashboard"
     return await proxy_to_nextjs(request, full_path)
+
+@app.api_route(
+    "/demo",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    summary="Demo Page",
+    description="Proxy Demo page to Next.js",
+    tags=["UI"]
+)
+async def demo_page_proxy(request: Request):
+    """Proxy Demo page to Next.js"""
+    return await proxy_to_nextjs(request, "demo")
+
+
 
 # Proxy Next.js static assets and API routes
 @app.api_route(
@@ -4494,6 +4508,48 @@ async def debug_calls():
         
     except Exception as e:
         logger.error(f"Error in debug calls endpoint: {e}", exc_info=True)
+        import traceback
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+@app.get(
+    "/api/debug/messages",
+    summary="Debug Messages Endpoint",
+    description="Debug endpoint to check if messages exist in MongoDB and diagnose issues",
+    tags=["Debug"]
+)
+async def debug_messages():
+    """Debug endpoint to check message storage"""
+    try:
+        from databases.mongodb_message_store import MongoDBMessageStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        if not is_mongodb_available():
+            return {
+                "mongodb_available": False,
+                "message": "MongoDB is not available"
+            }
+        
+        message_store = MongoDBMessageStore()
+        
+        # Get all messages (limit 50)
+        all_messages = await message_store.get_all_messages(limit=50)
+        
+        # Get conversations
+        conversations = await message_store.get_conversations(limit=10)
+        
+        return {
+            "mongodb_available": True,
+            "total_messages_retrieved": len(all_messages),
+            "total_conversations": len(conversations),
+            "sample_messages": all_messages[:5] if all_messages else [],
+            "sample_conversations": conversations[:2] if conversations else []
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in debug messages endpoint: {e}", exc_info=True)
         import traceback
         return {
             "error": str(e),

@@ -154,6 +154,11 @@ class MongoDBPhoneStore:
             phone_data["updated_at"] = datetime.utcnow().isoformat()
             phone_data["isActive"] = True
             
+            # NEW: Add isDeleted and uuid
+            phone_data["isDeleted"] = False
+            import uuid
+            phone_data["uuid"] = str(uuid.uuid4())
+            
             # Insert phone registration
             result = await collection.insert_one(phone_data)
             
