@@ -21,7 +21,6 @@ import {
   MoreHorizontal,
   PhoneIncoming,
   PhoneOutgoing,
-  PhoneMissed,
   Clock,
   Calendar,
   Play,
@@ -219,159 +218,7 @@ const DashboardView = () => (
   </div>
 )
 
-const DialerView = () => {
-  const [activeCall, setActiveCall] = useState<boolean>(false)
-  const [dialNumber, setDialNumber] = useState("")
-  const [callDuration, setCallDuration] = useState(0)
 
-  useEffect(() => {
-    let interval: any;
-    if (activeCall) {
-      interval = setInterval(() => setCallDuration(prev => prev + 1), 1000)
-    } else {
-      setCallDuration(0)
-    }
-    return () => clearInterval(interval)
-  }, [activeCall])
-
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
-  }
-
-  return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 h-[calc(100vh-140px)]">
-      {/* Dialer / Active Call Panel */}
-      <div className="flex flex-col">
-        <LightGlassCard className="flex-1 flex flex-col items-center justify-center relative overflow-hidden !p-0">
-          <div className="absolute inset-0 bg-gradient-to-br from-blue-50/50 to-purple-50/50 z-0" />
-
-          <AnimatePresence mode="wait">
-            {!activeCall ? (
-              <motion.div
-                key="keypad"
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="relative z-10 w-full max-w-xs flex flex-col items-center"
-              >
-                <input
-                  type="text"
-                  value={dialNumber}
-                  readOnly
-                  className="w-full text-center text-4xl font-light text-slate-800 bg-transparent border-none outline-none mb-8 placeholder:text-slate-300"
-                  placeholder="+1 (555)..."
-                />
-                <div className="grid grid-cols-3 gap-6 mb-8">
-                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, '*', 0, '#'].map((key) => (
-                    <button
-                      key={key}
-                      onClick={() => setDialNumber(prev => prev + key)}
-                      className="h-16 w-16 rounded-full bg-white shadow-sm border border-slate-100 text-2xl font-medium text-slate-700 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200 transition-all active:scale-95 flex items-center justify-center"
-                    >
-                      {key}
-                    </button>
-                  ))}
-                </div>
-                <button
-                  onClick={() => setActiveCall(true)}
-                  disabled={dialNumber.length < 3}
-                  className="h-16 w-16 rounded-full bg-emerald-500 text-white shadow-lg shadow-emerald-500/30 flex items-center justify-center hover:bg-emerald-600 hover:scale-105 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Phone className="h-8 w-8" />
-                </button>
-              </motion.div>
-            ) : (
-              <motion.div
-                key="active-call"
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="relative z-10 w-full flex flex-col items-center"
-              >
-                <div className="h-32 w-32 rounded-full bg-gradient-to-br from-blue-100 to-purple-100 p-1 mb-6 relative">
-                  <div className="h-full w-full rounded-full bg-white flex items-center justify-center overflow-hidden">
-                    <User className="h-16 w-16 text-slate-300" />
-                  </div>
-                  <span className="absolute bottom-2 right-2 h-4 w-4 rounded-full bg-emerald-500 border-2 border-white animate-pulse" />
-                </div>
-                <h3 className="text-2xl font-bold text-slate-800 mb-1">{dialNumber || "Unknown Caller"}</h3>
-                <p className="text-blue-600 font-medium mb-8">{formatTime(callDuration)}</p>
-
-                {/* Audio Waveform Simulation */}
-                <div className="flex items-center space-x-1 h-12 mb-12">
-                  {[...Array(20)].map((_, i) => (
-                    <motion.div
-                      key={i}
-                      animate={{ height: [10, Math.random() * 40 + 10, 10] }}
-                      transition={{ repeat: Infinity, duration: 1, delay: i * 0.05 }}
-                      className="w-1.5 bg-blue-400 rounded-full opacity-60"
-                    />
-                  ))}
-                </div>
-
-                <div className="flex items-center space-x-6">
-                  <button className="h-14 w-14 rounded-full bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 flex items-center justify-center transition-colors">
-                    <Mic className="h-6 w-6" />
-                  </button>
-                  <button
-                    onClick={() => setActiveCall(false)}
-                    className="h-16 w-16 rounded-full bg-red-500 text-white shadow-lg shadow-red-500/30 flex items-center justify-center hover:bg-red-600 hover:scale-105 transition-all"
-                  >
-                    <PhoneMissed className="h-8 w-8" />
-                  </button>
-                  <button className="h-14 w-14 rounded-full bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 flex items-center justify-center transition-colors">
-                    <MoreHorizontal className="h-6 w-6" />
-                  </button>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </LightGlassCard>
-      </div>
-
-      {/* Recent Calls List */}
-      <div className="flex flex-col space-y-6">
-        <div className="flex items-center justify-between">
-          <h3 className="text-xl font-bold text-slate-800">Recent Activity</h3>
-          <div className="flex space-x-2">
-            <button className="px-3 py-1.5 rounded-lg bg-white text-xs font-bold text-slate-600 shadow-sm border border-slate-200">All</button>
-            <button className="px-3 py-1.5 rounded-lg hover:bg-white/50 text-xs font-medium text-slate-500 transition-colors">Missed</button>
-          </div>
-        </div>
-
-        <div className="space-y-3 overflow-y-auto pr-2">
-          {[
-            { name: "John Doe", number: "+1 (555) 123-4567", type: "incoming", time: "2 mins ago", duration: "5m 23s", status: "completed" },
-            { name: "Sarah Smith", number: "+1 (555) 987-6543", type: "outgoing", time: "1 hour ago", duration: "12m 05s", status: "completed" },
-            { name: "Unknown", number: "+1 (555) 000-0000", type: "missed", time: "3 hours ago", duration: "0s", status: "missed" },
-            { name: "Support Line", number: "+1 (800) 123-4567", type: "outgoing", time: "Yesterday", duration: "24m 10s", status: "completed" },
-          ].map((call, i) => (
-            <div key={i} className="flex items-center justify-between p-4 rounded-xl bg-white/60 border border-white/60 hover:bg-white hover:shadow-sm transition-all">
-              <div className="flex items-center space-x-4">
-                <div className={`h-10 w-10 rounded-full flex items-center justify-center ${call.type === 'missed' ? 'bg-red-100 text-red-600' :
-                  call.type === 'incoming' ? 'bg-blue-100 text-blue-600' : 'bg-emerald-100 text-emerald-600'
-                  }`}>
-                  {call.type === 'missed' ? <PhoneMissed className="h-5 w-5" /> :
-                    call.type === 'incoming' ? <PhoneIncoming className="h-5 w-5" /> : <PhoneOutgoing className="h-5 w-5" />}
-                </div>
-                <div>
-                  <h4 className="font-bold text-slate-800 text-sm">{call.name}</h4>
-                  <p className="text-xs text-slate-500">{call.number}</p>
-                </div>
-              </div>
-              <div className="text-right">
-                <p className="text-xs font-bold text-slate-700">{call.time}</p>
-                <p className="text-xs text-slate-400">{call.duration}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
 
 const AgentsView = () => {
   const [selectedAgent, setSelectedAgent] = useState<number | null>(null)
@@ -1831,6 +1678,708 @@ const IncomingAgentView = () => {
   )
 }
 
+// Prompts Management View
+const PromptsView = () => {
+  const [prompts, setPrompts] = useState<any[]>([])
+  const [registeredPhones, setRegisteredPhones] = useState<any[]>([])
+  const [loading, setLoading] = useState(false)
+  const [createModalOpen, setCreateModalOpen] = useState(false)
+  const [editPrompt, setEditPrompt] = useState<any | null>(null)
+
+  const [promptForm, setPromptForm] = useState({
+    name: '',
+    content: '',
+    phoneNumberId: '',
+    description: '',
+    category: 'general',
+  })
+
+  // Load prompts
+  const loadPrompts = async () => {
+    try {
+      setLoading(true)
+      const response = await fetch('/api/prompts')
+      if (response.ok) {
+        const result = await response.json()
+        if (result.success && Array.isArray(result.prompts)) {
+          setPrompts(result.prompts)
+        }
+      }
+    } catch (error) {
+      console.error('Error loading prompts:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Load registered phones
+  const loadRegisteredPhones = async () => {
+    try {
+      const response = await fetch('/api/phones')
+      if (response.ok) {
+        const result = await response.json()
+        if (result.success && Array.isArray(result.phones)) {
+          setRegisteredPhones(result.phones.filter((p: any) => !p.isDeleted))
+        }
+      }
+    } catch (error) {
+      console.error('Error loading phones:', error)
+    }
+  }
+
+  useEffect(() => {
+    loadPrompts()
+    loadRegisteredPhones()
+  }, [])
+
+  // Handle save prompt
+  const [promptError, setPromptError] = useState<string>('')
+  const handleSavePrompt = async () => {
+    // Basic client‑side validation
+    if (!promptForm.name.trim() || !promptForm.content.trim() || !promptForm.phoneNumberId) {
+      setPromptError('Name, content, and phone number are required.')
+      return
+    }
+    setPromptError('')
+    try {
+      const endpoint = editPrompt ? `/api/prompts/${editPrompt.id}` : '/api/prompts'
+      const method = editPrompt ? 'PUT' : 'POST'
+
+      const response = await fetch(endpoint, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(promptForm),
+      })
+
+      if (response.ok) {
+        setCreateModalOpen(false)
+        setEditPrompt(null)
+        setPromptForm({
+          name: '',
+          content: '',
+          phoneNumberId: '',
+          description: '',
+          category: 'general',
+        })
+        loadPrompts()
+      } else {
+        const err = await response.json()
+        setPromptError(err.message || 'Failed to save prompt')
+      }
+    } catch (error) {
+      console.error('Error saving prompt:', error)
+      setPromptError('Unexpected error while saving prompt')
+    }
+  }
+
+  // Handle delete prompt
+  const handleDeletePrompt = async (promptId: string) => {
+    if (confirm('Are you sure you want to delete this prompt?')) {
+      try {
+        const response = await fetch(`/api/prompts/${promptId}`, { method: 'DELETE' })
+        if (response.ok) {
+          loadPrompts()
+        }
+      } catch (error) {
+        console.error('Error deleting prompt:', error)
+      }
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-800 mb-2">Prompts Management</h2>
+          <p className="text-slate-600">Create and manage AI prompts for outgoing calls.</p>
+        </div>
+        <button
+          onClick={() => {
+            setEditPrompt(null)
+            setPromptForm({
+              name: '',
+              content: '',
+              phoneNumberId: '',
+              description: '',
+              category: 'general',
+            })
+            setCreateModalOpen(true)
+          }}
+          className="px-4 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-bold shadow-lg shadow-blue-500/30 hover:bg-blue-700 transition-all hover:scale-105 flex items-center space-x-2"
+        >
+          <Plus className="h-4 w-4" />
+          <span>Create Prompt</span>
+        </button>
+      </div>
+
+      {/* Prompts Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {prompts.map((prompt, i) => {
+          const linkedPhone = registeredPhones.find(p => p.id === prompt.phoneNumberId)
+          return (
+            <LightGlassCard key={prompt.id} delay={i * 0.1} className="group hover:bg-white/80 transition-all">
+              <div className="flex items-start justify-between mb-4">
+                <div className="flex-1">
+                  <h3 className="text-lg font-bold text-slate-900 mb-1">{prompt.name}</h3>
+                  {prompt.category && (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800 capitalize">
+                      {prompt.category}
+                    </span>
+                  )}
+                </div>
+                <div className="flex space-x-1">
+                  <button
+                    onClick={() => {
+                      setEditPrompt(prompt)
+                      setPromptForm({
+                        name: prompt.name,
+                        content: prompt.content,
+                        phoneNumberId: prompt.phoneNumberId,
+                        description: prompt.description || '',
+                        category: prompt.category || 'general',
+                      })
+                      setCreateModalOpen(true)
+                    }}
+                    className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                  >
+                    <Edit className="h-4 w-4" />
+                  </button>
+                  <button
+                    onClick={() => handleDeletePrompt(prompt.id)}
+                    className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+
+              {prompt.description && (
+                <p className="text-sm text-slate-600 mb-3">{prompt.description}</p>
+              )}
+
+              <div className="bg-slate-50 rounded-lg p-3 mb-3 border border-slate-100">
+                <p className="text-xs text-slate-700 line-clamp-3 font-mono">{prompt.content}</p>
+              </div>
+
+              <div className="flex items-center justify-between text-xs text-slate-500">
+                <div className="flex items-center space-x-1">
+                  <Phone className="h-3 w-3" />
+                  <span className="font-mono">{linkedPhone?.phoneNumber || 'N/A'}</span>
+                </div>
+                <span>{prompt.created_at ? new Date(prompt.created_at).toLocaleDateString() : 'N/A'}</span>
+              </div>
+            </LightGlassCard>
+          )
+        })}
+
+        {prompts.length === 0 && !loading && (
+          <div className="col-span-full">
+            <LightGlassCard className="!bg-gradient-to-b !from-slate-50 !to-white border-dashed">
+              <div className="text-center py-12">
+                <FileText className="h-12 w-12 text-slate-300 mx-auto mb-4" />
+                <p className="text-slate-500 font-medium mb-2">No prompts yet</p>
+                <p className="text-sm text-slate-400">Create your first prompt to get started with AI outgoing calls.</p>
+              </div>
+            </LightGlassCard>
+          </div>
+        )}
+      </div>
+
+      {/* Create/Edit Prompt Modal */}
+      {createModalOpen && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+          >
+            <div className="p-6 border-b border-slate-200">
+              <h3 className="text-xl font-bold text-slate-900">{editPrompt ? 'Edit Prompt' : 'Create New Prompt'}</h3>
+              <p className="text-sm text-slate-600 mt-1">Configure your AI prompt for outgoing calls</p>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Prompt Name *</label>
+                <input
+                  type="text"
+                  value={promptForm.name}
+                  onChange={(e) => setPromptForm({ ...promptForm, name: e.target.value })}
+                  placeholder="e.g., Sales Follow-up Script"
+                  className="w-full rounded-xl border-none bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Phone Number *</label>
+                <select
+                  value={promptForm.phoneNumberId}
+                  onChange={(e) => setPromptForm({ ...promptForm, phoneNumberId: e.target.value })}
+                  className="w-full rounded-xl border-none bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                >
+                  <option value="">Select a phone number</option>
+                  {registeredPhones.map(phone => (
+                    <option key={phone.id} value={phone.id}>{phone.phoneNumber}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Category</label>
+                <select
+                  value={promptForm.category}
+                  onChange={(e) => setPromptForm({ ...promptForm, category: e.target.value })}
+                  className="w-full rounded-xl border-none bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                >
+                  <option value="general">General</option>
+                  <option value="sales">Sales</option>
+                  <option value="support">Support</option>
+                  <option value="reminder">Reminder</option>
+                  <option value="survey">Survey</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Description</label>
+                <input
+                  type="text"
+                  value={promptForm.description}
+                  onChange={(e) => setPromptForm({ ...promptForm, description: e.target.value })}
+                  placeholder="Brief description of this prompt"
+                  className="w-full rounded-xl border-none bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Prompt Content *</label>
+                <textarea
+                  value={promptForm.content}
+                  onChange={(e) => setPromptForm({ ...promptForm, content: e.target.value })}
+                  placeholder="Enter the AI prompt/script that will be used during the call..."
+                  rows={8}
+                  className="w-full rounded-xl border-none bg-slate-50 px-4 py-3 text-sm font-mono text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                />
+                <p className="text-xs text-slate-500 mt-1">This is the instruction that the AI will follow during the call.</p>
+              </div>
+            </div>
+
+            <div className="p-6 border-t border-slate-200 flex justify-end space-x-3">
+              <button
+                onClick={() => {
+                  setCreateModalOpen(false)
+                  setPromptError('')
+                }}
+                className="px-6 py-3 rounded-xl bg-slate-100 text-slate-700 font-bold hover:bg-slate-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSavePrompt}
+                className="px-6 py-3 rounded-xl bg-blue-600 text-white font-bold shadow-lg shadow-blue-500/30 hover:bg-blue-700 transition-all hover:scale-105"
+              >
+                {editPrompt ? 'Update Prompt' : 'Create Prompt'}
+              </button>
+              {promptError && (
+                <p className="mt-2 text-sm text-red-600">{promptError}</p>
+              )}
+            </div>
+          </motion.div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Outgoing Agent View
+const OutgoingAgentView = () => {
+  const [scheduledCalls, setScheduledCalls] = useState<any[]>([])
+  const [prompts, setPrompts] = useState<any[]>([])
+  const [registeredPhones, setRegisteredPhones] = useState<any[]>([])
+  const [loading, setLoading] = useState(false)
+  const [scheduleModalOpen, setScheduleModalOpen] = useState(false)
+
+  const [callForm, setCallForm] = useState({
+    callType: 'ai',
+    fromPhoneNumberId: '',
+    toPhoneNumbers: [''],
+    scheduledDateTime: '',
+    promptId: '',
+  })
+
+  // Load scheduled calls
+  const loadScheduledCalls = async () => {
+    try {
+      setLoading(true)
+      const response = await fetch('/api/scheduled-calls')
+      if (response.ok) {
+        const result = await response.json()
+        if (result.success && Array.isArray(result.calls)) {
+          setScheduledCalls(result.calls)
+        }
+      }
+    } catch (error) {
+      console.error('Error loading scheduled calls:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Load prompts
+  const loadPrompts = async () => {
+    try {
+      const response = await fetch('/api/prompts')
+      if (response.ok) {
+        const result = await response.json()
+        if (result.success && Array.isArray(result.prompts)) {
+          setPrompts(result.prompts)
+        }
+      }
+    } catch (error) {
+      console.error('Error loading prompts:', error)
+    }
+  }
+
+  // Load registered phones
+  const loadRegisteredPhones = async () => {
+    try {
+      const response = await fetch('/api/phones')
+      if (response.ok) {
+        const result = await response.json()
+        if (result.success && Array.isArray(result.phones)) {
+          setRegisteredPhones(result.phones.filter((p: any) => !p.isDeleted))
+        }
+      }
+    } catch (error) {
+      console.error('Error loading phones:', error)
+    }
+  }
+
+  useEffect(() => {
+    loadScheduledCalls()
+    loadPrompts()
+    loadRegisteredPhones()
+  }, [])
+
+  // Handle schedule call
+  const [scheduleError, setScheduleError] = useState<string>('')
+  const handleScheduleCall = async () => {
+    // Basic validation for required fields
+    if (!callForm.fromPhoneNumberId) {
+      setScheduleError('Select a "From" phone number.')
+      return
+    }
+    if (callForm.toPhoneNumbers.filter(n => n.trim() !== '').length === 0) {
+      setScheduleError('Add at least one "To" phone number.')
+      return
+    }
+    if (!callForm.scheduledDateTime) {
+      setScheduleError('Select a scheduled date and time.')
+      return
+    }
+    if (callForm.callType === 'ai' && !callForm.promptId) {
+      setScheduleError('Select an AI prompt for the call.')
+      return
+    }
+    setScheduleError('')
+    try {
+      const response = await fetch('/api/scheduled-calls', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...callForm,
+          toPhoneNumbers: callForm.toPhoneNumbers.filter(n => n.trim() !== ''),
+        }),
+      })
+
+      if (response.ok) {
+        setScheduleModalOpen(false)
+        setCallForm({
+          callType: 'ai',
+          fromPhoneNumberId: '',
+          toPhoneNumbers: [''],
+          scheduledDateTime: '',
+          promptId: '',
+        })
+        loadScheduledCalls()
+      } else {
+        const err = await response.json()
+        setScheduleError(err.message || 'Failed to schedule call')
+      }
+    } catch (error) {
+      console.error('Error scheduling call:', error)
+      setScheduleError('Unexpected error while scheduling call')
+    }
+  }
+
+  // Handle delete scheduled call
+  const handleDeleteScheduledCall = async (callId: string) => {
+    if (confirm('Are you sure you want to delete this scheduled call?')) {
+      try {
+        const response = await fetch(`/api/scheduled-calls/${callId}`, { method: 'DELETE' })
+        if (response.ok) {
+          loadScheduledCalls()
+        }
+      } catch (error) {
+        console.error('Error deleting scheduled call:', error)
+      }
+    }
+  }
+
+  const addPhoneNumberField = () => {
+    setCallForm({ ...callForm, toPhoneNumbers: [...callForm.toPhoneNumbers, ''] })
+  }
+
+  const removePhoneNumberField = (index: number) => {
+    const newNumbers = callForm.toPhoneNumbers.filter((_, i) => i !== index)
+    setCallForm({ ...callForm, toPhoneNumbers: newNumbers.length > 0 ? newNumbers : [''] })
+  }
+
+  const updatePhoneNumber = (index: number, value: string) => {
+    const newNumbers = [...callForm.toPhoneNumbers]
+    newNumbers[index] = value
+    setCallForm({ ...callForm, toPhoneNumbers: newNumbers })
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-800 mb-2">Outgoing Agent</h2>
+          <p className="text-slate-600">Schedule AI or normal outgoing calls to single or multiple numbers.</p>
+        </div>
+        <button
+          onClick={() => {
+            setCallForm({
+              callType: 'ai',
+              fromPhoneNumberId: '',
+              toPhoneNumbers: [''],
+              scheduledDateTime: '',
+              promptId: '',
+            })
+            setScheduleModalOpen(true)
+          }}
+          className="px-4 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-bold shadow-lg shadow-blue-500/30 hover:bg-blue-700 transition-all hover:scale-105 flex items-center space-x-2"
+        >
+          <Calendar className="h-4 w-4" />
+          <span>Schedule Call</span>
+        </button>
+      </div>
+
+      {/* Scheduled Calls Table */}
+      <LightGlassCard className="!p-0 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="bg-slate-50/50 border-b border-slate-200/60 text-xs font-bold text-slate-500 uppercase tracking-wider">
+                <th className="p-4">Type</th>
+                <th className="p-4">From</th>
+                <th className="p-4">To</th>
+                <th className="p-4">Scheduled Time</th>
+                <th className="p-4">Status</th>
+                <th className="p-4 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="text-sm text-slate-700 font-medium divide-y divide-slate-100">
+              {scheduledCalls.map((call, i) => {
+                const fromPhone = registeredPhones.find(p => p.id === call.fromPhoneNumberId)
+                return (
+                  <tr key={i} className="hover:bg-blue-50/30 transition-colors">
+                    <td className="p-4">
+                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold capitalize ${call.callType === 'ai' ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-700'
+                        }`}>
+                        {call.callType}
+                      </span>
+                    </td>
+                    <td className="p-4 font-mono">{fromPhone?.phoneNumber || 'N/A'}</td>
+                    <td className="p-4">
+                      <div className="flex flex-col gap-1">
+                        {call.toPhoneNumbers?.slice(0, 2).map((num: string, idx: number) => (
+                          <span key={idx} className="font-mono text-xs">{num}</span>
+                        ))}
+                        {call.toPhoneNumbers?.length > 2 && (
+                          <span className="text-xs text-slate-500">+{call.toPhoneNumbers.length - 2} more</span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="p-4">
+                      {call.scheduledDateTime ? new Date(call.scheduledDateTime).toLocaleString() : 'N/A'}
+                    </td>
+                    <td className="p-4">
+                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold capitalize ${call.status === 'pending' ? 'bg-amber-100 text-amber-700' :
+                        call.status === 'completed' ? 'bg-emerald-100 text-emerald-700' :
+                          call.status === 'failed' ? 'bg-red-100 text-red-700' :
+                            'bg-slate-100 text-slate-700'
+                        }`}>
+                        {call.status}
+                      </span>
+                    </td>
+                    <td className="p-4 text-right">
+                      <button
+                        onClick={() => handleDeleteScheduledCall(call.id)}
+                        className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+              {scheduledCalls.length === 0 && !loading && (
+                <tr>
+                  <td colSpan={6} className="p-8 text-center text-slate-500">
+                    No scheduled calls yet. Click "Schedule Call" to create one.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </LightGlassCard>
+
+      {/* Schedule Call Modal */}
+      {scheduleModalOpen && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+          >
+            <div className="p-6 border-b border-slate-200">
+              <h3 className="text-xl font-bold text-slate-900">Schedule Outgoing Call</h3>
+              <p className="text-sm text-slate-600 mt-1">Configure your outgoing call settings</p>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Call Type *</label>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => setCallForm({ ...callForm, callType: 'ai' })}
+                    className={`p-4 rounded-xl border-2 transition-all ${callForm.callType === 'ai'
+                      ? 'border-blue-500 bg-blue-50 text-blue-700'
+                      : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                      }`}
+                  >
+                    <Bot className="h-6 w-6 mx-auto mb-2" />
+                    <p className="font-bold text-sm">AI Call</p>
+                    <p className="text-xs opacity-70">Use AI prompt</p>
+                  </button>
+                  <button
+                    onClick={() => setCallForm({ ...callForm, callType: 'normal' })}
+                    className={`p-4 rounded-xl border-2 transition-all ${callForm.callType === 'normal'
+                      ? 'border-blue-500 bg-blue-50 text-blue-700'
+                      : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                      }`}
+                  >
+                    <Phone className="h-6 w-6 mx-auto mb-2" />
+                    <p className="font-bold text-sm">Normal Call</p>
+                    <p className="text-xs opacity-70">Standard call</p>
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">From Phone Number *</label>
+                <select
+                  value={callForm.fromPhoneNumberId}
+                  onChange={(e) => setCallForm({ ...callForm, fromPhoneNumberId: e.target.value })}
+                  className="w-full rounded-xl border-none bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                >
+                  <option value="">Select a phone number</option>
+                  {registeredPhones.map(phone => (
+                    <option key={phone.id} value={phone.id}>{phone.phoneNumber}</option>
+                  ))}
+                </select>
+              </div>
+
+              {callForm.callType === 'ai' && (
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">AI Prompt *</label>
+                  <select
+                    value={callForm.promptId}
+                    onChange={(e) => setCallForm({ ...callForm, promptId: e.target.value })}
+                    className="w-full rounded-xl border-none bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                  >
+                    <option value="">Select a prompt</option>
+                    {prompts.filter(p => p.phoneNumberId === callForm.fromPhoneNumberId).map(prompt => (
+                      <option key={prompt.id} value={prompt.id}>{prompt.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">To Phone Numbers *</label>
+                <div className="space-y-2">
+                  {callForm.toPhoneNumbers.map((number, index) => (
+                    <div key={index} className="flex items-center space-x-2">
+                      <input
+                        type="text"
+                        value={number}
+                        onChange={(e) => updatePhoneNumber(index, e.target.value)}
+                        placeholder="+1 (555) 123-4567"
+                        className="flex-1 rounded-xl border-none bg-slate-50 px-4 py-3 text-sm font-mono text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                      />
+                      {callForm.toPhoneNumbers.length > 1 && (
+                        <button
+                          onClick={() => removePhoneNumberField(index)}
+                          className="p-3 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  <button
+                    onClick={addPhoneNumberField}
+                    className="w-full py-2 rounded-lg border-2 border-dashed border-slate-300 text-slate-600 text-sm font-medium hover:border-blue-400 hover:text-blue-600 transition-colors flex items-center justify-center space-x-2"
+                  >
+                    <Plus className="h-4 w-4" />
+                    <span>Add Another Number</span>
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Scheduled Date & Time *</label>
+                <input
+                  type="datetime-local"
+                  value={callForm.scheduledDateTime}
+                  onChange={(e) => setCallForm({ ...callForm, scheduledDateTime: e.target.value })}
+                  className="w-full rounded-xl border-none bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="p-6 border-t border-slate-200 flex justify-end space-x-3">
+              <button
+                onClick={() => {
+                  setScheduleModalOpen(false)
+                  setScheduleError('')
+                }}
+                className="px-6 py-3 rounded-xl bg-slate-100 text-slate-700 font-bold hover:bg-slate-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleScheduleCall}
+                className="px-6 py-3 rounded-xl bg-blue-600 text-white font-bold shadow-lg shadow-blue-500/30 hover:bg-blue-700 transition-all hover:scale-105"
+              >
+                Schedule Call
+              </button>
+              {scheduleError && (
+                <p className="mt-2 text-sm text-red-600">{scheduleError}</p>
+              )}
+            </div>
+          </motion.div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function FuturisticDemo() {
   const [activeTab, setActiveTab] = useState('dashboard')
   const [isLoaded, setIsLoaded] = useState(false)
@@ -1870,9 +2419,11 @@ export default function FuturisticDemo() {
           <nav className="flex-1 px-4 space-y-1 mt-6 overflow-y-auto">
             <div className="text-xs font-bold text-slate-400 uppercase tracking-wider px-4 mb-3">Platform</div>
             <NavItem icon={BarChart3} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
-            <NavItem icon={Phone} label="Phone / Dialer" active={activeTab === 'dialer'} onClick={() => setActiveTab('dialer')} />
+
             <NavItem icon={Users} label="Agents & Chat" active={activeTab === 'agents'} onClick={() => setActiveTab('agents')} />
             <NavItem icon={PhoneIncoming} label="Incoming Agent" active={activeTab === 'incoming-agent'} onClick={() => setActiveTab('incoming-agent')} />
+            <NavItem icon={PhoneOutgoing} label="Outgoing Agent" active={activeTab === 'outgoing-agent'} onClick={() => setActiveTab('outgoing-agent')} />
+            <NavItem icon={FileText} label="Prompts" active={activeTab === 'prompts'} onClick={() => setActiveTab('prompts')} />
             <NavItem icon={MessageSquare} label="Messages" active={activeTab === 'messages'} onClick={() => setActiveTab('messages')} />
             <NavItem icon={History} label="Call Logs" active={activeTab === 'logs'} onClick={() => setActiveTab('logs')} />
             <NavItem icon={Volume2} label="Voice Customization" active={activeTab === 'voices'} onClick={() => setActiveTab('voices')} />
@@ -1909,28 +2460,32 @@ export default function FuturisticDemo() {
                   animate={{ opacity: 1, y: 0 }}
                   className="text-3xl font-black text-slate-800 tracking-tight capitalize"
                 >
-                  {activeTab === 'dialer' ? 'Phone & Dialer' :
+                  {activeTab === 'dashboard' ? 'Dashboard' :
                     activeTab === 'agents' ? 'Agent Management' :
                       activeTab === 'incoming-agent' ? 'Incoming Agent' :
-                        activeTab === 'messages' ? 'Messages & SMS' :
-                          activeTab === 'logs' ? 'Call History' :
-                            activeTab === 'voices' ? 'Voice Customization' :
-                              activeTab === 'endpoints' ? 'Endpoints & Webhooks' :
-                                activeTab === 'activity' ? 'Activity Logs' :
-                                  activeTab === 'settings' ? 'Settings' :
-                                    'Command Center'}
+                        activeTab === 'outgoing-agent' ? 'Outgoing Agent' :
+                          activeTab === 'prompts' ? 'Prompts Management' :
+                            activeTab === 'messages' ? 'Messages & SMS' :
+                              activeTab === 'logs' ? 'Call History' :
+                                activeTab === 'voices' ? 'Voice Customization' :
+                                  activeTab === 'endpoints' ? 'Endpoints & Webhooks' :
+                                    activeTab === 'activity' ? 'Activity Logs' :
+                                      activeTab === 'settings' ? 'Settings' :
+                                        'Command Center'}
                 </motion.h2>
                 <p className="text-slate-500 mt-1 font-medium">
                   {activeTab === 'dialer' ? 'Make calls and manage active connections.' :
                     activeTab === 'agents' ? 'Configure agents and test conversations.' :
                       activeTab === 'incoming-agent' ? 'Create and manage Voice Agents for your Business.' :
-                        activeTab === 'messages' ? 'View and send SMS messages to customers.' :
-                          activeTab === 'logs' ? 'Review past call performance and recordings.' :
-                            activeTab === 'voices' ? 'Preview and customize TTS voices for your agents.' :
-                              activeTab === 'endpoints' ? 'Manage webhook URLs and API endpoints.' :
-                                activeTab === 'activity' ? 'Monitor system events and activity history.' :
-                                  activeTab === 'settings' ? 'Configure your account and system preferences.' :
-                                    "Good afternoon, Teja. Here's what's happening today."}
+                        activeTab === 'outgoing-agent' ? 'Schedule AI or normal outgoing calls to single or multiple numbers.' :
+                          activeTab === 'prompts' ? 'Create and manage AI prompts for outgoing calls.' :
+                            activeTab === 'messages' ? 'View and send SMS messages to customers.' :
+                              activeTab === 'logs' ? 'Review past call performance and recordings.' :
+                                activeTab === 'voices' ? 'Preview and customize TTS voices for your agents.' :
+                                  activeTab === 'endpoints' ? 'Manage webhook URLs and API endpoints.' :
+                                    activeTab === 'activity' ? 'Monitor system events and activity history.' :
+                                      activeTab === 'settings' ? 'Configure your account and system preferences.' :
+                                        "Good afternoon, Teja. Here's what's happening today."}
                 </p>
               </div>
 
@@ -1953,9 +2508,11 @@ export default function FuturisticDemo() {
               transition={{ duration: 0.3 }}
             >
               {activeTab === 'dashboard' && <DashboardView />}
-              {activeTab === 'dialer' && <DialerView />}
+
               {activeTab === 'agents' && <AgentsView />}
               {activeTab === 'incoming-agent' && <IncomingAgentView />}
+              {activeTab === 'outgoing-agent' && <OutgoingAgentView />}
+              {activeTab === 'prompts' && <PromptsView />}
               {activeTab === 'messages' && <MessagesView />}
               {activeTab === 'logs' && <LogsView />}
               {activeTab === 'voices' && <VoiceCustomizationView />}

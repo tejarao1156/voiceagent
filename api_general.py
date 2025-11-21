@@ -3346,6 +3346,465 @@ async def delete_agent(agent_id: str = Path(..., description="MongoDB Agent ID")
         logger.error(f"Error deleting agent: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# ============================================================================
+# PROMPT MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@app.post(
+    "/api/prompts",
+    summary="Create Prompt",
+    description="Create a new prompt for outgoing calls. Prompts are linked to phone numbers and can be reused.",
+    tags=["Prompts"],
+    response_model=Dict[str, Any]
+)
+async def create_prompt(request: Request):
+    """
+    Create a new prompt for outgoing calls.
+    
+    **Request Body Fields:**
+    - `name` (string, required): Prompt name
+    - `content` (string, required): Prompt content/text
+    - `phoneNumberId` (string, required): Phone number ID this prompt is linked to
+    - `description` (string, optional): Prompt description
+    - `category` (string, optional): Category (e.g., "sales", "support", "reminder")
+    
+    **Stores in MongoDB:**
+    - Database: `voiceagent`
+    - Collection: `prompts`
+    """
+    try:
+        prompt_data = await request.json()
+        logger.info(f"Received prompt creation request: {prompt_data.get('name')}")
+        
+        from databases.mongodb_prompt_store import MongoDBPromptStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        # Check MongoDB availability
+        if not is_mongodb_available():
+            logger.error("MongoDB is not available for prompt storage")
+            raise HTTPException(status_code=503, detail="MongoDB is not available. Please check MongoDB connection.")
+        
+        prompt_store = MongoDBPromptStore()
+        prompt_id = await prompt_store.create_prompt(prompt_data)
+        
+        if not prompt_id:
+            logger.error("Failed to create prompt - create_prompt returned None")
+            raise HTTPException(status_code=500, detail="Failed to create prompt in MongoDB")
+        
+        logger.info(f"✅ Prompt created successfully with ID: {prompt_id}")
+        
+        return {
+            "success": True,
+            "prompt_id": prompt_id,
+            "message": "Prompt created successfully and stored in MongoDB",
+            "mongodb": {
+                "database": "voiceagent",
+                "collection": "prompts",
+                "saved": True
+            }
+        }
+            
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating prompt: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error creating prompt: {str(e)}")
+
+@app.get(
+    "/api/prompts",
+    summary="List Prompts",
+    description="Get all prompts from MongoDB. Can filter by phone number ID.",
+    tags=["Prompts"],
+    response_model=Dict[str, Any]
+)
+async def list_prompts(
+    phone_number_id: Optional[str] = Query(None, description="Filter by phone number ID")
+):
+    """
+    List all prompts from MongoDB.
+    
+    **Query Parameters:**
+    - `phone_number_id` (string, optional): Filter prompts by phone number ID
+    
+    **Returns:**
+    - List of prompt objects with all fields
+    """
+    try:
+        from databases.mongodb_prompt_store import MongoDBPromptStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        # Check MongoDB availability first
+        if not is_mongodb_available():
+            logger.warning("MongoDB is not available - returning empty prompts list")
+            return {"success": True, "prompts": [], "count": 0, "mongodb_available": False}
+        
+        prompt_store = MongoDBPromptStore()
+        prompts = await prompt_store.list_prompts(phone_number_id=phone_number_id)
+        
+        logger.info(f"✅ Returning {len(prompts)} prompt(s) from MongoDB")
+        return {"success": True, "prompts": prompts, "count": len(prompts), "mongodb_available": True}
+        
+    except Exception as e:
+        logger.error(f"Error listing prompts: {e}", exc_info=True)
+        return {"success": True, "prompts": [], "count": 0, "error": str(e), "mongodb_available": False}
+
+@app.get(
+    "/api/prompts/{prompt_id}",
+    summary="Get Prompt",
+    description="Get a specific prompt by ID.",
+    tags=["Prompts"],
+    response_model=Dict[str, Any]
+)
+async def get_prompt(prompt_id: str = Path(..., description="MongoDB Prompt ID")):
+    """
+    Get a specific prompt by ID.
+    
+    **Path Parameters:**
+    - `prompt_id` (string, required): MongoDB ObjectID of the prompt
+    
+    **Returns:**
+    - Full prompt object with all fields
+    """
+    try:
+        from databases.mongodb_prompt_store import MongoDBPromptStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        if not is_mongodb_available():
+            raise HTTPException(status_code=503, detail="MongoDB is not available")
+        
+        prompt_store = MongoDBPromptStore()
+        prompt = await prompt_store.get_prompt(prompt_id)
+        
+        if prompt:
+            return {"success": True, "prompt": prompt}
+        else:
+            raise HTTPException(status_code=404, detail="Prompt not found")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting prompt: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put(
+    "/api/prompts/{prompt_id}",
+    summary="Update Prompt",
+    description="Update an existing prompt.",
+    tags=["Prompts"],
+    response_model=Dict[str, Any]
+)
+async def update_prompt(prompt_id: str = Path(..., description="MongoDB Prompt ID"), request: Request = ...):
+    """
+    Update an existing prompt.
+    
+    **Path Parameters:**
+    - `prompt_id` (string, required): MongoDB ObjectID of the prompt
+    
+    **Request Body:**
+    - Any prompt fields to update (partial updates supported)
+    - Common fields: `name`, `content`, `description`, `category`
+    """
+    try:
+        updates = await request.json()
+        from databases.mongodb_prompt_store import MongoDBPromptStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        if not is_mongodb_available():
+            raise HTTPException(status_code=503, detail="MongoDB is not available")
+        
+        prompt_store = MongoDBPromptStore()
+        success = await prompt_store.update_prompt(prompt_id, updates)
+        
+        if success:
+            return {"success": True, "message": "Prompt updated successfully"}
+        else:
+            raise HTTPException(status_code=404, detail="Prompt not found or update failed")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating prompt: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete(
+    "/api/prompts/{prompt_id}",
+    summary="Delete Prompt",
+    description="Soft delete a prompt (sets isDeleted=True).",
+    tags=["Prompts"],
+    response_model=Dict[str, Any]
+)
+async def delete_prompt(prompt_id: str = Path(..., description="MongoDB Prompt ID")):
+    """
+    Delete a prompt from MongoDB (soft delete).
+    
+    **Path Parameters:**
+    - `prompt_id` (string, required): MongoDB ObjectID of the prompt
+    
+    **Note:** This is a soft delete - sets isDeleted=True. The prompt remains in MongoDB for audit purposes.
+    """
+    try:
+        from databases.mongodb_prompt_store import MongoDBPromptStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        if not is_mongodb_available():
+            raise HTTPException(status_code=503, detail="MongoDB is not available")
+        
+        prompt_store = MongoDBPromptStore()
+        success = await prompt_store.delete_prompt(prompt_id)
+        
+        if success:
+            return {"success": True, "message": "Prompt deleted successfully"}
+        else:
+            raise HTTPException(status_code=404, detail="Prompt not found")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting prompt: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# SCHEDULED CALLS ENDPOINTS
+# ============================================================================
+
+@app.post(
+    "/api/scheduled-calls",
+    summary="Create Scheduled Call",
+    description="Schedule an outgoing call (AI or normal). Supports single or multiple recipients.",
+    tags=["Scheduled Calls"],
+    response_model=Dict[str, Any]
+)
+async def create_scheduled_call(request: Request):
+    """
+    Schedule a new outgoing call.
+    
+    **Request Body Fields:**
+    - `callType` (string, required): "ai" or "normal"
+    - `fromPhoneNumberId` (string, required): Phone number ID to call from
+    - `toPhoneNumbers` (array, required): List of phone numbers to call
+    - `scheduledDateTime` (string, required): ISO datetime string (e.g., "2025-11-21T10:00:00")
+    - `promptId` (string, required for AI calls): Prompt ID for AI calls
+    - `promptContent` (string, optional): Prompt content for quick reference
+    
+    **Stores in MongoDB:**
+    - Database: `voiceagent`
+    - Collection: `scheduled_calls`
+    """
+    try:
+        call_data = await request.json()
+        logger.info(f"Received scheduled call creation request: {call_data.get('callType')} call")
+        
+        from databases.mongodb_scheduled_call_store import MongoDBScheduledCallStore
+        from databases.mongodb_db import is_mongodb_available
+        from databases.mongodb_phone_store import MongoDBPhoneStore
+        
+        # Check MongoDB availability
+        if not is_mongodb_available():
+            logger.error("MongoDB is not available for scheduled call storage")
+            raise HTTPException(status_code=503, detail="MongoDB is not available. Please check MongoDB connection.")
+        
+        # Verify phone number is registered
+        phone_number_id = call_data.get("fromPhoneNumberId")
+        if not phone_number_id:
+            raise HTTPException(status_code=400, detail="From phone number ID is required")
+        
+        phone_store = MongoDBPhoneStore()
+        registered_phone = await phone_store.get_phone(phone_number_id)
+        
+        if not registered_phone or registered_phone.get("isActive") == False or registered_phone.get("isDeleted") == True:
+            raise HTTPException(status_code=400, detail=f"Phone number is not registered or inactive. Please register the phone number first.")
+        
+        scheduled_call_store = MongoDBScheduledCallStore()
+        call_id = await scheduled_call_store.create_scheduled_call(call_data)
+        
+        if not call_id:
+            logger.error("Failed to create scheduled call - create_scheduled_call returned None")
+            raise HTTPException(status_code=500, detail="Failed to create scheduled call in MongoDB")
+        
+        logger.info(f"✅ Scheduled call created successfully with ID: {call_id}")
+        
+        return {
+            "success": True,
+            "call_id": call_id,
+            "message": "Scheduled call created successfully and stored in MongoDB",
+            "mongodb": {
+                "database": "voiceagent",
+                "collection": "scheduled_calls",
+                "saved": True
+            }
+        }
+            
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating scheduled call: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error creating scheduled call: {str(e)}")
+
+@app.get(
+    "/api/scheduled-calls",
+    summary="List Scheduled Calls",
+    description="Get all scheduled calls from MongoDB. Can filter by phone number, status, or call type.",
+    tags=["Scheduled Calls"],
+    response_model=Dict[str, Any]
+)
+async def list_scheduled_calls(
+    phone_number_id: Optional[str] = Query(None, description="Filter by phone number ID"),
+    status: Optional[str] = Query(None, description="Filter by status (pending, in_progress, completed, failed, cancelled)"),
+    call_type: Optional[str] = Query(None, description="Filter by call type (ai, normal)")
+):
+    """
+    List all scheduled calls from MongoDB.
+    
+    **Query Parameters:**
+    - `phone_number_id` (string, optional): Filter by phone number ID
+    - `status` (string, optional): Filter by status
+    - `call_type` (string, optional): Filter by call type
+    
+    **Returns:**
+    - List of scheduled call objects with all fields
+    """
+    try:
+        from databases.mongodb_scheduled_call_store import MongoDBScheduledCallStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        # Check MongoDB availability first
+        if not is_mongodb_available():
+            logger.warning("MongoDB is not available - returning empty scheduled calls list")
+            return {"success": True, "calls": [], "count": 0, "mongodb_available": False}
+        
+        scheduled_call_store = MongoDBScheduledCallStore()
+        calls = await scheduled_call_store.list_scheduled_calls(
+            phone_number_id=phone_number_id,
+            status=status,
+            call_type=call_type
+        )
+        
+        logger.info(f"✅ Returning {len(calls)} scheduled call(s) from MongoDB")
+        return {"success": True, "calls": calls, "count": len(calls), "mongodb_available": True}
+        
+    except Exception as e:
+        logger.error(f"Error listing scheduled calls: {e}", exc_info=True)
+        return {"success": True, "calls": [], "count": 0, "error": str(e), "mongodb_available": False}
+
+@app.get(
+    "/api/scheduled-calls/{call_id}",
+    summary="Get Scheduled Call",
+    description="Get a specific scheduled call by ID.",
+    tags=["Scheduled Calls"],
+    response_model=Dict[str, Any]
+)
+async def get_scheduled_call(call_id: str = Path(..., description="MongoDB Scheduled Call ID")):
+    """
+    Get a specific scheduled call by ID.
+    
+    **Path Parameters:**
+    - `call_id` (string, required): MongoDB ObjectID of the scheduled call
+    
+    **Returns:**
+    - Full scheduled call object with all fields
+    """
+    try:
+        from databases.mongodb_scheduled_call_store import MongoDBScheduledCallStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        if not is_mongodb_available():
+            raise HTTPException(status_code=503, detail="MongoDB is not available")
+        
+        scheduled_call_store = MongoDBScheduledCallStore()
+        call = await scheduled_call_store.get_scheduled_call(call_id)
+        
+        if call:
+            return {"success": True, "call": call}
+        else:
+            raise HTTPException(status_code=404, detail="Scheduled call not found")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting scheduled call: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put(
+    "/api/scheduled-calls/{call_id}",
+    summary="Update Scheduled Call",
+    description="Update an existing scheduled call.",
+    tags=["Scheduled Calls"],
+    response_model=Dict[str, Any]
+)
+async def update_scheduled_call(call_id: str = Path(..., description="MongoDB Scheduled Call ID"), request: Request = ...):
+    """
+    Update an existing scheduled call.
+    
+    **Path Parameters:**
+    - `call_id` (string, required): MongoDB ObjectID of the scheduled call
+    
+    **Request Body:**
+    - Any scheduled call fields to update (partial updates supported)
+    - Common fields: `status`, `scheduledDateTime`, `toPhoneNumbers`, `promptId`
+    """
+    try:
+        updates = await request.json()
+        from databases.mongodb_scheduled_call_store import MongoDBScheduledCallStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        if not is_mongodb_available():
+            raise HTTPException(status_code=503, detail="MongoDB is not available")
+        
+        scheduled_call_store = MongoDBScheduledCallStore()
+        success = await scheduled_call_store.update_scheduled_call(call_id, updates)
+        
+        if success:
+            return {"success": True, "message": "Scheduled call updated successfully"}
+        else:
+            raise HTTPException(status_code=404, detail="Scheduled call not found or update failed")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating scheduled call: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete(
+    "/api/scheduled-calls/{call_id}",
+    summary="Delete Scheduled Call",
+    description="Soft delete a scheduled call (sets isDeleted=True).",
+    tags=["Scheduled Calls"],
+    response_model=Dict[str, Any]
+)
+async def delete_scheduled_call(call_id: str = Path(..., description="MongoDB Scheduled Call ID")):
+    """
+    Delete a scheduled call from MongoDB (soft delete).
+    
+    **Path Parameters:**
+    - `call_id` (string, required): MongoDB ObjectID of the scheduled call
+    
+    **Note:** This is a soft delete - sets isDeleted=True. The call remains in MongoDB for audit purposes.
+    """
+    try:
+        from databases.mongodb_scheduled_call_store import MongoDBScheduledCallStore
+        from databases.mongodb_db import is_mongodb_available
+        
+        if not is_mongodb_available():
+            raise HTTPException(status_code=503, detail="MongoDB is not available")
+        
+        scheduled_call_store = MongoDBScheduledCallStore()
+        success = await scheduled_call_store.delete_scheduled_call(call_id)
+        
+        if success:
+            return {"success": True, "message": "Scheduled call deleted successfully"}
+        else:
+            raise HTTPException(status_code=404, detail="Scheduled call not found")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting scheduled call: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get(
     "/twilio/status",
@@ -4751,6 +5210,702 @@ async def live_transcript_websocket(websocket: WebSocket, call_sid: str):
             pass
 
 # ============================================================================
+# CALL FLOW TESTING ENDPOINTS
+# ============================================================================
+
+@app.get(
+    "/api/test/call-flow/settings",
+    summary="Get Call Flow Settings",
+    description="Get current interrupt handling settings for testing",
+    tags=["Testing", "Call Flow"]
+)
+async def get_call_flow_settings():
+    """Get current call flow interrupt settings"""
+    try:
+        # Import to get current settings
+        from tools.phone.twilio_phone_stream import (
+            VAD_AGGRESSIVENESS, 
+            VAD_SAMPLE_RATE, 
+            VAD_FRAME_DURATION_MS
+        )
+        
+        # Get settings from a handler instance (if any active)
+        settings = {
+            "vad_aggressiveness": VAD_AGGRESSIVENESS,
+            "vad_sample_rate": VAD_SAMPLE_RATE,
+            "vad_frame_duration_ms": VAD_FRAME_DURATION_MS,
+            "default_settings": {
+                "silence_threshold_frames": 25,
+                "interrupt_grace_period_ms": 500,
+                "min_interrupt_frames": 5
+            },
+            "calculated_values": {
+                "silence_threshold_ms": 25 * 20,  # frames * ms per frame
+                "min_interrupt_ms": 5 * 20,
+                "interrupt_detection_latency_ms": 500 + (5 * 20)  # grace + validation
+            },
+            "active_calls": len(active_stream_handlers),
+            "active_call_sids": list(active_stream_handlers.keys())
+        }
+        
+        # If there are active calls, get their actual settings
+        if active_stream_handlers:
+            first_handler = next(iter(active_stream_handlers.values()))
+            settings["active_call_settings"] = {
+                "silence_threshold_frames": first_handler.SILENCE_THRESHOLD_FRAMES,
+                "interrupt_grace_period_ms": first_handler.INTERRUPT_GRACE_PERIOD_MS,
+                "min_interrupt_frames": first_handler.MIN_INTERRUPT_FRAMES,
+                "query_sequence": first_handler.query_sequence,
+                "is_speaking": first_handler.is_speaking,
+                "ai_is_speaking": first_handler.ai_is_speaking,
+                "interrupt_detected": first_handler.interrupt_detected
+            }
+        
+        return {
+            "success": True,
+            "settings": settings,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting call flow settings: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/api/test/call-flow/active-calls",
+    summary="Get Active Calls Status",
+    description="Get detailed status of all active calls for testing",
+    tags=["Testing", "Call Flow"]
+)
+async def get_active_calls_status():
+    """Get detailed status of all active calls"""
+    try:
+        active_calls = []
+        
+        for call_sid, handler in active_stream_handlers.items():
+            call_info = {
+                "call_sid": call_sid,
+                "stream_sid": handler.stream_sid,
+                "session_id": handler.session_id,
+                "to_number": handler.to_number,
+                "is_outbound_call": handler.is_outbound_call,
+                "state": {
+                    "is_speaking": handler.is_speaking,
+                    "ai_is_speaking": handler.ai_is_speaking,
+                    "interrupt_detected": handler.interrupt_detected,
+                    "query_sequence": handler.query_sequence,
+                    "speech_frames_count": handler.speech_frames_count,
+                    "silence_frames_count": handler.silence_frames_count,
+                    "interrupt_speech_frames": handler.interrupt_speech_frames
+                },
+                "settings": {
+                    "silence_threshold_frames": handler.SILENCE_THRESHOLD_FRAMES,
+                    "interrupt_grace_period_ms": handler.INTERRUPT_GRACE_PERIOD_MS,
+                    "min_interrupt_frames": handler.MIN_INTERRUPT_FRAMES
+                },
+                "agent_config": {
+                    "name": handler.agent_config.get("name") if handler.agent_config else None,
+                    "stt_model": handler.agent_config.get("sttModel") if handler.agent_config else None,
+                    "tts_model": handler.agent_config.get("ttsModel") if handler.agent_config else None,
+                    "llm_model": handler.agent_config.get("inferenceModel") if handler.agent_config else None
+                } if handler.agent_config else None,
+                "conversation_history_count": len(handler.session_data.get("conversation_history", []))
+            }
+            active_calls.append(call_info)
+        
+        return {
+            "success": True,
+            "active_calls_count": len(active_calls),
+            "active_calls": active_calls,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting active calls status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(
+    "/api/test/call-flow/simulate-interrupt",
+    summary="Simulate Interrupt",
+    description="Simulate an interrupt for testing (requires active call)",
+    tags=["Testing", "Call Flow"]
+)
+async def simulate_interrupt(call_sid: str):
+    """Simulate an interrupt for testing purposes"""
+    try:
+        if call_sid not in active_stream_handlers:
+            raise HTTPException(status_code=404, detail=f"Call {call_sid} not found in active calls")
+        
+        handler = active_stream_handlers[call_sid]
+        
+        # Get current state before interrupt
+        before_state = {
+            "is_speaking": handler.is_speaking,
+            "ai_is_speaking": handler.ai_is_speaking,
+            "interrupt_detected": handler.interrupt_detected,
+            "query_sequence": handler.query_sequence
+        }
+        
+        # Simulate interrupt detection
+        handler.interrupt_detected = True
+        
+        # Cancel TTS if active
+        if handler.tts_streaming_task and not handler.tts_streaming_task.done():
+            handler.tts_streaming_task.cancel()
+        
+        # Send clear command
+        try:
+            await handler.websocket.send_json({
+                "event": "clear",
+                "streamSid": handler.stream_sid
+            })
+        except Exception as e:
+            logger.warning(f"Could not send clear command: {e}")
+        
+        # Update state
+        handler.ai_is_speaking = False
+        handler.ai_speech_start_time = None
+        
+        # Get state after interrupt
+        after_state = {
+            "is_speaking": handler.is_speaking,
+            "ai_is_speaking": handler.ai_is_speaking,
+            "interrupt_detected": handler.interrupt_detected,
+            "query_sequence": handler.query_sequence
+        }
+        
+        return {
+            "success": True,
+            "call_sid": call_sid,
+            "before_state": before_state,
+            "after_state": after_state,
+            "message": "Interrupt simulated successfully",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error simulating interrupt: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/api/test/call-flow/diagnostics",
+    summary="Get Call Flow Diagnostics",
+    description="Get comprehensive diagnostics for call flow debugging",
+    tags=["Testing", "Call Flow"]
+)
+async def get_call_flow_diagnostics():
+    """Get comprehensive call flow diagnostics"""
+    try:
+        from databases.mongodb_call_store import MongoDBCallStore
+        call_store = MongoDBCallStore()
+        
+        # Get recent calls
+        recent_calls = await call_store.get_all_calls(limit=10)
+        
+        # Calculate statistics
+        total_calls = len(recent_calls)
+        ongoing_calls = len([c for c in recent_calls if c.get("status") == "ongoing"])
+        finished_calls = len([c for c in recent_calls if c.get("status") == "finished"])
+        
+        # Get conversation statistics
+        conversation_stats = []
+        for call in recent_calls:
+            conversation = call.get("conversation", [])
+            user_messages = len([m for m in conversation if m.get("role") == "user"])
+            ai_messages = len([m for m in conversation if m.get("role") == "assistant"])
+            conversation_stats.append({
+                "call_sid": call.get("call_sid"),
+                "status": call.get("status"),
+                "total_messages": len(conversation),
+                "user_messages": user_messages,
+                "ai_messages": ai_messages,
+                "duration": call.get("duration")
+            })
+        
+        diagnostics = {
+            "system_status": {
+                "active_stream_handlers": len(active_stream_handlers),
+                "active_call_sids": list(active_stream_handlers.keys())
+            },
+            "call_statistics": {
+                "total_recent_calls": total_calls,
+                "ongoing_calls": ongoing_calls,
+                "finished_calls": finished_calls
+            },
+            "conversation_statistics": conversation_stats,
+            "interrupt_settings": {
+                "grace_period_ms": 500,
+                "min_interrupt_frames": 5,
+                "min_interrupt_ms": 100,
+                "silence_threshold_ms": 500
+            },
+            "recent_calls": recent_calls[:5]  # Last 5 calls
+        }
+        
+        return {
+            "success": True,
+            "diagnostics": diagnostics,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting call flow diagnostics: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/api/test/call-flow/conversation-history/{call_sid}",
+    summary="Get Conversation History",
+    description="Get detailed conversation history for a specific call",
+    tags=["Testing", "Call Flow"]
+)
+async def get_conversation_history(call_sid: str):
+    """Get detailed conversation history for testing"""
+    try:
+        # Check if call is active
+        if call_sid in active_stream_handlers:
+            handler = active_stream_handlers[call_sid]
+            conversation_history = handler.session_data.get("conversation_history", [])
+            
+            return {
+                "success": True,
+                "call_sid": call_sid,
+                "status": "active",
+                "conversation_history_count": len(conversation_history),
+                "conversation_history": conversation_history,
+                "current_state": {
+                    "query_sequence": handler.query_sequence,
+                    "is_speaking": handler.is_speaking,
+                    "ai_is_speaking": handler.ai_is_speaking,
+                    "interrupt_detected": handler.interrupt_detected
+                },
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        else:
+            # Get from MongoDB
+            from databases.mongodb_call_store import MongoDBCallStore
+            call_store = MongoDBCallStore()
+            call = await call_store.get_call_by_sid(call_sid)
+            
+            if not call:
+                raise HTTPException(status_code=404, detail=f"Call {call_sid} not found")
+            
+            conversation = call.get("conversation", [])
+            
+            return {
+                "success": True,
+                "call_sid": call_sid,
+                "status": call.get("status"),
+                "conversation_count": len(conversation),
+                "conversation": conversation,
+                "from_number": call.get("from_number"),
+                "to_number": call.get("to_number"),
+                "duration": call.get("duration"),
+                "timestamp": datetime.utcnow().isoformat()
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting conversation history: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# COMPONENT TESTING APIS - Test each step of call flow independently
+# ============================================================================
+
+# ============================================================================
+# STT (Speech-to-Text) Testing APIs
+# ============================================================================
+
+@app.post(
+    "/api/test/stt/transcribe",
+    summary="Test Speech-to-Text",
+    description="Transcribe audio to text using OpenAI Whisper (test STT independently)",
+    tags=["Testing", "Speech-to-Text"]
+)
+async def test_stt_transcribe(
+    audio_file: UploadFile = File(...),
+    model: str = Query(default="whisper-1", description="STT model to use")
+):
+    """Test STT by transcribing an audio file"""
+    try:
+        # Read audio file
+        audio_data = await audio_file.read()
+        
+        # Use existing STT tool
+        result = await speech_tool.transcribe(audio_data, file_format="wav", model=model)
+        
+        return {
+            "success": result.get("success", False),
+            "text": result.get("text", ""),
+            "error": result.get("error"),
+            "model_used": model,
+            "audio_size_bytes": len(audio_data),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error in STT test: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(
+    "/api/test/stt/transcribe-base64",
+    summary="Test STT with Base64 Audio",
+    description="Transcribe base64-encoded audio to text",
+    tags=["Testing", "Speech-to-Text"]
+)
+async def test_stt_transcribe_base64(
+    audio_base64: str = Form(...),
+    model: str = Form(default="whisper-1")
+):
+    """Test STT with base64-encoded audio"""
+    try:
+        import base64
+        
+        # Decode base64 audio
+        audio_data = base64.b64decode(audio_base64)
+        
+        # Use existing STT tool
+        result = await speech_tool.transcribe(audio_data, file_format="wav", model=model)
+        
+        return {
+            "success": result.get("success", False),
+            "text": result.get("text", ""),
+            "error": result.get("error"),
+            "model_used": model,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error in STT base64 test: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# LLM (Language Model) Testing APIs
+# ============================================================================
+
+@app.post(
+    "/api/test/llm/generate-response",
+    summary="Test LLM Response Generation",
+    description="Generate AI response from text input (test LLM independently)",
+    tags=["Testing", "LLM"]
+)
+async def test_llm_generate_response(
+    user_text: str = Form(...),
+    system_prompt: str = Form(default=None),
+    model: str = Form(default="gpt-4o-mini"),
+    temperature: float = Form(default=0.7),
+    max_tokens: int = Form(default=150)
+):
+    """Test LLM by generating a response to user text"""
+    try:
+        # Create a temporary session for testing
+        session_data = {
+            "session_id": f"test_{datetime.utcnow().timestamp()}",
+            "conversation_history": [],
+            "system_prompt": system_prompt or "You are a helpful AI assistant.",
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+        
+        # Use existing conversation tool
+        result = await conversation_tool.generate_response(
+            session_data,
+            user_text,
+            persona=None,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        
+        return {
+            "success": True,
+            "user_input": user_text,
+            "ai_response": result.get("response", ""),
+            "model_used": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error in LLM test: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(
+    "/api/test/llm/generate-with-history",
+    summary="Test LLM with Conversation History",
+    description="Generate AI response with conversation context",
+    tags=["Testing", "LLM"]
+)
+async def test_llm_generate_with_history(
+    user_text: str = Form(...),
+    conversation_history: str = Form(default="[]"),
+    system_prompt: str = Form(default=None),
+    model: str = Form(default="gpt-4o-mini")
+):
+    """Test LLM with conversation history"""
+    try:
+        import json
+        
+        # Parse conversation history
+        history = json.loads(conversation_history) if conversation_history else []
+        
+        # Create session with history
+        session_data = {
+            "session_id": f"test_{datetime.utcnow().timestamp()}",
+            "conversation_history": history,
+            "system_prompt": system_prompt or "You are a helpful AI assistant.",
+            "model": model
+        }
+        
+        # Generate response
+        result = await conversation_tool.generate_response(
+            session_data,
+            user_text,
+            model=model
+        )
+        
+        return {
+            "success": True,
+            "user_input": user_text,
+            "ai_response": result.get("response", ""),
+            "conversation_turns": len(history),
+            "model_used": model,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error in LLM history test: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# TTS (Text-to-Speech) Testing APIs
+# ============================================================================
+
+@app.post(
+    "/api/test/tts/synthesize",
+    summary="Test Text-to-Speech",
+    description="Convert text to speech audio (test TTS independently)",
+    tags=["Testing", "Text-to-Speech"]
+)
+async def test_tts_synthesize(
+    text: str = Form(...),
+    voice: str = Form(default="alloy"),
+    model: str = Form(default="tts-1"),
+    response_format: str = Form(default="mp3")
+):
+    """Test TTS by converting text to speech"""
+    try:
+        # Use existing TTS tool
+        result = await tts_tool.synthesize(
+            text,
+            voice=voice,
+            model=model,
+            response_format=response_format
+        )
+        
+        if result.get("success"):
+            audio_data = result.get("audio_data")
+            
+            # Return audio file
+            from fastapi.responses import Response
+            return Response(
+                content=audio_data,
+                media_type=f"audio/{response_format}",
+                headers={
+                    "Content-Disposition": f"attachment; filename=tts_output.{response_format}"
+                }
+            )
+        else:
+            raise HTTPException(status_code=500, detail=result.get("error", "TTS failed"))
+    except Exception as e:
+        logger.error(f"Error in TTS test: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(
+    "/api/test/tts/synthesize-base64",
+    summary="Test TTS with Base64 Output",
+    description="Convert text to speech and return as base64",
+    tags=["Testing", "Text-to-Speech"]
+)
+async def test_tts_synthesize_base64(
+    text: str = Form(...),
+    voice: str = Form(default="alloy"),
+    model: str = Form(default="tts-1")
+):
+    """Test TTS and return base64-encoded audio"""
+    try:
+        import base64
+        
+        # Use existing TTS tool
+        result = await tts_tool.synthesize(
+            text,
+            voice=voice,
+            model=model,
+            response_format="mp3"
+        )
+        
+        if result.get("success"):
+            audio_data = result.get("audio_data")
+            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+            
+            return {
+                "success": True,
+                "text": text,
+                "audio_base64": audio_base64,
+                "voice": voice,
+                "model": model,
+                "audio_size_bytes": len(audio_data),
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        else:
+            raise HTTPException(status_code=500, detail=result.get("error", "TTS failed"))
+    except Exception as e:
+        logger.error(f"Error in TTS base64 test: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# END-TO-END FLOW TESTING APIs
+# ============================================================================
+
+@app.post(
+    "/api/test/flow/audio-to-response",
+    summary="Test Complete Audio-to-Response Flow",
+    description="Test full pipeline: Audio → STT → LLM → TTS (without actual call)",
+    tags=["Testing", "End-to-End Flow"]
+)
+async def test_flow_audio_to_response(
+    audio_file: UploadFile = File(...),
+    system_prompt: str = Form(default=None),
+    stt_model: str = Form(default="whisper-1"),
+    llm_model: str = Form(default="gpt-4o-mini"),
+    tts_voice: str = Form(default="alloy"),
+    tts_model: str = Form(default="tts-1")
+):
+    """Test complete flow from audio input to audio response"""
+    try:
+        # Step 1: STT - Convert audio to text
+        audio_data = await audio_file.read()
+        stt_result = await speech_tool.transcribe(audio_data, file_format="wav", model=stt_model)
+        
+        if not stt_result.get("success"):
+            raise HTTPException(status_code=500, detail=f"STT failed: {stt_result.get('error')}")
+        
+        user_text = stt_result.get("text", "")
+        
+        # Step 2: LLM - Generate response
+        session_data = {
+            "session_id": f"test_{datetime.utcnow().timestamp()}",
+            "conversation_history": [],
+            "system_prompt": system_prompt or "You are a helpful AI assistant.",
+            "model": llm_model
+        }
+        
+        llm_result = await conversation_tool.generate_response(
+            session_data,
+            user_text,
+            model=llm_model
+        )
+        
+        ai_response = llm_result.get("response", "")
+        
+        # Step 3: TTS - Convert response to audio
+        tts_result = await tts_tool.synthesize(
+            ai_response,
+            voice=tts_voice,
+            model=tts_model,
+            response_format="mp3"
+        )
+        
+        if not tts_result.get("success"):
+            raise HTTPException(status_code=500, detail=f"TTS failed: {tts_result.get('error')}")
+        
+        # Return complete flow result
+        import base64
+        response_audio_base64 = base64.b64encode(tts_result.get("audio_data")).decode('utf-8')
+        
+        return {
+            "success": True,
+            "flow": {
+                "step_1_stt": {
+                    "transcript": user_text,
+                    "model": stt_model
+                },
+                "step_2_llm": {
+                    "user_input": user_text,
+                    "ai_response": ai_response,
+                    "model": llm_model
+                },
+                "step_3_tts": {
+                    "text": ai_response,
+                    "audio_base64": response_audio_base64,
+                    "voice": tts_voice,
+                    "model": tts_model
+                }
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error in end-to-end flow test: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(
+    "/api/test/flow/text-conversation-turn",
+    summary="Test Conversation Turn (Text Only)",
+    description="Simulate a conversation turn with text input/output",
+    tags=["Testing", "End-to-End Flow"]
+)
+async def test_flow_text_conversation_turn(
+    user_text: str = Form(...),
+    conversation_id: str = Form(default=None),
+    system_prompt: str = Form(default=None),
+    model: str = Form(default="gpt-4o-mini")
+):
+    """Test a conversation turn with text (maintains conversation state)"""
+    try:
+        # Use or create conversation ID
+        conv_id = conversation_id or f"test_{datetime.utcnow().timestamp()}"
+        
+        # Get or create session data
+        # Note: In production, this would be stored in a database
+        # For testing, we create a new session each time
+        session_data = {
+            "session_id": conv_id,
+            "conversation_history": [],
+            "system_prompt": system_prompt or "You are a helpful AI assistant.",
+            "model": model
+        }
+        
+        # Generate response
+        result = await conversation_tool.generate_response(
+            session_data,
+            user_text,
+            model=model
+        )
+        
+        ai_response = result.get("response", "")
+        
+        # Update conversation history
+        updated_session = conversation_tool.manager.add_to_conversation_history(
+            session_data,
+            user_input=user_text,
+            agent_response=ai_response
+        )
+        
+        return {
+            "success": True,
+            "conversation_id": conv_id,
+            "turn": {
+                "user": user_text,
+                "assistant": ai_response
+            },
+            "conversation_history": updated_session.get("conversation_history", []),
+            "total_turns": len(updated_session.get("conversation_history", [])),
+            "model_used": model,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error in conversation turn test: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+
+
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):

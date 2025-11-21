@@ -47,8 +47,8 @@ class TwilioStreamHandler:
         self.speech_frames_count = 0
         self.interrupt_speech_frames = 0  # Track how many frames of speech during interrupt (to validate real interrupt)
         self.SILENCE_THRESHOLD_FRAMES = 25  # 25 frames * 20ms/frame = 500ms of silence to trigger processing
-        self.INTERRUPT_GRACE_PERIOD_MS = 1200  # Wait 1200ms after AI starts speaking before allowing interrupts (prevents feedback loop)
-        self.MIN_INTERRUPT_FRAMES = 10  # Require at least 10 frames (200ms) of sustained speech for valid interrupt
+        self.INTERRUPT_GRACE_PERIOD_MS = 500  # Wait 500ms after AI starts speaking before allowing interrupts (prevents feedback loop)
+        self.MIN_INTERRUPT_FRAMES = 5  # Require at least 5 frames (100ms) of sustained speech for valid interrupt
         self.speech_processing_lock = asyncio.Lock()  # Prevent concurrent speech processing
         self.speech_processing_task = None  # Track active speech processing task for cancellation
         self.query_sequence = 0  # Track query sequence to ensure we process the most recent
@@ -283,6 +283,22 @@ class TwilioStreamHandler:
                     # Validated interrupt - user is really speaking!
                     logger.info(f"🚨 INTERRUPT VALIDATED: {self.interrupt_speech_frames} frames of sustained speech!")
                     self.interrupt_detected = True
+                    
+                    # CRITICAL: Send Twilio "clear" command to immediately stop audio playback
+                    # This prevents AI from continuing to speak after interrupt
+                    # Schedule as async task since this method is not async
+                    async def send_clear_command():
+                        try:
+                            await self.websocket.send_json({
+                                "event": "clear",
+                                "streamSid": self.stream_sid
+                            })
+                            logger.info("🛑 Sent Twilio 'clear' command to stop audio playback immediately")
+                        except Exception as clear_error:
+                            logger.warning(f"Could not send clear command: {clear_error}")
+                    
+                    asyncio.create_task(send_clear_command())
+                    
                     # CRITICAL: Stop TTS streaming immediately and forcefully
                     if self.tts_streaming_task and not self.tts_streaming_task.done():
                         self.tts_streaming_task.cancel()
@@ -302,7 +318,7 @@ class TwilioStreamHandler:
                     self.speech_frames_count = 1  # Start fresh count from validated interrupt
                     self.is_speaking = True
                     self.interrupt_speech_frames = 0  # Reset for next time
-                    logger.info("🎤 Started capturing interrupt speech (waiting for TTS to stop)...")
+                    logger.info("🎤 Started capturing interrupt speech (AI audio cleared)...")
                     return  # Don't process further in this frame, we've handled the interrupt
                 else:
                     # Not enough frames yet - keep tracking but don't process
@@ -413,7 +429,7 @@ class TwilioStreamHandler:
                     logger.info(f"   Last interaction: User: '{conversation_history[-1].get('user_input', '')[:50]}...' | AI: '{conversation_history[-1].get('agent_response', '')[:50]}...'")
                 else:
                     logger.info("   ⚠️ No previous interactions - this is the first question")
-                logger.info("🛑 AI stopped answering previous question. 👂 Processing NEW interrupt question...")
+                logger.info("🛑 AI STOPPED mid-response. 👂 Processing NEW interrupt question (AI will answer THIS question, not the previous one)...")
             else:
                 logger.info(f"Processing Query #{current_query_id}: {len(audio_to_process)} bytes of speech.")
                 logger.info(f"📚 Current conversation history: {len(self.session_data.get('conversation_history', []))} interactions")
