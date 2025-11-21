@@ -41,7 +41,8 @@ import {
   X,
   ChevronDown,
   ChevronUp,
-  AlertCircle
+  AlertCircle,
+  DollarSign
 } from 'lucide-react'
 
 // --- Components ---
@@ -101,138 +102,129 @@ const NavItem = ({ icon: Icon, label, active, onClick }: any) => (
 
 // --- Views ---
 
-const DashboardView = () => (
-  <div className="space-y-8">
-    {/* Stats Grid */}
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-      <StatCard icon={Phone} label="Total Calls" value="2,543" trend="+12.5%" color="from-blue-500 to-cyan-500" delay={0.1} />
-      <StatCard icon={Clock} label="Avg. Duration" value="4m 12s" trend="+5.2%" color="from-violet-500 to-fuchsia-500" delay={0.2} />
-      <StatCard icon={Zap} label="Active Agents" value="14" trend="+2" color="from-emerald-500 to-teal-500" delay={0.3} />
-      <StatCard icon={DollarSign} label="Cost / Min" value="$0.04" trend="-8.1%" color="from-orange-500 to-red-500" delay={0.4} />
-    </div>
+const DashboardView = () => {
+  const [activeAgents, setActiveAgents] = useState<any[]>([])
+  
+  useEffect(() => {
+    fetch('/agents').then(res => res.json()).then(data => {
+        const active = (data.agents || []).filter((a: any) => a.active)
+        setActiveAgents(active)
+    }).catch(e => console.error(e))
+  }, [])
 
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-      {/* Live Activity Feed */}
-      <div className="lg:col-span-2 space-y-6">
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="text-lg font-bold text-slate-800">Active Agents</h3>
-          <button className="text-sm font-semibold text-blue-600 hover:text-blue-700 transition-colors">View All</button>
+  return (
+    <div className="space-y-8">
+      {/* Stats Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <StatCard icon={Phone} label="Total Calls" value="0" trend="0%" color="from-blue-500 to-cyan-500" delay={0.1} />
+        <StatCard icon={Clock} label="Avg. Duration" value="0s" trend="0%" color="from-violet-500 to-fuchsia-500" delay={0.2} />
+        <StatCard icon={Zap} label="Active Agents" value={activeAgents.length.toString()} trend="0" color="from-emerald-500 to-teal-500" delay={0.3} />
+        <StatCard icon={DollarSign} label="Cost / Min" value="$0.00" trend="0%" color="from-orange-500 to-red-500" delay={0.4} />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        {/* Live Activity Feed */}
+        <div className="lg:col-span-2 space-y-6">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-lg font-bold text-slate-800">Active Agents</h3>
+            <button className="text-sm font-semibold text-blue-600 hover:text-blue-700 transition-colors">View All</button>
+          </div>
+
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.5 }} className="space-y-4">
+            {activeAgents.length === 0 ? (
+                <div className="text-center py-10 text-slate-400 bg-white/50 rounded-xl border border-slate-100">
+                    <p>No active agents found.</p>
+                </div>
+            ) : (
+                activeAgents.map((agent, i) => (
+                  <div key={i} className="group flex items-center justify-between rounded-xl border border-slate-100 bg-white/50 p-4 transition-all hover:bg-white hover:shadow-md hover:shadow-slate-200/50 hover:border-white">
+                    <div className="flex items-center space-x-4">
+                      <div className="relative">
+                        <div className="h-12 w-12 rounded-full bg-gradient-to-br from-blue-100 to-purple-100 p-[2px]">
+                          <div className="h-full w-full rounded-full bg-white flex items-center justify-center">
+                            <Cpu className="h-6 w-6 text-blue-600" />
+                          </div>
+                        </div>
+                        <div className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white bg-emerald-500" />
+                      </div>
+                      <div>
+                        <h4 className="font-bold text-slate-800 group-hover:text-blue-600 transition-colors">{agent.name}</h4>
+                        <p className="text-xs text-slate-500 font-medium">{agent.role || 'Voice Agent'}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center space-x-8">
+                      <button className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors">
+                        <MoreHorizontal className="h-5 w-5" />
+                      </button>
+                    </div>
+                  </div>
+                ))
+            )}
+          </motion.div>
+
+          <div className="mt-8">
+            <h3 className="text-lg font-bold text-slate-800 mb-4">Real-time Analytics</h3>
+            <LightGlassCard className="h-72 flex items-center justify-center border-dashed border-slate-300 bg-white/40">
+              <div className="text-center">
+                <div className="h-16 w-16 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <Activity className="h-8 w-8 text-blue-500" />
+                </div>
+                <p className="text-slate-500 font-medium">Interactive Chart Visualization Area</p>
+                <p className="text-sm text-slate-400 mt-1">Data is flowing in real-time...</p>
+              </div>
+            </LightGlassCard>
+          </div>
         </div>
 
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.5 }} className="space-y-4">
-          {[
-            { name: "Support Bot Alpha", status: "active", type: "Inbound Support", calls: "1,234", performance: "98%" },
-            { name: "Sales Outreach X", status: "active", type: "Outbound Sales", calls: "856", performance: "92%" },
-            { name: "Appointment Setter", status: "idle", type: "Scheduling", calls: "445", performance: "88%" }
-          ].map((agent, i) => (
-            <div key={i} className="group flex items-center justify-between rounded-xl border border-slate-100 bg-white/50 p-4 transition-all hover:bg-white hover:shadow-md hover:shadow-slate-200/50 hover:border-white">
-              <div className="flex items-center space-x-4">
-                <div className="relative">
-                  <div className="h-12 w-12 rounded-full bg-gradient-to-br from-blue-100 to-purple-100 p-[2px]">
-                    <div className="h-full w-full rounded-full bg-white flex items-center justify-center">
-                      <Cpu className="h-6 w-6 text-blue-600" />
-                    </div>
-                  </div>
-                  <div className={`absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white ${agent.status === 'active' ? 'bg-emerald-500' : 'bg-slate-400'}`} />
-                </div>
-                <div>
-                  <h4 className="font-bold text-slate-800 group-hover:text-blue-600 transition-colors">{agent.name}</h4>
-                  <p className="text-xs text-slate-500 font-medium">{agent.type}</p>
-                </div>
-              </div>
-              <div className="flex items-center space-x-8">
-                <div className="text-center hidden sm:block">
-                  <p className="text-xs text-slate-400 font-medium uppercase tracking-wide">Calls</p>
-                  <p className="font-mono text-sm font-bold text-slate-700">{agent.calls}</p>
-                </div>
-                <div className="text-center hidden sm:block">
-                  <p className="text-xs text-slate-400 font-medium uppercase tracking-wide">Performance</p>
-                  <div className="flex items-center space-x-2">
-                    <div className="h-2 w-16 rounded-full bg-slate-100 overflow-hidden">
-                      <div className="h-full rounded-full bg-gradient-to-r from-blue-400 to-purple-500" style={{ width: agent.performance }} />
-                    </div>
-                    <span className="text-xs font-bold text-slate-700">{agent.performance}</span>
-                  </div>
-                </div>
-                <button className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors">
-                  <MoreHorizontal className="h-5 w-5" />
-                </button>
-              </div>
+        {/* Right Panel */}
+        <div className="space-y-6">
+          <LightGlassCard delay={0.6} className="!bg-gradient-to-b !from-white !to-blue-50/50">
+            <h3 className="text-lg font-bold text-slate-800 mb-6">System Health</h3>
+            <div className="space-y-6">
+                <div className="text-center text-slate-500 text-sm">System Operational</div>
             </div>
-          ))}
-        </motion.div>
+          </LightGlassCard>
 
-        <div className="mt-8">
-          <h3 className="text-lg font-bold text-slate-800 mb-4">Real-time Analytics</h3>
-          <LightGlassCard className="h-72 flex items-center justify-center border-dashed border-slate-300 bg-white/40">
-            <div className="text-center">
-              <div className="h-16 w-16 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-4">
-                <Activity className="h-8 w-8 text-blue-500" />
-              </div>
-              <p className="text-slate-500 font-medium">Interactive Chart Visualization Area</p>
-              <p className="text-sm text-slate-400 mt-1">Data is flowing in real-time...</p>
-            </div>
+          <LightGlassCard delay={0.7}>
+            <h3 className="text-lg font-bold text-slate-800 mb-4">Recent Events</h3>
+            <div className="text-center text-slate-400 text-sm py-4">No recent events</div>
           </LightGlassCard>
         </div>
       </div>
-
-      {/* Right Panel */}
-      <div className="space-y-6">
-        <LightGlassCard delay={0.6} className="!bg-gradient-to-b !from-white !to-blue-50/50">
-          <h3 className="text-lg font-bold text-slate-800 mb-6">System Health</h3>
-          <div className="space-y-6">
-            {[
-              { label: "API Latency", value: "45ms", color: "bg-emerald-500", width: "20%" },
-              { label: "Voice Synthesis", value: "120ms", color: "bg-blue-500", width: "35%" },
-              { label: "Database Load", value: "12%", color: "bg-purple-500", width: "12%" }
-            ].map((item, i) => (
-              <div key={i}>
-                <div className="flex justify-between text-sm mb-2">
-                  <span className="text-slate-500 font-medium">{item.label}</span>
-                  <span className={`font-bold ${item.color.replace('bg-', 'text-').replace('500', '600')}`}>{item.value}</span>
-                </div>
-                <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                  <div className={`h-full ${item.color} rounded-full shadow-sm`} style={{ width: item.width }} />
-                </div>
-              </div>
-            ))}
-          </div>
-        </LightGlassCard>
-
-        <LightGlassCard delay={0.7}>
-          <h3 className="text-lg font-bold text-slate-800 mb-4">Recent Events</h3>
-          <div className="space-y-0">
-            {[1, 2, 3].map((_, i) => (
-              <div key={i} className="flex items-start space-x-3 py-4 border-b border-slate-100 last:border-0 last:pb-0 first:pt-0">
-                <div className="mt-1.5 h-2 w-2 rounded-full bg-blue-500 ring-4 ring-blue-50" />
-                <div>
-                  <p className="text-sm font-semibold text-slate-700">New agent "Sales Bot" created</p>
-                  <p className="text-xs text-slate-400 mt-0.5">2 minutes ago by Admin</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </LightGlassCard>
-      </div>
     </div>
-  </div>
-)
+  )
+}
 
 
 
 const AgentsView = () => {
-  const [selectedAgent, setSelectedAgent] = useState<number | null>(null)
-  const [messages, setMessages] = useState([
-    { role: 'agent', text: "Hello! I'm your sales assistant. How can I help you today?" }
-  ])
+  const [agents, setAgents] = useState<any[]>([])
+  const [selectedAgent, setSelectedAgent] = useState<any | null>(null)
+  const [messages, setMessages] = useState<any[]>([])
   const [inputText, setInputText] = useState("")
+
+  useEffect(() => {
+    const fetchAgents = async () => {
+      try {
+        const res = await fetch('/agents')
+        if (res.ok) {
+          const data = await res.json()
+          setAgents(data.agents || [])
+        }
+      } catch (e) {
+        console.error("Failed to fetch agents", e)
+      }
+    }
+    fetchAgents()
+  }, [])
 
   const handleSendMessage = () => {
     if (!inputText.trim()) return
     setMessages(prev => [...prev, { role: 'user', text: inputText }])
     setInputText("")
+    // Simulation response for testing UI only - in real app this would hit an API
     setTimeout(() => {
-      setMessages(prev => [...prev, { role: 'agent', text: "I can certainly help with that. Let me pull up the details for you." }])
+      setMessages(prev => [...prev, { role: 'agent', text: "This is a test response from the agent." }])
     }, 1000)
   }
 
@@ -240,39 +232,39 @@ const AgentsView = () => {
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 h-[calc(100vh-140px)]">
       {/* Agents List */}
       <div className="space-y-4 lg:col-span-1 overflow-y-auto pr-2">
-        {[
-          { id: 1, name: "Support Bot Alpha", role: "Customer Service", status: "active" },
-          { id: 2, name: "Sales Outreach X", role: "Outbound Sales", status: "active" },
-          { id: 3, name: "Appointment Setter", role: "Scheduling", status: "idle" },
-          { id: 4, name: "Tech Support V2", role: "Technical", status: "offline" },
-        ].map((agent) => (
-          <div
-            key={agent.id}
-            onClick={() => setSelectedAgent(agent.id)}
-            className={`cursor-pointer p-4 rounded-xl border transition-all ${selectedAgent === agent.id
-              ? 'bg-white border-blue-200 shadow-md shadow-blue-500/10 ring-1 ring-blue-500'
-              : 'bg-white/40 border-white/60 hover:bg-white/80'
-              }`}
-          >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-3">
-                <div className="h-10 w-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold">
-                  {agent.name[0]}
-                </div>
-                <div>
-                  <h4 className="font-bold text-slate-800 text-sm">{agent.name}</h4>
-                  <p className="text-xs text-slate-500">{agent.role}</p>
-                </div>
-              </div>
-              <div className={`h-2.5 w-2.5 rounded-full ${agent.status === 'active' ? 'bg-emerald-500' :
-                agent.status === 'idle' ? 'bg-amber-500' : 'bg-slate-300'
-                }`} />
-            </div>
+        {agents.length === 0 ? (
+          <div className="text-center py-10 text-slate-400">
+            <p>No agents found.</p>
+            <p className="text-xs mt-2">Create an agent in "Incoming Agent" tab.</p>
           </div>
-        ))}
-        <button className="w-full py-3 rounded-xl border-2 border-dashed border-slate-300 text-slate-500 font-bold text-sm hover:border-blue-400 hover:text-blue-600 transition-colors flex items-center justify-center space-x-2">
-          <span>+ Create New Agent</span>
-        </button>
+        ) : (
+          agents.map((agent) => (
+            <div
+              key={agent.id}
+              onClick={() => {
+                setSelectedAgent(agent)
+                setMessages([{ role: 'agent', text: `Hello! I am ${agent.name}. How can I help you?` }])
+              }}
+              className={`cursor-pointer p-4 rounded-xl border transition-all ${selectedAgent?.id === agent.id
+                ? 'bg-white border-blue-200 shadow-md shadow-blue-500/10 ring-1 ring-blue-500'
+                : 'bg-white/40 border-white/60 hover:bg-white/80'
+                }`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-3">
+                  <div className="h-10 w-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold">
+                    {agent.name ? agent.name[0] : '?'}
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-slate-800 text-sm">{agent.name}</h4>
+                    <p className="text-xs text-slate-500">{agent.role || 'Voice Agent'}</p>
+                  </div>
+                </div>
+                <div className={`h-2.5 w-2.5 rounded-full ${agent.active ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+              </div>
+            </div>
+          ))
+        )}
       </div>
 
       {/* Chat / Config Panel */}
@@ -287,8 +279,8 @@ const AgentsView = () => {
                     <Bot className="h-5 w-5 text-blue-600" />
                   </div>
                   <div>
-                    <h3 className="font-bold text-slate-800 text-sm">Test Conversation</h3>
-                    <p className="text-xs text-slate-500">Simulating voice interaction via text</p>
+                    <h3 className="font-bold text-slate-800 text-sm">{selectedAgent.name}</h3>
+                    <p className="text-xs text-slate-500">Test Conversation</p>
                   </div>
                 </div>
                 <div className="flex space-x-2">
@@ -334,7 +326,7 @@ const AgentsView = () => {
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
               <Bot className="h-16 w-16 mb-4 opacity-20" />
-              <p className="font-medium">Select an agent to configure or test</p>
+              <p className="font-medium">Select an agent to test</p>
             </div>
           )}
         </LightGlassCard>
@@ -343,200 +335,301 @@ const AgentsView = () => {
   )
 }
 
-const LogsView = () => (
-  <div className="space-y-6">
-    <div className="flex items-center justify-between">
-      <h2 className="text-2xl font-bold text-slate-800">Call Logs</h2>
-      <div className="flex space-x-3">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-          <input
-            type="text"
-            placeholder="Search logs..."
-            className="h-10 w-64 rounded-xl border-none bg-white pl-10 pr-4 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
-          />
-        </div>
-        <button className="h-10 px-4 rounded-xl bg-white text-slate-600 text-sm font-bold shadow-sm ring-1 ring-slate-200 hover:bg-slate-50 flex items-center space-x-2">
-          <Calendar className="h-4 w-4" />
-          <span>Date Range</span>
-        </button>
-        <button className="h-10 px-4 rounded-xl bg-blue-600 text-white text-sm font-bold shadow-lg shadow-blue-500/30 hover:bg-blue-700 flex items-center space-x-2">
-          <span>Export CSV</span>
-        </button>
-      </div>
-    </div>
+const LogsView = () => {
+  const [calls, setCalls] = useState<any[]>([])
+  const [selectedCall, setSelectedCall] = useState<any | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [filter, setFilter] = useState<'all' | 'ongoing' | 'finished'>('all')
 
-    <LightGlassCard className="!p-0 overflow-hidden">
-      <div className="overflow-x-auto">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="bg-slate-50/50 border-b border-slate-200/60 text-xs font-bold text-slate-500 uppercase tracking-wider">
-              <th className="p-4">Status</th>
-              <th className="p-4">Direction</th>
-              <th className="p-4">From / To</th>
-              <th className="p-4">Agent</th>
-              <th className="p-4">Duration</th>
-              <th className="p-4">Date & Time</th>
-              <th className="p-4 text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="text-sm text-slate-700 font-medium divide-y divide-slate-100">
-            {[
-              { status: "completed", direction: "inbound", from: "+1 (555) 123-4567", agent: "Support Bot Alpha", duration: "5m 23s", date: "Oct 24, 2:30 PM" },
-              { status: "missed", direction: "inbound", from: "+1 (555) 987-6543", agent: "-", duration: "0s", date: "Oct 24, 1:15 PM" },
-              { status: "completed", direction: "outbound", from: "+1 (555) 444-3333", agent: "Sales Outreach X", duration: "12m 05s", date: "Oct 24, 11:00 AM" },
-              { status: "voicemail", direction: "inbound", from: "+1 (555) 222-1111", agent: "Support Bot Alpha", duration: "1m 45s", date: "Oct 23, 4:45 PM" },
-              { status: "completed", direction: "outbound", from: "+1 (555) 666-7777", agent: "Appointment Setter", duration: "3m 10s", date: "Oct 23, 2:20 PM" },
-            ].map((log, i) => (
-              <tr key={i} className="hover:bg-blue-50/30 transition-colors">
-                <td className="p-4">
-                  <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold capitalize ${log.status === 'completed' ? 'bg-emerald-100 text-emerald-700' :
-                    log.status === 'missed' ? 'bg-red-100 text-red-700' :
-                      'bg-amber-100 text-amber-700'
-                    }`}>
-                    {log.status}
-                  </span>
-                </td>
-                <td className="p-4">
-                  <div className="flex items-center space-x-2">
-                    {log.direction === 'inbound' ? <PhoneIncoming className="h-4 w-4 text-blue-500" /> : <PhoneOutgoing className="h-4 w-4 text-purple-500" />}
-                    <span className="capitalize">{log.direction}</span>
-                  </div>
-                </td>
-                <td className="p-4 font-mono text-slate-600">{log.from}</td>
-                <td className="p-4">{log.agent}</td>
-                <td className="p-4">{log.duration}</td>
-                <td className="p-4 text-slate-500">{log.date}</td>
-                <td className="p-4 text-right">
-                  <button className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors">
-                    <Play className="h-4 w-4" />
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="p-4 border-t border-slate-200/60 flex items-center justify-between text-xs text-slate-500 font-medium">
-        <span>Showing 1-5 of 2,453 logs</span>
-        <div className="flex space-x-2">
-          <button className="px-3 py-1 rounded-lg border border-slate-200 hover:bg-slate-50">Previous</button>
-          <button className="px-3 py-1 rounded-lg border border-slate-200 hover:bg-slate-50">Next</button>
-        </div>
-      </div>
-    </LightGlassCard>
-  </div>
-)
+  // Load calls
+  const loadCalls = async () => {
+    try {
+      const response = await fetch('/api/calls')
+      if (response.ok) {
+        const result = await response.json()
+        if (result.calls) {
+          setCalls(result.calls)
+          // Update selected call if it exists (for live updates)
+          if (selectedCall) {
+            const updatedCall = result.calls.find((c: any) => c.call_sid === selectedCall.call_sid)
+            if (updatedCall) setSelectedCall(updatedCall)
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error loading calls:', error)
+    }
+  }
 
-const MessagesView = () => {
-  const [selectedPhone, setSelectedPhone] = useState('+1 (555) 123-4567')
-  const [messageText, setMessageText] = useState('')
+  // Initial load and polling
+  useEffect(() => {
+    loadCalls()
+    const interval = setInterval(loadCalls, 3000) // Poll every 3 seconds
+    return () => clearInterval(interval)
+  }, [selectedCall]) // Re-bind if selectedCall changes to keep it updated
+
+  const filteredCalls = calls.filter(call => {
+    if (filter === 'all') return true
+    return call.status === filter
+  })
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 h-[calc(100vh-140px)]">
-      {/* Phone Numbers List */}
-      <div className="space-y-4 overflow-y-auto pr-2">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-bold text-slate-800">Conversations</h3>
-          <button className="p-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors">
-            <Send className="h-4 w-4" />
-          </button>
-        </div>
-        {[
-          { phone: '+1 (555) 123-4567', name: 'John Doe', lastMsg: 'Thanks for the information!', time: '2m ago', unread: 2 },
-          { phone: '+1 (555) 987-6543', name: 'Sarah Smith', lastMsg: 'When can we schedule a call?', time: '1h ago', unread: 0 },
-          { phone: '+1 (555) 444-3333', name: 'Mike Johnson', lastMsg: 'Perfect, see you then', time: '3h ago', unread: 0 },
-        ].map((contact, i) => (
-          <div
-            key={i}
-            onClick={() => setSelectedPhone(contact.phone)}
-            className={`cursor-pointer p-4 rounded-xl border transition-all ${selectedPhone === contact.phone
-              ? 'bg-white border-blue-200 shadow-md shadow-blue-500/10 ring-1 ring-blue-500'
-              : 'bg-white/40 border-white/60 hover:bg-white/80'
-              }`}
-          >
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center space-x-3">
-                <div className="h-10 w-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold">
-                  {contact.name[0]}
-                </div>
-                <div>
-                  <h4 className="font-bold text-slate-800 text-sm">{contact.name}</h4>
-                  <p className="text-xs text-slate-500 font-mono">{contact.phone}</p>
-                </div>
-              </div>
-              {contact.unread > 0 && (
-                <span className="h-5 w-5 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold">
-                  {contact.unread}
-                </span>
-              )}
-            </div>
-            <p className="text-xs text-slate-500 truncate">{contact.lastMsg}</p>
-            <p className="text-xs text-slate-400 mt-1">{contact.time}</p>
-          </div>
-        ))}
-      </div>
-
-      {/* Message Thread */}
-      <div className="lg:col-span-2 flex flex-col">
-        <LightGlassCard className="flex-1 flex flex-col !p-0 overflow-hidden">
-          {/* Header */}
-          <div className="p-4 border-b border-slate-100 bg-white/50 flex items-center justify-between">
-            <div className="flex items-center space-x-3">
-              <div className="h-8 w-8 rounded-full bg-blue-100 flex items-center justify-center">
-                <MessageSquare className="h-5 w-5 text-blue-600" />
-              </div>
-              <div>
-                <h3 className="font-bold text-slate-800 text-sm">{selectedPhone}</h3>
-                <p className="text-xs text-slate-500">SMS Conversation</p>
-              </div>
-            </div>
-          </div>
-
-          {/* Messages */}
-          <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-slate-50/50">
-            {[
-              { role: 'received', text: 'Hi! I have a question about your services.', time: '10:30 AM' },
-              { role: 'sent', text: 'Hello! I\'d be happy to help. What would you like to know?', time: '10:31 AM' },
-              { role: 'received', text: 'Can you tell me about pricing and availability?', time: '10:32 AM' },
-              { role: 'sent', text: 'Of course! Our plans start at $29/month. We have immediate availability. Would you like to schedule a demo?', time: '10:33 AM' },
-              { role: 'received', text: 'Thanks for the information!', time: '10:35 AM' },
-            ].map((msg, i) => (
-              <div key={i} className={`flex ${msg.role === 'sent' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[80%]`}>
-                  <div className={`p-4 rounded-2xl text-sm font-medium ${msg.role === 'sent'
-                    ? 'bg-blue-600 text-white rounded-br-none shadow-lg shadow-blue-500/20'
-                    : 'bg-white text-slate-700 rounded-bl-none shadow-sm border border-slate-100'
-                    }`}>
-                    {msg.text}
-                  </div>
-                  <p className="text-xs text-slate-400 mt-1 px-2">{msg.time}</p>
-                </div>
-              </div>
+    <div className="h-[calc(100vh-140px)] flex space-x-6">
+      {/* Left Sidebar: Call List */}
+      <div className="w-1/3 flex flex-col space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-2xl font-bold text-slate-800">Call Logs</h2>
+          <div className="flex space-x-2 bg-white p-1 rounded-lg border border-slate-200">
+            {['all', 'ongoing', 'finished'].map((f) => (
+              <button
+                key={f}
+                onClick={() => setFilter(f as any)}
+                className={`px-3 py-1 text-xs font-bold rounded-md capitalize transition-colors ${
+                  filter === f ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-50'
+                }`}
+              >
+                {f}
+              </button>
             ))}
           </div>
+        </div>
 
-          {/* Input Area */}
-          <div className="p-4 bg-white border-t border-slate-100">
-            <div className="flex items-center space-x-2 bg-slate-50 rounded-xl p-2 border border-slate-200 focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-100 transition-all">
-              <input
-                type="text"
-                value={messageText}
-                onChange={(e) => setMessageText(e.target.value)}
-                placeholder="Type a message..."
-                className="flex-1 bg-transparent border-none outline-none text-sm font-medium text-slate-700 placeholder:text-slate-400"
-              />
-              <span className="text-xs text-slate-400">{messageText.length}/160</span>
-              <button
-                onClick={() => setMessageText('')}
-                className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-md shadow-blue-500/20"
+        <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-hide">
+          {filteredCalls.length === 0 ? (
+            <div className="text-center py-10 text-slate-400">No calls found</div>
+          ) : (
+            filteredCalls.map((call) => (
+              <div
+                key={call.call_sid}
+                onClick={() => setSelectedCall(call)}
+                className={`p-4 rounded-xl border cursor-pointer transition-all duration-200 ${
+                  selectedCall?.call_sid === call.call_sid
+                    ? 'bg-blue-50 border-blue-200 shadow-md ring-1 ring-blue-200'
+                    : 'bg-white border-slate-100 hover:border-blue-200 hover:shadow-sm'
+                }`}
               >
-                <Send className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-        </LightGlassCard>
+                <div className="flex justify-between items-start mb-2">
+                  <div className="flex items-center space-x-2">
+                    {call.status === 'ongoing' ? (
+                      <span className="relative flex h-2.5 w-2.5">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                      </span>
+                    ) : (
+                      <div className="h-2.5 w-2.5 rounded-full bg-slate-300" />
+                    )}
+                    <span className={`text-xs font-bold uppercase tracking-wider ${
+                      call.status === 'ongoing' ? 'text-emerald-600' : 'text-slate-500'
+                    }`}>
+                      {call.status}
+                    </span>
+                  </div>
+                  <span className="text-xs text-slate-400">
+                    {call.timestamp ? new Date(call.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A'}
+                  </span>
+                </div>
+                
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-bold text-slate-800">{call.to_number || 'Unknown'}</p>
+                    <p className="text-xs text-slate-500 mt-0.5">From: {call.from_number}</p>
+                  </div>
+                  <div className="text-right">
+                     <p className="text-xs font-medium text-slate-600">
+                        {call.duration ? `${Number(call.duration).toFixed(0)}s` : '0s'}
+                     </p>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
       </div>
+
+      {/* Right Panel: Transcript */}
+      <div className="flex-1 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+        {selectedCall ? (
+          <>
+            {/* Header */}
+            <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+              <div>
+                <h3 className="font-bold text-slate-800 text-lg">
+                  {selectedCall.to_number}
+                </h3>
+                <div className="flex items-center space-x-2 text-sm text-slate-500">
+                  <span>{selectedCall.timestamp ? new Date(selectedCall.timestamp).toLocaleString() : 'N/A'}</span>
+                  <span>•</span>
+                  <span>Duration: {selectedCall.duration ? `${Number(selectedCall.duration).toFixed(0)}s` : '0s'}</span>
+                </div>
+              </div>
+              {selectedCall.status === 'ongoing' && (
+                <div className="flex items-center space-x-2 px-3 py-1.5 bg-emerald-100 text-emerald-700 rounded-full text-xs font-bold animate-pulse">
+                  <Activity className="h-3 w-3" />
+                  <span>LIVE CALL</span>
+                </div>
+              )}
+            </div>
+
+            {/* Transcript */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-slate-50/30">
+              {selectedCall.conversation && selectedCall.conversation.length > 0 ? (
+                selectedCall.conversation.map((msg: any, idx: number) => (
+                  <div
+                    key={idx}
+                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div
+                      className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm shadow-sm ${
+                        msg.role === 'user'
+                          ? 'bg-blue-600 text-white rounded-tr-none'
+                          : 'bg-white text-slate-700 border border-slate-100 rounded-tl-none'
+                      }`}
+                    >
+                      <p>{msg.text}</p>
+                      <p className={`text-[10px] mt-1 ${
+                        msg.role === 'user' ? 'text-blue-200' : 'text-slate-400'
+                      }`}>
+                        {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}
+                      </p>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                  <MessageSquare className="h-12 w-12 mb-3 opacity-20" />
+                  <p>No transcript available yet</p>
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="h-full flex flex-col items-center justify-center text-slate-400">
+            <History className="h-16 w-16 mb-4 opacity-20" />
+            <p className="text-lg font-medium">Select a call to view details</p>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+const MessagesView = () => {
+  const [conversations, setConversations] = useState<any[]>([])
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    fetch('/api/messages')
+      .then(res => res.json())
+      .then(data => {
+        setConversations(data.messages || [])
+        setLoading(false)
+      })
+      .catch(err => {
+        console.error(err)
+        setLoading(false)
+      })
+  }, [])
+
+  const selectedConversation = conversations.find(c => c.conversation_id === selectedId)
+
+  if (loading) {
+      return (
+        <div className="flex items-center justify-center h-[calc(100vh-140px)] text-slate-400">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+        </div>
+      )
+  }
+
+  if (conversations.length === 0) {
+    return (
+        <div className="flex items-center justify-center h-[calc(100vh-140px)] text-slate-400">
+          <div className="text-center">
+            <MessageSquare className="h-16 w-16 mx-auto mb-4 opacity-20" />
+            <h3 className="text-lg font-bold text-slate-600">Messages</h3>
+            <p>No message history available.</p>
+          </div>
+        </div>
+    )
+  }
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[calc(100vh-140px)]">
+        {/* Conversation List */}
+        <div className="lg:col-span-1 bg-white/50 backdrop-blur-xl rounded-2xl border border-white/60 overflow-hidden flex flex-col shadow-sm">
+            <div className="p-4 border-b border-slate-100 bg-white/40">
+                <h3 className="font-bold text-slate-800">Conversations</h3>
+            </div>
+            <div className="overflow-y-auto flex-1">
+                {conversations.map((conv) => (
+                    <div 
+                        key={conv.conversation_id}
+                        onClick={() => setSelectedId(conv.conversation_id)}
+                        className={`p-4 border-b border-slate-50 cursor-pointer hover:bg-white/80 transition-colors ${selectedId === conv.conversation_id ? 'bg-blue-50/50 border-l-4 border-l-blue-500' : 'border-l-4 border-l-transparent'}`}
+                    >
+                        <div className="flex justify-between items-start mb-1">
+                            <span className="font-semibold text-slate-700">{conv.callerNumber || 'Unknown'}</span>
+                            <span className="text-xs text-slate-400">{conv.timestamp ? new Date(conv.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : ''}</span>
+                        </div>
+                        <p className="text-sm text-slate-500 truncate">{conv.latest_message}</p>
+                    </div>
+                ))}
+            </div>
+        </div>
+
+        {/* Chat View */}
+        <div className="lg:col-span-2 bg-white/50 backdrop-blur-xl rounded-2xl border border-white/60 overflow-hidden flex flex-col shadow-sm">
+            {selectedConversation ? (
+                <>
+                    <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-white/40">
+                        <div className="flex items-center space-x-3">
+                            <div className="h-10 w-10 rounded-full bg-gradient-to-br from-blue-400 to-purple-500 flex items-center justify-center text-white font-bold shadow-md shadow-blue-500/20">
+                                <User className="h-5 w-5" />
+                            </div>
+                            <div>
+                                <h3 className="font-bold text-slate-800">{selectedConversation.callerNumber}</h3>
+                                <p className="text-xs text-slate-500">via {selectedConversation.agentNumber}</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/30">
+                        {selectedConversation.conversation.map((msg: any, idx: number) => (
+                            <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-start' : 'justify-end'}`}>
+                                <div className={`max-w-[80%] rounded-2xl px-4 py-3 ${
+                                    msg.role === 'user' 
+                                    ? 'bg-white text-slate-700 rounded-tl-none shadow-sm border border-slate-100' 
+                                    : 'bg-blue-600 text-white rounded-tr-none shadow-md shadow-blue-500/20'
+                                }`}>
+                                    <p className="text-sm">{msg.text}</p>
+                                    <p className={`text-[10px] mt-1 ${msg.role === 'user' ? 'text-slate-400' : 'text-blue-200'}`}>
+                                        {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}
+                                    </p>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    <div className="p-4 bg-white/60 border-t border-slate-100 backdrop-blur-md">
+                        <div className="relative">
+                            <input 
+                                type="text" 
+                                placeholder="Type a message..." 
+                                className="w-full pl-4 pr-12 py-3 rounded-xl border border-slate-200 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-white/80 transition-all"
+                            />
+                            <button className="absolute right-2 top-2 p-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-md shadow-blue-500/20">
+                                <Send className="h-4 w-4" />
+                            </button>
+                        </div>
+                    </div>
+                </>
+            ) : (
+                <div className="flex flex-col items-center justify-center h-full text-slate-400">
+                    <div className="h-16 w-16 bg-slate-100 rounded-full flex items-center justify-center mb-4">
+                        <MessageSquare className="h-8 w-8 text-slate-300" />
+                    </div>
+                    <p className="font-medium">Select a conversation to view messages</p>
+                </div>
+            )}
+        </div>
     </div>
   )
 }
@@ -622,29 +715,36 @@ const VoiceCustomizationView = () => {
 
 const EndpointsView = () => {
   const [copiedEndpoint, setCopiedEndpoint] = useState<string | null>(null)
+  const [baseUrl, setBaseUrl] = useState('https://api.dodash.ai')
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setBaseUrl(window.location.origin)
+    }
+  }, [])
 
   const endpoints = [
     {
       name: 'Voice Call Webhook',
-      url: 'https://api.dodash.ai/webhooks/voice/incoming',
+      url: `${baseUrl}/webhooks/twilio/incoming`,
       status: 'active',
       description: 'Receives incoming call events from Twilio'
     },
     {
       name: 'SMS Webhook',
-      url: 'https://api.dodash.ai/webhooks/sms/incoming',
+      url: `${baseUrl}/webhooks/twilio/sms`,
       status: 'active',
       description: 'Receives incoming SMS messages'
     },
     {
       name: 'Status Callback',
-      url: 'https://api.dodash.ai/webhooks/status',
+      url: `${baseUrl}/webhooks/twilio/status`,
       status: 'active',
       description: 'Receives call status updates'
     },
     {
       name: 'API Base URL',
-      url: 'https://api.dodash.ai/v1',
+      url: `${baseUrl}`,
       status: 'configured',
       description: 'Main API endpoint for agent management'
     },
@@ -723,74 +823,107 @@ const EndpointsView = () => {
 }
 
 const ActivityLogsView = () => {
-  return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-bold text-slate-800 mb-2">Activity Logs</h2>
-          <p className="text-slate-600">System events and activity history.</p>
-        </div>
-        <div className="flex space-x-3">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-            <input
-              type="text"
-              placeholder="Search logs..."
-              className="h-10 w-64 rounded-xl border-none bg-white pl-10 pr-4 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
-            />
-          </div>
-          <button className="h-10 px-4 rounded-xl bg-white text-slate-600 text-sm font-bold shadow-sm ring-1 ring-slate-200 hover:bg-slate-50 flex items-center space-x-2">
-            <Filter className="h-4 w-4" />
-            <span>Filter</span>
-          </button>
-          <button className="h-10 px-4 rounded-xl bg-blue-600 text-white text-sm font-bold shadow-lg shadow-blue-500/30 hover:bg-blue-700">
-            Export
-          </button>
-        </div>
-      </div>
+  const [activities, setActivities] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
 
-      <LightGlassCard className="!p-0 overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="bg-slate-50/50 border-b border-slate-200/60 text-xs font-bold text-slate-500 uppercase tracking-wider">
-                <th className="p-4">Event Type</th>
-                <th className="p-4">Description</th>
-                <th className="p-4">User / Agent</th>
-                <th className="p-4">Timestamp</th>
-              </tr>
-            </thead>
-            <tbody className="text-sm text-slate-700 font-medium divide-y divide-slate-100">
-              {[
-                { type: 'agent_created', desc: 'New agent "Sales Bot" created', user: 'Admin', time: '2 minutes ago', color: 'bg-emerald-100 text-emerald-700' },
-                { type: 'call_initiated', desc: 'Outbound call to +1 (555) 123-4567', user: 'Support Bot Alpha', time: '15 minutes ago', color: 'bg-blue-100 text-blue-700' },
-                { type: 'settings_changed', desc: 'Voice model updated to "nova"', user: 'Admin', time: '1 hour ago', color: 'bg-purple-100 text-purple-700' },
-                { type: 'phone_registered', desc: 'New phone number registered', user: 'Admin', time: '2 hours ago', color: 'bg-cyan-100 text-cyan-700' },
-                { type: 'agent_updated', desc: 'Agent "Support Bot" configuration changed', user: 'Admin', time: '3 hours ago', color: 'bg-amber-100 text-amber-700' },
-                { type: 'message_sent', desc: 'SMS sent to +1 (555) 987-6543', user: 'Messaging Agent', time: '4 hours ago', color: 'bg-blue-100 text-blue-700' },
-              ].map((log, i) => (
-                <tr key={i} className="hover:bg-blue-50/30 transition-colors">
-                  <td className="p-4">
-                    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold capitalize ${log.color}`}>
-                      {log.type.replace('_', ' ')}
-                    </span>
-                  </td>
-                  <td className="p-4">{log.desc}</td>
-                  <td className="p-4 text-slate-600">{log.user}</td>
-                  <td className="p-4 text-slate-500">{log.time}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="p-4 border-t border-slate-200/60 flex items-center justify-between text-xs text-slate-500 font-medium">
-          <span>Showing 1-6 of 342 events</span>
-          <div className="flex space-x-2">
-            <button className="px-3 py-1 rounded-lg border border-slate-200 hover:bg-slate-50">Previous</button>
-            <button className="px-3 py-1 rounded-lg border border-slate-200 hover:bg-slate-50">Next</button>
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const [callsRes, msgsRes] = await Promise.all([
+          fetch('/api/calls'),
+          fetch('/api/messages')
+        ])
+        
+        let combined: any[] = []
+        
+        if (callsRes.ok) {
+          const callsData = await callsRes.json()
+          if (callsData.calls) {
+            combined = combined.concat(callsData.calls.map((c: any) => ({
+              type: 'call',
+              id: c.call_sid,
+              timestamp: c.timestamp || c.start_time || new Date().toISOString(),
+              details: c
+            })))
+          }
+        }
+        
+        if (msgsRes.ok) {
+          const msgsData = await msgsRes.json()
+          if (msgsData.messages) {
+             combined = combined.concat(msgsData.messages.map((m: any) => ({
+               type: 'message',
+               id: m.conversation_id,
+               timestamp: m.timestamp || new Date().toISOString(),
+               details: m
+             })))
+          }
+        }
+        
+        combined.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+        setActivities(combined)
+      } catch (e) {
+        console.error(e)
+      } finally {
+        setLoading(false)
+      }
+    }
+    
+    fetchData()
+  }, [])
+
+  if (loading) return <div className="flex justify-center p-10"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div></div>
+
+  if (activities.length === 0) {
+      return (
+        <div className="flex items-center justify-center h-[calc(100vh-140px)] text-slate-400">
+          <div className="text-center">
+            <Activity className="h-16 w-16 mx-auto mb-4 opacity-20" />
+            <h3 className="text-lg font-bold text-slate-600">Activity Logs</h3>
+            <p>No recent activity.</p>
           </div>
         </div>
-      </LightGlassCard>
+      )
+  }
+
+  return (
+    <div className="max-w-3xl mx-auto space-y-6">
+        <div className="flex items-center justify-between">
+            <h2 className="text-2xl font-bold text-slate-800">Activity Timeline</h2>
+            <span className="text-sm text-slate-500">Recent system events</span>
+        </div>
+        
+        <div className="relative border-l-2 border-slate-200 ml-4 space-y-8 pb-10">
+            {activities.map((item, i) => (
+                <div key={i} className="relative pl-8">
+                    <div className={`absolute -left-[9px] top-1 h-4 w-4 rounded-full border-2 border-white shadow-sm ${
+                        item.type === 'call' ? 'bg-emerald-500' : 'bg-blue-500'
+                    }`} />
+                    
+                    <div className="bg-white p-4 rounded-xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
+                        <div className="flex justify-between items-start mb-2">
+                            <div className="flex items-center space-x-2">
+                                {item.type === 'call' ? <Phone className="h-4 w-4 text-emerald-600" /> : <MessageSquare className="h-4 w-4 text-blue-600" />}
+                                <span className="font-bold text-slate-700 capitalize">{item.type === 'call' ? 'Voice Call' : 'Message Conversation'}</span>
+                            </div>
+                            <span className="text-xs text-slate-400">{new Date(item.timestamp).toLocaleString()}</span>
+                        </div>
+                        
+                        {item.type === 'call' ? (
+                            <div className="text-sm text-slate-600">
+                                <p>Call with <span className="font-semibold">{item.details.to_number || 'Unknown'}</span></p>
+                                <p className="text-xs text-slate-400 mt-1">Duration: {item.details.duration ? Number(item.details.duration).toFixed(0) : 0}s • Status: {item.details.status}</p>
+                            </div>
+                        ) : (
+                            <div className="text-sm text-slate-600">
+                                <p>Conversation with <span className="font-semibold">{item.details.callerNumber || 'Unknown'}</span></p>
+                                <p className="text-xs text-slate-400 mt-1 italic">"{item.details.latest_message}"</p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            ))}
+        </div>
     </div>
   )
 }
@@ -2528,23 +2661,5 @@ export default function FuturisticDemo() {
   )
 }
 
-// Helper icons
-function DollarSign(props: any) {
-  return (
-    <svg
-      {...props}
-      xmlns="http://www.w3.org/2000/svg"
-      width="24"
-      height="24"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <line x1="12" x2="12" y1="2" y2="22" />
-      <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
-    </svg>
-  )
-}
+
+
