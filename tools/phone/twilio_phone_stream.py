@@ -46,7 +46,7 @@ class TwilioStreamHandler:
         self.silence_frames_count = 0
         self.speech_frames_count = 0
         self.interrupt_speech_frames = 0  # Track how many frames of speech during interrupt (to validate real interrupt)
-        self.SILENCE_THRESHOLD_FRAMES = 25  # 25 frames * 20ms/frame = 500ms of silence to trigger processing
+        self.SILENCE_THRESHOLD_FRAMES = 100  # 100 frames * 20ms/frame = 2000ms (2s) of silence to trigger processing
         self.INTERRUPT_GRACE_PERIOD_MS = 500  # Wait 500ms after AI starts speaking before allowing interrupts (prevents feedback loop)
         self.MIN_INTERRUPT_FRAMES = 5  # Require at least 5 frames (100ms) of sustained speech for valid interrupt
         self.speech_processing_lock = asyncio.Lock()  # Prevent concurrent speech processing
@@ -90,19 +90,7 @@ class TwilioStreamHandler:
                     logger.info("✅ AI finished speaking, listening for user now.")
                     # If there's waiting interrupt speech, process it now
                     if was_interrupted and self.is_speaking and self.speech_buffer:
-                        logger.info("🔄 AI stopped, processing waiting interrupt speech...")
-                        
-                        # CRITICAL: Cancel previous task before starting new one
-                        if self.speech_processing_task and not self.speech_processing_task.done():
-                            logger.info("⏳ Cancelling previous query before processing interrupt...")
-                            # Cancel the previous task
-                            self.speech_processing_task.cancel()
-                            # Note: The cancelled task will be cleaned up when _process_user_speech checks query_sequence
-                        
-                        # Increment query sequence AFTER cancelling previous task
-                        self.query_sequence += 1
-                        logger.info(f"🆕 Starting Interrupt Query #{self.query_sequence}")
-                        self.speech_processing_task = asyncio.create_task(self._process_waiting_interrupt())
+                        logger.info("🔄 AI stopped, speech buffer active. Waiting for user to finish speaking (VAD silence)...")
 
     async def _handle_start_event(self, start_data: Dict):
         """Handles the 'start' event from Twilio stream."""
@@ -575,16 +563,21 @@ class TwilioStreamHandler:
             
             # For outbound calls, AI should drive the conversation
             # Use agent's greeting if available, otherwise default
-            if self.is_outbound_call:
-                # For outbound calls, use greeting or a proactive message
-                greeting_text = self.agent_config.get("greeting", "Hello! This is an automated call. How can I help you today?")
-                logger.info(f"📢 Sending OUTBOUND call greeting for call {self.call_sid}: '{greeting_text}'")
-                logger.info(f"   🚀 AI will drive this conversation (outbound call - AI speaks first)")
-            else:
-                # For inbound calls, use standard greeting
-                greeting_text = self.agent_config.get("greeting", "Hello! How can I help you today?")
-                logger.info(f"📢 Sending INBOUND call greeting for call {self.call_sid}: '{greeting_text}'")
+            greeting_text = self.agent_config.get("greeting")
             
+            # If greeting is missing or empty, use default
+            if not greeting_text or not greeting_text.strip():
+                if self.is_outbound_call:
+                    greeting_text = "Hello! This is an automated call. How can I help you today?"
+                else:
+                    greeting_text = "Hello! How can I help you today?"
+                logger.info(f"📢 Using DEFAULT greeting (original was empty/missing): '{greeting_text}'")
+            else:
+                logger.info(f"📢 Using AGENT greeting: '{greeting_text}'")
+
+            if self.is_outbound_call:
+                logger.info(f"   🚀 AI will drive this conversation (outbound call - AI speaks first)")
+                
             # Store greeting in MongoDB transcript
             try:
                 from databases.mongodb_call_store import MongoDBCallStore
@@ -701,12 +694,11 @@ class TwilioStreamHandler:
                 self.ai_speech_start_time = None
                 self.interrupt_speech_frames = 0
                 logger.info("✅ TTS stream interrupted - stopping story, ready for new question.")
-                # CRITICAL: Process interrupt speech immediately - user asked a new question
-                # Don't wait, process it right away
+                # CRITICAL: Do NOT process interrupt speech immediately.
+                # Let the natural VAD silence detection handle it.
+                # This allows the user to finish their sentence before we process.
                 if self.is_speaking and self.speech_buffer:
-                    logger.info("🔄 TTS stopped, processing interrupt question immediately...")
-                    # Process immediately instead of creating a task - ensures faster response
-                    asyncio.create_task(self._process_waiting_interrupt())
+                    logger.info("🔄 TTS stopped, speech buffer active. Waiting for user to finish speaking (VAD silence)...")
                 else:
                     logger.warning("⚠️ Interrupt detected but no speech buffer available")
         except asyncio.CancelledError:
@@ -714,11 +706,10 @@ class TwilioStreamHandler:
             self.ai_is_speaking = False
             self.ai_speech_start_time = None
             self.interrupt_speech_frames = 0
-            # CRITICAL: Process interrupt speech immediately - user asked a new question
-            # The story was interrupted, now process the new question
+            # CRITICAL: Do NOT process interrupt speech immediately.
+            # Let the natural VAD silence detection handle it.
             if self.is_speaking and self.speech_buffer:
-                logger.info("🔄 TTS cancelled, processing interrupt question immediately...")
-                asyncio.create_task(self._process_waiting_interrupt())
+                logger.info("🔄 TTS cancelled, speech buffer active. Waiting for user to finish speaking (VAD silence)...")
             else:
                 logger.warning("⚠️ TTS cancelled but no interrupt speech buffer available")
             raise

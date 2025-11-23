@@ -47,7 +47,13 @@ Guidelines:
 - Keep responses concise but informative
 - ALWAYS respond to the most recent user input - ignore older queries unless explicitly referenced
 
-Current conversation state will be provided to help you understand context."""
+Current conversation state will be provided to help you understand context.
+
+CRITICAL INSTRUCTIONS:
+- Always respond to the MOST RECENT user query.
+- If the user says something unclear or if you hear silence/noise, DO NOT say "Bye". Instead, ask "I'm sorry, I didn't catch that. Could you please repeat?" or "Are you still there?"
+- Only say "Bye" or end the conversation if the user explicitly says "Bye", "Goodbye", or indicates they want to end the call.
+- Never assume the conversation is over based on a short input."""
     
     def create_session(self, customer_id: Optional[str] = None) -> Dict[str, Any]:
         """Create a new conversation session"""
