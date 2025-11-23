@@ -1521,6 +1521,8 @@ async def twilio_call_status(request: Request):
     `https://your-domain.com/webhooks/twilio/status`
     """
     try:
+        from datetime import datetime
+        
         # Get form data from Twilio webhook
         form_data = await request.form()
         status_data = dict(form_data)
@@ -1530,152 +1532,96 @@ async def twilio_call_status(request: Request):
         from_number = status_data.get("From", "")
         to_number = status_data.get("To", "")
         
-        logger.info(f"📞 Call status update: {call_sid} -> {status}")
+        logger.info(f"📞 WEBHOOK: Call status update for {call_sid}: {status}")
         logger.info(f"   From: {from_number}, To: {to_number}")
         
+        if not call_sid:
+            logger.warning("⚠️ Received status update without CallSid")
+            return {"status": "ignored", "reason": "missing_call_sid"}
+
         # Update call status in MongoDB when call ends
         # Handle all end states: completed, failed, busy, no-answer, canceled
         if status in ["completed", "failed", "busy", "no-answer", "canceled"]:
+            logger.info(f"🛑 Call {call_sid} ended with status: {status}. Updating database...")
             try:
                 from databases.mongodb_call_store import MongoDBCallStore
-                from datetime import datetime
                 call_store = MongoDBCallStore()
                 
-                # EDGE CASE 1: Try normal end_call first
-                result = await call_store.end_call(call_sid)
+                # Calculate duration if available
+                duration = status_data.get("CallDuration")
+                duration_seconds = int(duration) if duration and duration.isdigit() else 0
+                
+                # Try to end call using the store method
+                result = await call_store.end_call(call_sid, duration_seconds=duration_seconds)
+                
                 if result:
-                    logger.info(f"✅ Successfully updated call {call_sid} status to 'completed' in MongoDB")
+                    logger.info(f"✅ Database updated: Call {call_sid} marked as completed (duration: {duration_seconds}s)")
                 else:
-                    # EDGE CASE 2: end_call failed - try direct update
-                    logger.warning(f"⚠️ end_call returned False for {call_sid}, attempting direct update...")
-                    try:
-                        collection = call_store._get_collection()
-                        if collection is None:
-                            logger.error(f"❌ MongoDB collection not available for call {call_sid}")
-                            # EDGE CASE 3: MongoDB unavailable - log and continue
-                            return {"status": "ok", "message": "MongoDB unavailable, status logged", "call_sid": call_sid, "call_status": status}
+                    logger.warning(f"⚠️ end_call returned False for {call_sid}. Attempting direct update/create...")
+                    
+                    # Fallback: Direct update or create if missing
+                    collection = call_store._get_collection()
+                    if collection:
+                        # Check if it exists
+                        existing = await collection.find_one({"call_sid": call_sid})
+                        now = datetime.utcnow().isoformat()
                         
-                        call_doc = await collection.find_one({"call_sid": call_sid})
-                        if call_doc:
-                            # EDGE CASE 4: Call already completed - check and skip if already done
-                            if call_doc.get("status") == "completed":
-                                logger.info(f"ℹ️ Call {call_sid} already marked as completed, skipping update")
-                            else:
-                                # Calculate duration if available
-                                duration_seconds = None
-                                if call_doc.get("start_time"):
-                                    try:
-                                        start_time = datetime.fromisoformat(call_doc["start_time"])
-                                        end_time = datetime.utcnow()
-                                        duration_seconds = max(0, (end_time - start_time).total_seconds())
-                                    except (ValueError, TypeError) as time_error:
-                                        logger.warning(f"⚠️ Could not parse start_time for {call_sid}: {time_error}")
-                                        duration_seconds = 0
-                                else:
-                                    duration_seconds = 0
-                                
-                                # EDGE CASE 5: Update with proper error handling
-                                update_result = await collection.update_one(
-                                    {"call_sid": call_sid},
-                                    {
-                                        "$set": {
-                                            "status": "completed",
-                                            "end_time": datetime.utcnow().isoformat(),
-                                            "duration_seconds": duration_seconds or 0,
-                                            "updated_at": datetime.utcnow().isoformat()
-                                        }
-                                    }
-                                )
-                                
-                                if update_result.modified_count > 0:
-                                    logger.info(f"✅ Directly updated call {call_sid} status to 'completed' in MongoDB")
-                                else:
-                                    logger.warning(f"⚠️ Call {call_sid} update returned modified_count=0 (may already be completed)")
-                        else:
-                            # EDGE CASE 6: Call record doesn't exist - create it from status webhook
-                            logger.warning(f"⚠️ Call {call_sid} not found in MongoDB - creating record from status webhook...")
-                            try:
-                                now = datetime.utcnow().isoformat()
-                                
-                                # EDGE CASE 7: Handle missing from/to numbers gracefully
-                                agent_id = from_number or to_number or "unknown"
-                                
-                                # EDGE CASE 8: Check if record was just created (race condition)
-                                # Try to find it one more time before creating
-                                retry_doc = await collection.find_one({"call_sid": call_sid})
-                                if retry_doc:
-                                    logger.info(f"ℹ️ Call {call_sid} found on retry, updating existing record")
-                                    await collection.update_one(
-                                        {"call_sid": call_sid},
-                                        {
-                                            "$set": {
-                                                "status": "completed",
-                                                "end_time": now,
-                                                "updated_at": now
-                                            }
-                                        }
-                                    )
-                                else:
-                                    # Create new record
-                                    await collection.insert_one({
-                                        "call_sid": call_sid,
-                                        "from_number": from_number or "unknown",
-                                        "to_number": to_number or "unknown",
-                                        "agent_id": agent_id,
-                                        "session_id": call_sid,
-                                        "status": "completed",  # Already completed
-                                        "start_time": now,  # Approximate (we don't have exact start time)
+                        if existing:
+                            # Update existing
+                            await collection.update_one(
+                                {"call_sid": call_sid},
+                                {
+                                    "$set": {
+                                        "status": "completed",
                                         "end_time": now,
-                                        "duration_seconds": 0,  # Unknown duration
-                                        "transcript": [],
-                                        "created_at": now,
-                                        "updated_at": now,
-                                    })
-                                    logger.info(f"✅ Created call record for {call_sid} from status webhook")
-                            except Exception as create_error:
-                                # EDGE CASE 9: Duplicate key error (race condition - record created between check and insert)
-                                if "duplicate" in str(create_error).lower() or "E11000" in str(create_error):
-                                    logger.info(f"ℹ️ Call {call_sid} record created by another process (race condition), updating existing record")
-                                    try:
-                                        await collection.update_one(
-                                            {"call_sid": call_sid},
-                                            {
-                                                "$set": {
-                                                    "status": "completed",
-                                                    "end_time": datetime.utcnow().isoformat(),
-                                                    "updated_at": datetime.utcnow().isoformat()
-                                                }
-                                            }
-                                        )
-                                        logger.info(f"✅ Updated call {call_sid} after race condition")
-                                    except Exception as update_error:
-                                        logger.error(f"❌ Error updating after race condition: {update_error}", exc_info=True)
-                                else:
-                                    logger.error(f"❌ Could not create call record from status webhook: {create_error}", exc_info=True)
-                    except Exception as e2:
-                        # EDGE CASE 10: Any other error in direct update
-                        logger.error(f"❌ Error in direct update attempt: {e2}", exc_info=True)
-            except Exception as e:
-                # EDGE CASE 11: Top-level error handling
-                logger.error(f"❌ Error updating call status in MongoDB: {e}", exc_info=True)
-                # Don't fail the webhook - return success to Twilio
+                                        "duration_seconds": duration_seconds,
+                                        "updated_at": now
+                                    }
+                                }
+                            )
+                            logger.info(f"✅ Directly updated existing call {call_sid}")
+                        else:
+                            # Create new record (missing call case)
+                            logger.warning(f"⚠️ Call {call_sid} not found. Creating new record from status webhook.")
+                            await collection.insert_one({
+                                "call_sid": call_sid,
+                                "from_number": from_number or "unknown",
+                                "to_number": to_number or "unknown",
+                                "agent_id": from_number or to_number or "unknown",
+                                "session_id": call_sid,
+                                "status": "completed",
+                                "start_time": now,
+                                "end_time": now,
+                                "duration_seconds": duration_seconds,
+                                "transcript": [],
+                                "created_at": now,
+                                "updated_at": now,
+                            })
+                            logger.info(f"✅ Created new completed call record for {call_sid}")
+                    else:
+                        logger.error("❌ MongoDB collection unavailable for fallback update")
+
+            except Exception as db_error:
+                logger.error(f"❌ Database error in status webhook: {db_error}", exc_info=True)
         
         # Clean up stream handlers if call is ending
         if status in ["completed", "failed", "busy", "no-answer", "canceled"]:
             if call_sid and call_sid in active_stream_handlers:
-                handler = active_stream_handlers[call_sid]
                 logger.info(f"🧹 Cleaning up stream handler for completed call {call_sid}")
-                # Remove from registry (handler will clean up its own resources)
                 del active_stream_handlers[call_sid]
         
-        # Process status update for batch mode
-        await twilio_phone_tool.handle_call_status(status_data)
+        # Process status update for batch mode (if needed)
+        try:
+            await twilio_phone_tool.handle_call_status(status_data)
+        except Exception as e:
+            logger.warning(f"⚠️ Error in twilio_phone_tool.handle_call_status: {e}")
         
         return {"status": "ok", "message": "Status update processed", "call_sid": call_sid, "call_status": status}
         
     except Exception as e:
-        logger.error(f"Error handling status webhook: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"❌ Error handling status webhook: {str(e)}", exc_info=True)
+        # Don't return 500 to Twilio, just log it
+        return {"status": "error", "message": str(e)}
 
 @app.post(
     "/webhooks/twilio/recording",

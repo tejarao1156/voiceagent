@@ -101,7 +101,7 @@ Each collection follows a **soft‑delete** pattern (`isDeleted: bool`) and time
 | `ttsModel` | string | Text‑to‑speech model identifier (e.g., `tts-1`) |
 | `ttsVoice` | string | Voice name used for TTS |
 | `systemPrompt` | string | System‑level instruction for the LLM |
-| `greeting` | string | Initial spoken greeting when a call connects |
+| `greeting` | string | Initial spoken greeting when a call connects. If empty, a default greeting is used. |
 | `temperature` | float | Sampling temperature for the LLM |
 | `maxTokens` | int | Token limit for LLM responses |
 | `active` | bool | Whether the agent is currently enabled |

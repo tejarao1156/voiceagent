@@ -197,143 +197,7 @@ const DashboardView = () => {
 
 
 
-const AgentsView = () => {
-  const [agents, setAgents] = useState<any[]>([])
-  const [selectedAgent, setSelectedAgent] = useState<any | null>(null)
-  const [messages, setMessages] = useState<any[]>([])
-  const [inputText, setInputText] = useState("")
 
-  useEffect(() => {
-    const fetchAgents = async () => {
-      try {
-        const res = await fetch('/agents')
-        if (res.ok) {
-          const data = await res.json()
-          setAgents(data.agents || [])
-        }
-      } catch (e) {
-        console.error("Failed to fetch agents", e)
-      }
-    }
-    fetchAgents()
-  }, [])
-
-  const handleSendMessage = () => {
-    if (!inputText.trim()) return
-    setMessages(prev => [...prev, { role: 'user', text: inputText }])
-    setInputText("")
-    // Simulation response for testing UI only - in real app this would hit an API
-    setTimeout(() => {
-      setMessages(prev => [...prev, { role: 'agent', text: "This is a test response from the agent." }])
-    }, 1000)
-  }
-
-  return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 h-[calc(100vh-140px)]">
-      {/* Agents List */}
-      <div className="space-y-4 lg:col-span-1 overflow-y-auto pr-2">
-        {agents.length === 0 ? (
-          <div className="text-center py-10 text-slate-400">
-            <p>No agents found.</p>
-            <p className="text-xs mt-2">Create an agent in "Incoming Agent" tab.</p>
-          </div>
-        ) : (
-          agents.map((agent) => (
-            <div
-              key={agent.id}
-              onClick={() => {
-                setSelectedAgent(agent)
-                setMessages([{ role: 'agent', text: `Hello! I am ${agent.name}. How can I help you?` }])
-              }}
-              className={`cursor-pointer p-4 rounded-xl border transition-all ${selectedAgent?.id === agent.id
-                ? 'bg-white border-blue-200 shadow-md shadow-blue-500/10 ring-1 ring-blue-500'
-                : 'bg-white/40 border-white/60 hover:bg-white/80'
-                }`}
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-3">
-                  <div className="h-10 w-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold">
-                    {agent.name ? agent.name[0] : '?'}
-                  </div>
-                  <div>
-                    <h4 className="font-bold text-slate-800 text-sm">{agent.name}</h4>
-                    <p className="text-xs text-slate-500">{agent.role || 'Voice Agent'}</p>
-                  </div>
-                </div>
-                <div className={`h-2.5 w-2.5 rounded-full ${agent.active ? 'bg-emerald-500' : 'bg-slate-300'}`} />
-              </div>
-            </div>
-          ))
-        )}
-      </div>
-
-      {/* Chat / Config Panel */}
-      <div className="lg:col-span-2 flex flex-col h-full">
-        <LightGlassCard className="flex-1 flex flex-col !p-0 overflow-hidden">
-          {selectedAgent ? (
-            <>
-              {/* Chat Header */}
-              <div className="p-4 border-b border-slate-100 bg-white/50 flex items-center justify-between">
-                <div className="flex items-center space-x-3">
-                  <div className="h-8 w-8 rounded-full bg-blue-100 flex items-center justify-center">
-                    <Bot className="h-5 w-5 text-blue-600" />
-                  </div>
-                  <div>
-                    <h3 className="font-bold text-slate-800 text-sm">{selectedAgent.name}</h3>
-                    <p className="text-xs text-slate-500">Test Conversation</p>
-                  </div>
-                </div>
-                <div className="flex space-x-2">
-                  <button className="p-2 hover:bg-slate-100 rounded-lg text-slate-500"><Settings className="h-4 w-4" /></button>
-                </div>
-              </div>
-
-              {/* Chat Messages */}
-              <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-slate-50/50">
-                {messages.map((msg, i) => (
-                  <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[80%] p-4 rounded-2xl text-sm font-medium ${msg.role === 'user'
-                      ? 'bg-blue-600 text-white rounded-br-none shadow-lg shadow-blue-500/20'
-                      : 'bg-white text-slate-700 rounded-bl-none shadow-sm border border-slate-100'
-                      }`}>
-                      {msg.text}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Input Area */}
-              <div className="p-4 bg-white border-t border-slate-100">
-                <div className="flex items-center space-x-2 bg-slate-50 rounded-xl p-2 border border-slate-200 focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-100 transition-all">
-                  <button className="p-2 text-slate-400 hover:text-blue-600 transition-colors"><Mic className="h-5 w-5" /></button>
-                  <input
-                    type="text"
-                    value={inputText}
-                    onChange={(e) => setInputText(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                    placeholder="Type a message to test the agent..."
-                    className="flex-1 bg-transparent border-none outline-none text-sm font-medium text-slate-700 placeholder:text-slate-400"
-                  />
-                  <button
-                    onClick={handleSendMessage}
-                    className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-md shadow-blue-500/20"
-                  >
-                    <Send className="h-4 w-4" />
-                  </button>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
-              <Bot className="h-16 w-16 mb-4 opacity-20" />
-              <p className="font-medium">Select an agent to test</p>
-            </div>
-          )}
-        </LightGlassCard>
-      </div>
-    </div>
-  )
-}
 
 const LogsView = () => {
   const [calls, setCalls] = useState<any[]>([])
@@ -870,6 +734,9 @@ const ActivityLogsView = () => {
     }
     
     fetchData()
+    // Auto-refresh every 5 seconds to show updated call status
+    const interval = setInterval(fetchData, 5000)
+    return () => clearInterval(interval)
   }, [])
 
   if (loading) return <div className="flex justify-center p-10"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div></div>
@@ -2553,7 +2420,7 @@ export default function FuturisticDemo() {
             <div className="text-xs font-bold text-slate-400 uppercase tracking-wider px-4 mb-3">Platform</div>
             <NavItem icon={BarChart3} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
 
-            <NavItem icon={Users} label="Agents & Chat" active={activeTab === 'agents'} onClick={() => setActiveTab('agents')} />
+
             <NavItem icon={PhoneIncoming} label="Incoming Agent" active={activeTab === 'incoming-agent'} onClick={() => setActiveTab('incoming-agent')} />
             <NavItem icon={PhoneOutgoing} label="Outgoing Agent" active={activeTab === 'outgoing-agent'} onClick={() => setActiveTab('outgoing-agent')} />
             <NavItem icon={FileText} label="Prompts" active={activeTab === 'prompts'} onClick={() => setActiveTab('prompts')} />
@@ -2594,7 +2461,7 @@ export default function FuturisticDemo() {
                   className="text-3xl font-black text-slate-800 tracking-tight capitalize"
                 >
                   {activeTab === 'dashboard' ? 'Dashboard' :
-                    activeTab === 'agents' ? 'Agent Management' :
+
                       activeTab === 'incoming-agent' ? 'Incoming Agent' :
                         activeTab === 'outgoing-agent' ? 'Outgoing Agent' :
                           activeTab === 'prompts' ? 'Prompts Management' :
@@ -2608,7 +2475,7 @@ export default function FuturisticDemo() {
                 </motion.h2>
                 <p className="text-slate-500 mt-1 font-medium">
                   {activeTab === 'dialer' ? 'Make calls and manage active connections.' :
-                    activeTab === 'agents' ? 'Configure agents and test conversations.' :
+
                       activeTab === 'incoming-agent' ? 'Create and manage Voice Agents for your Business.' :
                         activeTab === 'outgoing-agent' ? 'Schedule AI or normal outgoing calls to single or multiple numbers.' :
                           activeTab === 'prompts' ? 'Create and manage AI prompts for outgoing calls.' :
@@ -2642,7 +2509,7 @@ export default function FuturisticDemo() {
             >
               {activeTab === 'dashboard' && <DashboardView />}
 
-              {activeTab === 'agents' && <AgentsView />}
+
               {activeTab === 'incoming-agent' && <IncomingAgentView />}
               {activeTab === 'outgoing-agent' && <OutgoingAgentView />}
               {activeTab === 'prompts' && <PromptsView />}
