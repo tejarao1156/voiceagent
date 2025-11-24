@@ -22,6 +22,10 @@ from models import (
     PaginationRequest, PaginationResponse
 )
 
+import base64
+import webrtcvad
+from tools.phone.twilio_phone import audio_converter
+
 from voice_processor import VoiceProcessor
 from conversation_manager import ConversationManager, ConversationState
 from config import DEBUG, API_HOST, API_PORT
@@ -154,89 +158,13 @@ async def startup_event():
 @app.get(
     "/",
     summary="Root Endpoint",
-    description="Landing page with links to all UIs and API documentation",
+    description="Main application UI",
     tags=["General"],
     response_class=HTMLResponse
 )
-async def root():
-    """Root endpoint with links to all available UIs and documentation"""
-    html_content = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Voice Agent - Home</title>
-        <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                min-height: 100vh;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                padding: 20px;
-            }
-            .container {
-                background: white;W
-                border-radius: 20px;
-                box-shadow: 0 20px 40px rgba(0,0,0,0.1);
-                padding: 40px;
-                max-width: 600px;
-                width: 100%;
-            }
-            h1 {
-                color: #333;W
-                margin-bottom: 10px;
-                font-size: 2rem;
-            }
-            .subtitle {
-                color: #666;
-                margin-bottom: 30px;
-            }
-            .links {
-                display: flex;
-                flex-direction: column;
-                gap: 15px;
-            }
-            .link {
-                display: block;
-                padding: 15px 20px;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                text-decoration: none;
-                border-radius: 10px;
-                transition: transform 0.2s;
-                font-weight: 500;
-            }
-            .link:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 5px 15px rgba(0,0,0,0.2);
-            }
-            .link-api {
-                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-            }
-            .link-docs {
-                background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🎧 Voice Agent</h1>
-            <p class="subtitle">AI-powered voice conversation system</p>
-            <div class="links">
-                <a href="/demo" class="link">✨ New Demo UI - Futuristic Interface</a>
-                <a href="/saas-dashboard" class="link">🚀 SaaS Dashboard - Voice Agent Management</a>
-                <a href="/docs" class="link link-docs">📚 API Documentation (Swagger)</a>
-                <a href="/redoc" class="link link-docs">📖 API Documentation (ReDoc)</a>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
+async def root(request: Request):
+    """Root endpoint - proxies to the main Next.js UI"""
+    return await proxy_to_nextjs(request, "")
 
 @app.get(
     "/health",
@@ -665,9 +593,204 @@ async def toolkit_process_conversation(
     return await process_conversation(request)
 
 
+
 # ============================================================================
-# VOICE AGENT COMPLETE PIPELINE
+# TESTING ENDPOINTS - PHASE 1: AUDIO PROCESSING
 # ============================================================================
+
+@app.post(
+    "/api/test/audio/convert-to-wav",
+    summary="Test: Convert μ-law to WAV",
+    description="Convert Twilio μ-law PCM audio (base64) to WAV format (base64)",
+    tags=["Testing APIs"]
+)
+async def test_convert_to_wav(
+    request: Dict[str, Any]
+):
+    """
+    Test audio conversion from Twilio μ-law to WAV.
+    
+    **Input**:
+    ```json
+    {
+        "audio_data": "base64_encoded_mulaw_bytes"
+    }
+    ```
+    
+    **Output**:
+    ```json
+    {
+        "success": true,
+        "wav_base64": "base64_encoded_wav_bytes",
+        "original_size": 123,
+        "converted_size": 456
+    }
+    ```
+    """
+    try:
+        audio_b64 = request.get("audio_data")
+        if not audio_b64:
+            raise HTTPException(status_code=400, detail="Missing audio_data")
+            
+        # Decode base64
+        try:
+            mulaw_bytes = base64.b64decode(audio_b64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid base64 audio_data")
+            
+        # Convert
+        wav_bytes = audio_converter.twilio_to_wav(mulaw_bytes)
+        
+        # Encode back to base64
+        wav_b64 = base64.b64encode(wav_bytes).decode("utf-8")
+        
+        return {
+            "success": True,
+            "wav_base64": wav_b64,
+            "original_size": len(mulaw_bytes),
+            "converted_size": len(wav_bytes)
+        }
+    except Exception as e:
+        logger.error(f"Error in test_convert_to_wav: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@app.post(
+    "/api/test/audio/convert-to-mulaw",
+    summary="Test: Convert WAV/MP3 to μ-law",
+    description="Convert WAV/MP3 audio (base64) to Twilio μ-law PCM format (base64)",
+    tags=["Testing APIs"]
+)
+async def test_convert_to_mulaw(
+    request: Dict[str, Any]
+):
+    """
+    Test audio conversion from WAV/MP3 to Twilio μ-law.
+    
+    **Input**:
+    ```json
+    {
+        "audio_data": "base64_encoded_wav_bytes"
+    }
+    ```
+    
+    **Output**:
+    ```json
+    {
+        "success": true,
+        "mulaw_base64": "base64_encoded_mulaw_bytes",
+        "original_size": 123,
+        "converted_size": 456
+    }
+    ```
+    """
+    try:
+        audio_b64 = request.get("audio_data")
+        if not audio_b64:
+            raise HTTPException(status_code=400, detail="Missing audio_data")
+            
+        # Decode base64
+        try:
+            audio_bytes = base64.b64decode(audio_b64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid base64 audio_data")
+            
+        # Convert
+        mulaw_bytes = audio_converter.wav_to_twilio(audio_bytes)
+        
+        # Encode back to base64
+        mulaw_b64 = base64.b64encode(mulaw_bytes).decode("utf-8")
+        
+        return {
+            "success": True,
+            "mulaw_base64": mulaw_b64,
+            "original_size": len(audio_bytes),
+            "converted_size": len(mulaw_bytes)
+        }
+    except Exception as e:
+        logger.error(f"Error in test_convert_to_mulaw: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@app.post(
+    "/api/test/audio/vad-detect",
+    summary="Test: Voice Activity Detection",
+    description="Detect speech in audio chunk using WebRTC VAD",
+    tags=["Testing APIs"]
+)
+async def test_vad_detect(
+    request: Dict[str, Any]
+):
+    """
+    Test Voice Activity Detection on a chunk of audio.
+    
+    **Input**:
+    ```json
+    {
+        "audio_data": "base64_encoded_mulaw_bytes",
+        "sample_rate": 8000
+    }
+    ```
+    
+    **Output**:
+    ```json
+    {
+        "is_speech": true,
+        "confidence": 1.0
+    }
+    ```
+    """
+    try:
+        audio_b64 = request.get("audio_data")
+        sample_rate = request.get("sample_rate", 8000)
+        
+        if not audio_b64:
+            raise HTTPException(status_code=400, detail="Missing audio_data")
+            
+        # Decode base64
+        try:
+            audio_bytes = base64.b64decode(audio_b64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid base64 audio_data")
+            
+        # Initialize VAD
+        vad = webrtcvad.Vad(3) # Aggressiveness mode 3 (high)
+        
+        # VAD requires specific frame sizes (10, 20, or 30ms)
+        # For 8000Hz: 160 bytes = 20ms
+        
+        # If chunk is too large or small, we might need to handle it
+        # For this test, we'll try to process the first valid frame
+        
+        frame_duration_ms = 20
+        frame_bytes = int(sample_rate * frame_duration_ms / 1000)
+        
+        if len(audio_bytes) < frame_bytes:
+             return {
+                "success": False,
+                "error": f"Audio chunk too small. Minimum {frame_bytes} bytes required for {frame_duration_ms}ms frame at {sample_rate}Hz"
+            }
+            
+        # Process first frame
+        frame = audio_bytes[:frame_bytes]
+        is_speech = vad.is_speech(frame, sample_rate)
+        
+        return {
+            "success": True,
+            "is_speech": is_speech,
+            "confidence": 1.0 if is_speech else 0.0, # WebRTC VAD is binary
+            "processed_bytes": len(frame)
+        }
+    except Exception as e:
+        logger.error(f"Error in test_vad_detect: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 @app.post(
     "/voice-agent/process",
@@ -2272,36 +2395,6 @@ async def proxy_to_nextjs(request: Request, path: str = ""):
         )
 
 # Proxy routes for Next.js UI - must be defined before catch-all routes
-@app.api_route(
-    "/saas-dashboard",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    summary="SaaS Dashboard",
-    description="Proxy SaaS Dashboard to Next.js",
-    tags=["UI"]
-)
-@app.api_route(
-    "/saas-dashboard/{path:path}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    summary="SaaS Dashboard Routes",
-    description="Proxy all SaaS dashboard routes to Next.js",
-    tags=["UI"]
-)
-async def saas_dashboard_proxy(request: Request, path: str = ""):
-    """Proxy SaaS Dashboard routes to Next.js"""
-    full_path = f"saas-dashboard/{path}" if path else "saas-dashboard"
-    return await proxy_to_nextjs(request, full_path)
-
-@app.api_route(
-    "/demo",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    summary="Demo Page",
-    description="Proxy Demo page to Next.js",
-    tags=["UI"]
-)
-async def demo_page_proxy(request: Request):
-    """Proxy Demo page to Next.js"""
-    return await proxy_to_nextjs(request, "demo")
-
 
 
 # Proxy Next.js static assets and API routes
@@ -2899,7 +2992,8 @@ async def register_phone(request: Request):
             "webhookUrl": incoming_url,
             "statusCallbackUrl": status_url,
             "smsWebhookUrl": sms_url,  # Add SMS webhook URL
-            "userId": phone_data.get("userId")
+            "userId": phone_data.get("userId"),
+            "type": phone_data.get("type", "calls")  # Default to 'calls'
         }
         
         # Register phone (with duplicate validation)
@@ -2920,6 +3014,33 @@ async def register_phone(request: Request):
             logger.error("Failed to register phone - phone_store.register_phone returned None")
             raise HTTPException(status_code=500, detail="Failed to register phone number in MongoDB")
         
+        # Check if we are using ngrok and if this is a messaging number
+        # If so, automatically update Twilio with the webhook URL
+        from utils.environment_detector import get_ngrok_url_from_api
+        ngrok_url = get_ngrok_url_from_api()
+        
+        twilio_updated = False
+        if ngrok_url and phone_data.get("type") == "messages":
+            try:
+                logger.info(f"🔄 Detected ngrok and 'messages' type. Attempting to auto-update Twilio webhook...")
+                client = TwilioClient(twilio_account_sid, twilio_auth_token)
+                # Find the phone number SID
+                numbers = client.incoming_phone_numbers.list(phone_number=phone_number)
+                
+                if numbers:
+                    number_sid = numbers[0].sid
+                    client.incoming_phone_numbers(number_sid).update(
+                        sms_url=sms_url,
+                        sms_method='POST'
+                    )
+                    twilio_updated = True
+                    logger.info(f"✅ Automatically updated Twilio SMS Webhook for {phone_number} to {sms_url}")
+                else:
+                    logger.warning(f"⚠️ Could not find phone number {phone_number} in Twilio account. Please configure webhook manually.")
+            except Exception as e:
+                logger.error(f"❌ Failed to auto-update Twilio webhook: {e}")
+                # Don't fail the registration, just log the error
+        
         logger.info(f"✅ Phone number registered successfully with ID: {phone_id}")
         logger.info(f"📞 Phone: {phone_number}")
         logger.info(f"🔗 Webhook URLs:")
@@ -2927,36 +3048,48 @@ async def register_phone(request: Request):
         logger.info(f"   Status (Calls): {status_url}")
         logger.info(f"   SMS (Messages): {sms_url}")
         logger.info(f"")
-        logger.info(f"⚠️  IMPORTANT: You MUST configure these webhooks in Twilio Console:")
-        logger.info(f"   1. Go to Twilio Console → Phone Numbers → {phone_number}")
-        logger.info(f"   2. For CALLS - Set 'A CALL COMES IN' to: {incoming_url}")
-        logger.info(f"   3. For CALLS - Set 'STATUS CALLBACK URL' to: {status_url}")
-        logger.info(f"   4. For MESSAGING - Set 'A MESSAGE COMES IN' to: {sms_url}")
-        logger.info(f"   5. Click Save")
+        
+        if twilio_updated:
+            logger.info(f"✨ Twilio SMS Webhook was automatically updated!")
+        else:
+            logger.info(f"⚠️  IMPORTANT: You MUST configure these webhooks in Twilio Console:")
+            logger.info(f"   1. Go to Twilio Console → Phone Numbers → {phone_number}")
+            logger.info(f"   2. For CALLS - Set 'A CALL COMES IN' to: {incoming_url}")
+            logger.info(f"   3. For CALLS - Set 'STATUS CALLBACK URL' to: {status_url}")
+            logger.info(f"   4. For MESSAGING - Set 'A MESSAGE COMES IN' to: {sms_url}")
+            logger.info(f"   5. Click Save")
+        
         logger.info(f"")
         logger.info(f"🔍 To test if SMS webhook is reachable, visit: {sms_url.replace('/sms', '/sms/test')}")
         
         # Return response with webhook URLs (for both calls and messaging)
+        webhook_steps = [
+            "1. Go to Twilio Console → Phone Numbers",
+            f"2. Click on phone number: {phone_number}",
+            "3. For CALLS - Scroll to 'Voice & Fax' section:",
+            f"   - Set 'A CALL COMES IN' to: {incoming_url} (POST)",
+            f"   - Set 'STATUS CALLBACK URL' to: {status_url} (POST)"
+        ]
+        
+        if twilio_updated:
+            webhook_steps.append(f"4. For MESSAGING - AUTOMATICALLY UPDATED to: {sms_url}")
+        else:
+            webhook_steps.append("4. For MESSAGING - Scroll to 'Messaging' section:")
+            webhook_steps.append(f"   - Set 'A MESSAGE COMES IN' to: {sms_url} (POST)")
+            
+        webhook_steps.append("5. Click Save")
+
         return {
             "success": True,
             "phone_id": phone_id,
-            "message": "Phone number registered successfully",
+            "message": "Phone number registered successfully" + (" (Twilio SMS Webhook updated)" if twilio_updated else ""),
             "phoneNumber": phone_number,
             "webhookConfiguration": {
                 "incomingUrl": incoming_url,
                 "statusCallbackUrl": status_url,
                 "smsWebhookUrl": sms_url,
-                "instructions": "Configure these URLs in your Twilio Console",
-                "steps": [
-                    "1. Go to Twilio Console → Phone Numbers",
-                    f"2. Click on phone number: {phone_number}",
-                    "3. For CALLS - Scroll to 'Voice & Fax' section:",
-                    f"   - Set 'A CALL COMES IN' to: {incoming_url} (POST)",
-                    f"   - Set 'STATUS CALLBACK URL' to: {status_url} (POST)",
-                    "4. For MESSAGING - Scroll to 'Messaging' section:",
-                    f"   - Set 'A MESSAGE COMES IN' to: {sms_url} (POST)",
-                    "5. Click Save"
-                ]
+                "instructions": "Twilio SMS Webhook updated automatically!" if twilio_updated else "Configure these URLs in your Twilio Console",
+                "steps": webhook_steps
             }
         }
         
@@ -2966,6 +3099,16 @@ async def register_phone(request: Request):
         logger.error(f"Error registering phone number: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to register phone number: {str(e)}")
 
+# Alias endpoint for UI compatibility  
+@app.post(
+    "/api/phones",
+    summary="Register Phone Number (Alias)",
+    description="Alias for /api/phones/register - Register a new phone number with Twilio credentials",
+    tags=["Phone Registration"]
+)
+async def register_phone_alias(request: Request):
+    """Alias endpoint that calls the main register_phone function"""
+    return await register_phone(request)
 @app.get(
     "/api/phones",
     summary="List Registered Phone Numbers",
@@ -2995,13 +3138,16 @@ async def register_phone(request: Request):
         }
     }
 )
-async def list_phones(active_only: bool = Query(False, description="Only return active phones")):
+async def list_phones(
+    active_only: bool = Query(False, description="Only return active phones"),
+    type: Optional[str] = Query(None, description="Filter by type ('calls' or 'messages')")
+):
     """List all registered phone numbers"""
     try:
         from databases.mongodb_phone_store import MongoDBPhoneStore
         from databases.mongodb_db import is_mongodb_available
         
-        logger.info(f"📞 Listing phones - active_only={active_only}")
+        logger.info(f"📞 Listing phones - active_only={active_only}, type={type}")
         
         if not is_mongodb_available():
             logger.warning("MongoDB not available for listing phones")
@@ -3012,9 +3158,9 @@ async def list_phones(active_only: bool = Query(False, description="Only return 
             }
         
         phone_store = MongoDBPhoneStore()
-        phones = await phone_store.list_phones(active_only=active_only)
+        phones = await phone_store.list_phones(active_only=active_only, type_filter=type)
         
-        logger.info(f"✅ Found {len(phones)} phone(s) in MongoDB (active_only={active_only})")
+        logger.info(f"✅ Found {len(phones)} phone(s) in MongoDB (active_only={active_only}, type={type})")
         if phones:
             logger.info(f"   Phone numbers: {[p.get('phoneNumber', 'N/A') for p in phones]}")
         

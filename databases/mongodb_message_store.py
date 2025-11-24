@@ -451,85 +451,87 @@ class MongoDBMessageStore:
                 if not messages_array:
                     continue
                 
-                # Group messages by conversation_id
-                conversations_by_id = {}
+                # Group messages by user_number (customer) to keep conversation threads together
+                conversations_by_user = {}
+                
                 for msg in messages_array:
-                    conv_id = msg.get("conversation_id")
-                    if not conv_id:
-                        continue
+                    # Identify the user number (the other party)
+                    # Use new field names with backward compatibility
+                    msg_agent = msg.get("agent_number") or msg.get("from_number", "") if msg.get("direction") == "outbound" else msg.get("to_number", "")
+                    msg_user = msg.get("user_number") or msg.get("to_number", "") if msg.get("direction") == "outbound" else msg.get("from_number", "")
                     
-                    if conv_id not in conversations_by_id:
-                        conversations_by_id[conv_id] = {
-                            "conversation_id": conv_id,
+                    logger.debug(f"Processing message: sid={msg.get('message_sid')}, direction={msg.get('direction')}, user={msg_user}, agent={msg_agent}, body={msg.get('body', '')[:30]}")
+                    
+                    # If we can't identify the user, skip
+                    if not msg_user:
+                        logger.warning(f"Skipping message {msg.get('message_sid')} - could not identify user_number")
+                        continue
+                        
+                    # Normalize user number for grouping
+                    user_key = msg_user.strip()
+                    
+                    if user_key not in conversations_by_user:
+                        conversations_by_user[user_key] = {
+                            "conversation_id": msg.get("conversation_id") or str(uuid.uuid4()), # Use latest or generate one
+                            "phoneNumberId": agent_id_doc,
+                            "callerNumber": user_key,
+                            "agentNumber": agent_id_doc,
                             "messages": [],
                             "latest_timestamp": "",
-                            "latest_message": "",
-                            "first_message": None
+                            "latest_message": ""
                         }
                     
-                    conversations_by_id[conv_id]["messages"].append(msg)
+                    # Add message to this user's thread
+                    conversations_by_user[user_key]["messages"].append(msg)
                     
                     # Track latest message
                     msg_timestamp = msg.get("timestamp", "")
-                    if msg_timestamp > conversations_by_id[conv_id]["latest_timestamp"]:
-                        conversations_by_id[conv_id]["latest_timestamp"] = msg_timestamp
-                        conversations_by_id[conv_id]["latest_message"] = msg.get("body", "")
-                    
-                    # Track first message for caller/agent number determination
-                    if not conversations_by_id[conv_id]["first_message"]:
-                        conversations_by_id[conv_id]["first_message"] = msg
+                    if msg_timestamp > conversations_by_user[user_key]["latest_timestamp"]:
+                        conversations_by_user[user_key]["latest_timestamp"] = msg_timestamp
+                        conversations_by_user[user_key]["latest_message"] = msg.get("body", "")
+                        # Update conversation_id to the latest one used (if any)
+                        if msg.get("conversation_id"):
+                            conversations_by_user[user_key]["conversation_id"] = msg.get("conversation_id")
                 
                 # Convert to conversation format
-                for conv_id, conv_data in conversations_by_id.items():
+                for user_key, conv_data in conversations_by_user.items():
                     # Sort messages by timestamp
                     conv_data["messages"].sort(key=lambda x: x.get("timestamp", ""))
                     
                     # Build conversation array for UI
                     conversation_messages = []
                     for msg in conv_data["messages"]:
+                        # Get or infer direction field (for backward compatibility with old messages)
+                        direction = msg.get("direction")
+                        if not direction:
+                            # Infer direction from role field if direction is missing
+                            role = msg.get("role")
+                            if role == "user" or role == "customer":
+                                direction = "inbound"
+                            else:
+                                direction = "outbound"
+                        
+                        # Determine role (with direction fallback)
+                        role = msg.get("role") or ("user" if direction == "inbound" else "assistant")
+                        
                         conversation_messages.append({
-                            "role": msg.get("role") or ("user" if msg.get("direction") == "inbound" else "assistant"),
+                            "role": role,
+                            "direction": direction,  # Always include direction for UI to use
                             "text": msg.get("body", ""),
                             "timestamp": msg.get("timestamp")
                         })
                     
-                    # Determine caller and agent numbers from messages
-                    # Find the first inbound message to determine the caller (user who initiated conversation)
-                    first_inbound_msg = None
-                    for msg in conv_data["messages"]:
-                        if msg.get("direction") == "inbound":
-                            first_inbound_msg = msg
-                            break
+                    # Store conversation
+                    # Use composite ID to ensure uniqueness in the list: agent_id + user_number
+                    unique_id = f"{agent_id_doc}_{user_key}"
                     
-                    # If no inbound message found, use first message (outbound)
-                    if not first_inbound_msg:
-                        first_inbound_msg = conv_data["first_message"]
-                    
-                    if first_inbound_msg:
-                        # Use new field names (agent_number/user_number) with backward compatibility
-                        msg_agent_number = first_inbound_msg.get("agent_number") or first_inbound_msg.get("from_number", "")
-                        msg_user_number = first_inbound_msg.get("user_number") or first_inbound_msg.get("to_number", "")
-                        
-                        if first_inbound_msg.get("direction") == "inbound":
-                            # Inbound: user sends to agent
-                            caller_number = msg_user_number  # User is the caller
-                            agent_number = msg_agent_number  # Agent receives
-                        else:
-                            # Outbound: agent sends to user (first message is outbound - rare case)
-                            caller_number = msg_user_number  # User receives (will be the caller when they respond)
-                            agent_number = msg_agent_number  # Agent sends
-                    else:
-                        caller_number = ""
-                        agent_number = agent_id_doc
-                    
-                    # Store conversation (use conversation_id as key to avoid duplicates)
-                    if conv_id not in all_conversations:
-                        all_conversations[conv_id] = {
-                            "id": conv_id,
-                            "conversation_id": conv_id,
-                            "phoneNumberId": agent_id_doc,
-                            "callerNumber": caller_number,
-                            "agentNumber": agent_number,
+                    if unique_id not in all_conversations:
+                        all_conversations[unique_id] = {
+                            "id": unique_id,
+                            "conversation_id": conv_data["conversation_id"], # Keep for reference
+                            "phoneNumberId": conv_data["phoneNumberId"],
+                            "callerNumber": conv_data["callerNumber"],
+                            "agentNumber": conv_data["agentNumber"],
                             "status": "active",
                             "timestamp": conv_data["latest_timestamp"],
                             "latest_message": conv_data["latest_message"],
