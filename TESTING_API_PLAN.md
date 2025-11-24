@@ -187,7 +187,7 @@ Keep existing call flow testing APIs
 ## Next Steps
 
 1. ✅ Remove unwanted cleanup endpoints
-2. 🔄 Implement Audio Processing APIs
+2. ✅ Implement Audio Processing APIs
 3. 🔄 Implement STT APIs
 4. 🔄 Implement LLM APIs
 5. 🔄 Implement TTS APIs

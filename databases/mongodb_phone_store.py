@@ -154,16 +154,21 @@ class MongoDBPhoneStore:
             phone_data["updated_at"] = datetime.utcnow().isoformat()
             phone_data["isActive"] = True
             
-            # NEW: Add isDeleted and uuid
+            # NEW: Add isDeleted, uuid, and type
             phone_data["isDeleted"] = False
             import uuid
             phone_data["uuid"] = str(uuid.uuid4())
+            
+            # Set type (default to 'calls' if not provided for backward compatibility)
+            if "type" not in phone_data:
+                phone_data["type"] = "calls"
             
             # Insert phone registration
             result = await collection.insert_one(phone_data)
             
             logger.info(f"✅ Successfully registered phone number {normalized_phone} (original: {phone_number}) in MongoDB")
             logger.info(f"   Phone ID: {result.inserted_id}")
+            logger.info(f"   Type: {phone_data.get('type')}")
             return str(result.inserted_id)
             
         except ValueError:
@@ -245,11 +250,12 @@ class MongoDBPhoneStore:
             logger.error(f"Error getting phone by number {phone_number}: {e}")
             return None
     
-    async def list_phones(self, active_only: bool = True) -> List[Dict[str, Any]]:
+    async def list_phones(self, active_only: bool = True, type_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         """List all registered phone numbers
         
         Args:
             active_only: If True, only return active phones
+            type_filter: Optional filter for 'calls' or 'messages'
         
         Returns:
             List of phone dictionaries
@@ -266,14 +272,15 @@ class MongoDBPhoneStore:
             
             # Build query - always exclude deleted phones
             query = {"isDeleted": {"$ne": True}}  # Exclude soft-deleted phones
+            
             if active_only:
                 query["isActive"] = True
-            else:
-                # When active_only=False, return all non-deleted phones (no isActive filter)
-                # This includes phones where isActive is True, False, or doesn't exist
-                pass
             
-            logger.debug(f"Querying phones with query: {query}, active_only={active_only}")
+            # Add type filter if provided
+            if type_filter:
+                query["type"] = type_filter
+            
+            logger.debug(f"Querying phones with query: {query}, active_only={active_only}, type={type_filter}")
             
             phones = []
             total_count = 0
@@ -290,7 +297,7 @@ class MongoDBPhoneStore:
             logger.info(f"📞 Found {len(phones)} phone(s) in collection '{self.collection_name}' (total scanned: {total_count})")
             if phones:
                 for phone in phones:
-                    logger.debug(f"   - {phone.get('phoneNumber', 'N/A')} (isActive: {phone.get('isActive', 'not set')})")
+                    logger.debug(f"   - {phone.get('phoneNumber', 'N/A')} (isActive: {phone.get('isActive', 'not set')}, type: {phone.get('type', 'N/A')})")
             
             return phones
             
