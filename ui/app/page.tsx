@@ -1166,6 +1166,12 @@ const MessagesView = () => {
 
   useEffect(() => {
     fetchConversations()
+
+    const intervalId = setInterval(() => {
+      fetchConversations()
+    }, 5000)
+
+    return () => clearInterval(intervalId)
   }, [])
 
   const handleSendMessage = async () => {
