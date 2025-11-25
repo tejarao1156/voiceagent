@@ -6,6 +6,14 @@ This will update all messages in MongoDB that are missing these fields
 
 import asyncio
 import logging
+import sys
+import os
+
+# Add project root to path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+sys.path.insert(0, project_root)
+
 from databases.mongodb_db import get_mongo_db, is_mongodb_available
 
 logging.basicConfig(level=logging.INFO)

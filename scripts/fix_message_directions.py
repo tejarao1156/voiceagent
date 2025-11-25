@@ -7,10 +7,17 @@ This uses Motor (async MongoDB driver) directly
 import asyncio
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import sys
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Add project root to path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+sys.path.insert(0, project_root)
+
+# Load environment variables from project root
+env_path = os.path.join(project_root, '.env')
+load_dotenv(env_path)
 
 async def update_messages_with_direction():
     """Add direction field to all messages that don't have it"""
