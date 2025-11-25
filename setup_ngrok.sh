@@ -7,13 +7,12 @@ echo ""
 
 # Get project root directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Check for local ngrok binary first
 NGROK_CMD=""
-if [ -f "$PROJECT_ROOT/bin/ngrok" ]; then
-    NGROK_CMD="$PROJECT_ROOT/bin/ngrok"
-    echo "✅ Found local ngrok binary: $PROJECT_ROOT/bin/ngrok"
+if [ -f "$SCRIPT_DIR/bin/ngrok" ]; then
+    NGROK_CMD="$SCRIPT_DIR/bin/ngrok"
+    echo "✅ Found local ngrok binary: $SCRIPT_DIR/bin/ngrok"
 elif command -v ngrok &> /dev/null; then
     NGROK_CMD="ngrok"
     echo "✅ Found ngrok in PATH"
@@ -24,7 +23,7 @@ else
     echo ""
     
     # Create bin directory if it doesn't exist
-    mkdir -p "$PROJECT_ROOT/bin"
+    mkdir -p "$SCRIPT_DIR/bin"
     
     # Detect architecture
     ARCH=$(uname -m)
@@ -45,9 +44,9 @@ else
         echo "   Extracting ngrok..."
         unzip -o /tmp/ngrok.zip -d /tmp/ 2>&1 | grep -E "(inflating|Error)" || true
         if [ -f /tmp/ngrok ]; then
-            cp /tmp/ngrok "$PROJECT_ROOT/bin/ngrok"
-            chmod +x "$PROJECT_ROOT/bin/ngrok"
-            NGROK_CMD="$PROJECT_ROOT/bin/ngrok"
+            cp /tmp/ngrok "$SCRIPT_DIR/bin/ngrok"
+            chmod +x "$SCRIPT_DIR/bin/ngrok"
+            NGROK_CMD="$SCRIPT_DIR/bin/ngrok"
             echo "✅ ngrok installed successfully in ./bin/ngrok"
             rm -f /tmp/ngrok.zip /tmp/ngrok
         else

@@ -2,8 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$PROJECT_ROOT"
+cd "$SCRIPT_DIR"
 
 # --- Graceful Cleanup ---
 cleanup() {
@@ -37,7 +36,7 @@ echo ""
 
 # --- Start the main API server ---
 echo "Starting Voice Agent API server (FastAPI)..."
-python "$PROJECT_ROOT/main.py" &
+python "$SCRIPT_DIR/main.py" &
 API_PID=$!
 
 # Wait a moment and check if the server started successfully
@@ -50,7 +49,7 @@ echo "✅ API Server is running."
 
 # --- Start Next.js UI ---
 echo "Starting Voice Agent UI (Next.js)..."
-cd "$PROJECT_ROOT/ui"
+cd "$SCRIPT_DIR/ui"
 if [[ ! -d node_modules ]]; then
   echo "Installing UI dependencies..."
   npm install
@@ -63,7 +62,7 @@ if ! kill -0 "$UI_PID" 2>/dev/null; then
 else
     echo "✅ UI Server is running internally (proxied through port 4002)"
 fi
-cd "$PROJECT_ROOT"
+cd "$SCRIPT_DIR"
 
 echo ""
 echo "✅ Voice Agent startup complete!"

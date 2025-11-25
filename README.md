@@ -76,7 +76,7 @@ python -c "from database import create_tables; create_tables()"
 ### 4. Run the API Server
 
 ```bash
-./scripts/start_api.sh
+./start_api.sh
 # or python main.py
 ```
 
@@ -85,7 +85,7 @@ The API will be available at `http://localhost:4000`.
 ### 5. Run the Web UI (optional)
 
 ```bash
-./scripts/start_ui.sh
+./start_ui.sh
 # or: cd ui && npm install && npm run dev
 ```
 
@@ -94,7 +94,7 @@ The UI will be available at `http://localhost:9000` (proxied through `ui/server.
 ### 6. Run API and UI Together
 
 ```bash
-./scripts/start_all.sh
+./start_all.sh
 ```
 
 This script launches both servers in parallel; use `Ctrl+C` to stop them.
@@ -980,6 +980,7 @@ voiceagent/
 ├── start_api.sh          # Helper script to launch API server
 ├── start_ui.sh           # Helper script to launch UI server
 ├── start_all.sh          # Helper script to launch both servers
+├── setup_ngrok.sh         # Helper script to set up ngrok for Twilio webhooks
 ├── ui/                   # Next.js web client and standalone demos
 │   ├── app/              # Next.js app directory
 │   ├── server.js         # Custom Next.js + WebSocket proxy
