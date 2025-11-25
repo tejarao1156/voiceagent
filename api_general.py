@@ -1431,22 +1431,19 @@ async def twilio_incoming_sms(request: Request):
         logger.info(f"✅ Active messaging agent '{agent_config.get('name')}' found for {normalized_to}")
         logger.info(f"✅ Will process message and generate AI response")
         
-        # STEP 3: Get conversation history for this specific conversation (from_number <-> to_number)
-        # Filter all messages for this phone number to get this specific conversation
-        conversation_history = []
-        if conversation_id:
-            # Filter messages for this conversation_id from all messages for this phone number
-            conversation_history = [msg for msg in all_messages if msg.get("conversation_id") == conversation_id]
-            logger.info(f"📚 Filtered {len(conversation_history)} message(s) for conversation_id: {conversation_id}")
+        # STEP 3: Get last 24 hours of messages for LLM inference
+        # Check if conversation exists with agent_id + user_number
+        normalized_from = normalize_phone_number(from_number)
+        conversation_exists = await message_store.check_conversation_exists(normalized_to, normalized_from)
+        
+        if conversation_exists:
+            logger.info(f"✅ Found existing conversation for agent_id={normalized_to}, user_number={normalized_from}")
+            # Get last 24 hours of messages for this conversation
+            conversation_history = await message_store.get_last_24h_messages(normalized_to, normalized_from)
+            logger.info(f"📚 Retrieved {len(conversation_history)} message(s) from last 24 hours for LLM inference")
         else:
-            # Fallback: get conversation history using the method
-            conversation_history = await message_store.get_conversation_history(
-                from_number=from_number,
-                to_number=to_number,
-                agent_id=normalized_to,
-                limit=50
-            )
-            logger.info(f"📚 Retrieved {len(conversation_history)} message(s) using fallback method")
+            logger.info(f"🆕 New conversation - no previous messages for agent_id={normalized_to}, user_number={normalized_from}")
+            conversation_history = []
         
         logger.info(f"📚 Using {len(conversation_history)} message(s) from conversation history for LLM")
         
