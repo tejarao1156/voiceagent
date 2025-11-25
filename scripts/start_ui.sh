@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-UI_DIR="$SCRIPT_DIR/ui"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+UI_DIR="$PROJECT_ROOT/ui"
 
 cd "$UI_DIR"
 

@@ -2,7 +2,10 @@ import asyncio
 import sys
 import os
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# Add project root to path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+sys.path.insert(0, project_root)
 
 from databases.mongodb_phone_store import MongoDBPhoneStore
 from databases.mongodb_db import initialize_mongodb

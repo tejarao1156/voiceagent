@@ -5,11 +5,15 @@ echo ""
 echo "This script will help you set up ngrok for Twilio webhooks."
 echo ""
 
+# Get project root directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # Check for local ngrok binary first
 NGROK_CMD=""
-if [ -f "./bin/ngrok" ]; then
-    NGROK_CMD="./bin/ngrok"
-    echo "✅ Found local ngrok binary: ./bin/ngrok"
+if [ -f "$PROJECT_ROOT/bin/ngrok" ]; then
+    NGROK_CMD="$PROJECT_ROOT/bin/ngrok"
+    echo "✅ Found local ngrok binary: $PROJECT_ROOT/bin/ngrok"
 elif command -v ngrok &> /dev/null; then
     NGROK_CMD="ngrok"
     echo "✅ Found ngrok in PATH"
@@ -20,7 +24,7 @@ else
     echo ""
     
     # Create bin directory if it doesn't exist
-    mkdir -p ./bin
+    mkdir -p "$PROJECT_ROOT/bin"
     
     # Detect architecture
     ARCH=$(uname -m)
@@ -41,9 +45,9 @@ else
         echo "   Extracting ngrok..."
         unzip -o /tmp/ngrok.zip -d /tmp/ 2>&1 | grep -E "(inflating|Error)" || true
         if [ -f /tmp/ngrok ]; then
-            cp /tmp/ngrok ./bin/ngrok
-            chmod +x ./bin/ngrok
-            NGROK_CMD="./bin/ngrok"
+            cp /tmp/ngrok "$PROJECT_ROOT/bin/ngrok"
+            chmod +x "$PROJECT_ROOT/bin/ngrok"
+            NGROK_CMD="$PROJECT_ROOT/bin/ngrok"
             echo "✅ ngrok installed successfully in ./bin/ngrok"
             rm -f /tmp/ngrok.zip /tmp/ngrok
         else

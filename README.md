@@ -76,7 +76,7 @@ python -c "from database import create_tables; create_tables()"
 ### 4. Run the API Server
 
 ```bash
-./start_api.sh
+./scripts/start_api.sh
 # or python main.py
 ```
 
@@ -85,7 +85,7 @@ The API will be available at `http://localhost:4000`.
 ### 5. Run the Web UI (optional)
 
 ```bash
-./start_ui.sh
+./scripts/start_ui.sh
 # or: cd ui && npm install && npm run dev
 ```
 
@@ -94,7 +94,7 @@ The UI will be available at `http://localhost:9000` (proxied through `ui/server.
 ### 6. Run API and UI Together
 
 ```bash
-./start_all.sh
+./scripts/start_all.sh
 ```
 
 This script launches both servers in parallel; use `Ctrl+C` to stop them.

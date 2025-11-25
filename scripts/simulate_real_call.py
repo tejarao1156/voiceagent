@@ -6,12 +6,13 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Add current directory to path
 from datetime import datetime
 import uuid
 
-# Add current directory to path
-sys.path.append(os.getcwd())
+# Add project root to path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+sys.path.insert(0, project_root)
 
 from databases.mongodb_call_store import MongoDBCallStore
 from databases.mongodb_db import get_mongo_db, initialize_mongodb, test_connection
