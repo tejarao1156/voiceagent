@@ -5,10 +5,11 @@ Uses UUID for conversation_id to group messages in conversations
 """
 
 from typing import Optional, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import uuid
 from .mongodb_db import get_mongo_db, is_mongodb_available
+from .mongodb_phone_store import normalize_phone_number
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,8 @@ class MongoDBMessageStore:
             return None
     
     async def get_or_create_conversation_id(self, from_number: str, to_number: str, agent_id: str) -> Optional[str]:
-        """Get existing conversation_id or create a new one with UUID"""
+        """Get existing conversation_id or create a new one with UUID
+        from_number = user_number, to_number = agent_number"""
         if not is_mongodb_available():
             return None
         
@@ -46,8 +48,8 @@ class MongoDBMessageStore:
             
             # No existing conversation found, create new UUID
             new_conversation_id = str(uuid.uuid4())
-            normalized_from = from_number.strip()
-            normalized_to = to_number.strip()
+            normalized_from = normalize_phone_number(from_number)
+            normalized_to = normalize_phone_number(to_number)
             logger.info(f"Created new conversation_id: {new_conversation_id} for {normalized_from} <-> {normalized_to}")
             return new_conversation_id
             
@@ -55,8 +57,8 @@ class MongoDBMessageStore:
             logger.error(f"Error getting or creating conversation_id: {e}")
             return None
     
-    async def check_message_exists(self, message_sid: str, agent_id: str) -> bool:
-        """Check if a message with the given message_sid already exists for this agent_id"""
+    async def check_message_exists(self, message_sid: str, agent_id: str, user_number: Optional[str] = None) -> bool:
+        """Check if a message with the given message_sid already exists for this agent_id + user_number"""
         if not is_mongodb_available():
             return False
         
@@ -65,11 +67,12 @@ class MongoDBMessageStore:
             if collection is None:
                 return False
             
-            # Check if message_sid exists in the messages array for this agent_id
-            existing = await collection.find_one({
-                "agent_id": agent_id,
-                "messages.message_sid": message_sid
-            })
+            # Build query - if user_number provided, use compound key
+            query = {"agent_id": agent_id, "messages.message_sid": message_sid}
+            if user_number:
+                query["user_number"] = user_number
+            
+            existing = await collection.find_one(query)
             return existing is not None
             
         except Exception as e:
@@ -79,7 +82,9 @@ class MongoDBMessageStore:
     async def create_message(self, message_sid: str, from_number: str, to_number: str, 
                             body: str, agent_id: Optional[str] = None, 
                             conversation_id: Optional[str] = None) -> bool:
-        """Add a new message to the agent's message document (one document per phone number)"""
+        """Add a new message to the conversation document.
+        Document structure: { agent_id, user_number, messages: [...] }
+        One document per agent_id + user_number combination."""
         if not is_mongodb_available():
             logger.error("MongoDB not available, skipping message creation")
             return False
@@ -94,16 +99,26 @@ class MongoDBMessageStore:
             
             now = datetime.utcnow().isoformat()
             agent_id = agent_id or to_number
+            normalized_user = normalize_phone_number(from_number)
+            normalized_agent = normalize_phone_number(agent_id)
             
-            # Check for duplicate message_sid
-            if await self.check_message_exists(message_sid, agent_id):
-                logger.warning(f"⚠️ Message with message_sid {message_sid} already exists for agent_id {agent_id}, skipping duplicate")
+            # Check for duplicate message_sid within this conversation
+            if await self.check_message_exists(message_sid, normalized_agent, normalized_user):
+                logger.warning(f"⚠️ Message with message_sid {message_sid} already exists, skipping duplicate")
                 return False
+            
+            # Check if conversation exists with agent_id + user_number
+            conversation_exists = await self.check_conversation_exists(normalized_agent, normalized_user)
+            
+            if conversation_exists:
+                logger.info(f"✅ Found existing conversation for agent_id={normalized_agent}, user_number={normalized_user}")
+            else:
+                logger.info(f"🆕 Creating new conversation entry for agent_id={normalized_agent}, user_number={normalized_user}")
             
             # Get or create conversation_id if not provided
             if not conversation_id:
-                logger.info(f"🔍 Getting or creating conversation_id for {from_number} <-> {to_number} (agent: {agent_id})")
-                conversation_id = await self.get_or_create_conversation_id(from_number, to_number, agent_id)
+                logger.info(f"🔍 Getting or creating conversation_id for {from_number} <-> {to_number} (agent: {normalized_agent})")
+                conversation_id = await self.get_or_create_conversation_id(from_number, to_number, normalized_agent)
                 if not conversation_id:
                     logger.error(f"❌ Could not get or create conversation_id for message {message_sid}")
                     return False
@@ -113,7 +128,6 @@ class MongoDBMessageStore:
             # For inbound messages: from_number is user, to_number is agent
             message_obj = {
                 "message_sid": message_sid,
-                "user_number": from_number,  # User sends the message
                 "agent_number": to_number,    # Agent receives the message
                 "body": body,
                 "conversation_id": conversation_id,
@@ -124,14 +138,18 @@ class MongoDBMessageStore:
             }
             
             # Upsert: Update if document exists, insert if it doesn't
-            # One document per agent_id (phone number)
+            # One document per agent_id + user_number combination
             result = await collection.update_one(
-                {"agent_id": agent_id},
+                {
+                    "agent_id": normalized_agent,
+                    "user_number": normalized_user
+                },
                 {
                     "$push": {"messages": message_obj},
                     "$set": {
                         "updated_at": now,
-                        "agent_id": agent_id  # Ensure agent_id is set
+                        "agent_id": normalized_agent,  # Ensure agent_id is set
+                        "user_number": normalized_user  # Ensure user_number is set
                     },
                     "$setOnInsert": {
                         "created_at": now
@@ -140,7 +158,7 @@ class MongoDBMessageStore:
                 upsert=True
             )
             
-            logger.info(f"✅ Added message {message_sid} to agent_id {agent_id} document (upserted: {result.upserted_id is not None})")
+            logger.info(f"✅ Added message {message_sid} to conversation (agent_id={normalized_agent}, user_number={normalized_user}) (upserted: {result.upserted_id is not None})")
             return True
             
         except Exception as e:
@@ -152,7 +170,9 @@ class MongoDBMessageStore:
     async def create_outbound_message(self, message_sid: str, from_number: str, to_number: str,
                                      body: str, agent_id: Optional[str] = None,
                                      conversation_id: Optional[str] = None) -> bool:
-        """Add a new outbound message to the agent's message document (one document per phone number)"""
+        """Add a new outbound message to the conversation document.
+        Document structure: { agent_id, user_number, messages: [...] }
+        One document per agent_id + user_number combination."""
         if not is_mongodb_available():
             logger.error("MongoDB not available, skipping outbound message creation")
             return False
@@ -165,17 +185,19 @@ class MongoDBMessageStore:
             
             now = datetime.utcnow().isoformat()
             agent_id = agent_id or from_number
+            normalized_agent = normalize_phone_number(agent_id)
+            normalized_user = normalize_phone_number(to_number)  # to_number is the user for outbound
             
-            # Check for duplicate message_sid
-            if await self.check_message_exists(message_sid, agent_id):
-                logger.warning(f"⚠️ Outbound message with message_sid {message_sid} already exists for agent_id {agent_id}, skipping duplicate")
+            # Check for duplicate message_sid within this conversation
+            if await self.check_message_exists(message_sid, normalized_agent, normalized_user):
+                logger.warning(f"⚠️ Outbound message with message_sid {message_sid} already exists, skipping duplicate")
                 return False
             
             # Get or create conversation_id if not provided
             if not conversation_id:
-                logger.info(f"🔍 Getting or creating conversation_id for outbound message {from_number} -> {to_number} (agent: {agent_id})")
+                logger.info(f"🔍 Getting or creating conversation_id for outbound message {from_number} -> {to_number} (agent: {normalized_agent})")
                 # For outbound, we need to find conversation where from_number is the agent and to_number is the user
-                conversation_id = await self.get_or_create_conversation_id(to_number, from_number, agent_id)
+                conversation_id = await self.get_or_create_conversation_id(to_number, from_number, normalized_agent)
                 if not conversation_id:
                     logger.error(f"❌ Could not get or create conversation_id for outbound message {message_sid}")
                     return False
@@ -186,7 +208,6 @@ class MongoDBMessageStore:
             message_obj = {
                 "message_sid": message_sid,
                 "agent_number": from_number,  # Agent sends the message
-                "user_number": to_number,     # User receives the message
                 "body": body,
                 "conversation_id": conversation_id,
                 "direction": "outbound",  # Outbound from agent
@@ -196,14 +217,18 @@ class MongoDBMessageStore:
             }
             
             # Upsert: Update if document exists, insert if it doesn't
-            # One document per agent_id (phone number)
+            # One document per agent_id + user_number combination
             result = await collection.update_one(
-                {"agent_id": agent_id},
+                {
+                    "agent_id": normalized_agent,
+                    "user_number": normalized_user
+                },
                 {
                     "$push": {"messages": message_obj},
                     "$set": {
                         "updated_at": now,
-                        "agent_id": agent_id  # Ensure agent_id is set
+                        "agent_id": normalized_agent,  # Ensure agent_id is set
+                        "user_number": normalized_user  # Ensure user_number is set
                     },
                     "$setOnInsert": {
                         "created_at": now
@@ -212,7 +237,7 @@ class MongoDBMessageStore:
                 upsert=True
             )
             
-            logger.info(f"✅ Added outbound message {message_sid} to agent_id {agent_id} document (upserted: {result.upserted_id is not None})")
+            logger.info(f"✅ Added outbound message {message_sid} to conversation (agent_id={normalized_agent}, user_number={normalized_user}) (upserted: {result.upserted_id is not None})")
             return True
             
         except Exception as e:
@@ -222,7 +247,8 @@ class MongoDBMessageStore:
             return False
     
     async def get_conversation_id(self, from_number: str, to_number: str, agent_id: str) -> Optional[str]:
-        """Get existing conversation_id for two phone numbers"""
+        """Get existing conversation_id for two phone numbers
+        from_number = user_number, to_number = agent_number"""
         if not is_mongodb_available():
             return None
         
@@ -231,36 +257,29 @@ class MongoDBMessageStore:
             if collection is None:
                 return None
             
-            # Get the document for this agent_id
-            doc = await collection.find_one({"agent_id": agent_id})
+            # Normalize phone numbers
+            normalized_agent = normalize_phone_number(agent_id)
+            normalized_user = normalize_phone_number(from_number)  # from_number is user
+            
+            # Get the document for this agent_id + user_number combination
+            doc = await collection.find_one({
+                "agent_id": normalized_agent,
+                "user_number": normalized_user
+            })
             
             if not doc:
                 return None
             
-            # Look through messages array for existing conversation
+            # Get conversation_id from the most recent message
             messages_array = doc.get("messages", [])
+            if not messages_array:
+                return None
             
-            # Find most recent message between these two numbers
-            # Use new format (agent_number/user_number) with backward compatibility
-            # from_number parameter = user_number, to_number parameter = agent_number
-            normalized_from = from_number.strip()
-            normalized_to = to_number.strip()
-            
+            # Get conversation_id from the most recent message
             for msg in reversed(messages_array):  # Check most recent first
-                # Use new field names (agent_number/user_number) with backward compatibility
-                msg_agent = msg.get("agent_number") or msg.get("from_number", "")
-                msg_user = msg.get("user_number") or msg.get("to_number", "")
-                
-                # Check if this message matches the conversation
-                # from_number (parameter) = user, to_number (parameter) = agent
-                if msg_agent and msg_user:
-                    # Match: (user_number matches from_number AND agent_number matches to_number)
-                    # OR reverse (for outbound messages)
-                    if ((msg_user == normalized_from and msg_agent == normalized_to) or
-                        (msg_agent == normalized_from and msg_user == normalized_to)):
-                        conversation_id = msg.get("conversation_id")
-                        if conversation_id:
-                            return conversation_id
+                conversation_id = msg.get("conversation_id")
+                if conversation_id:
+                    return conversation_id
             
             return None
             
@@ -269,7 +288,7 @@ class MongoDBMessageStore:
             return None
     
     async def get_all_messages_by_agent_id(self, agent_id: str, limit: int = 100) -> List[Dict[str, Any]]:
-        """Get all messages for a specific agent_id (phone number) in chronological order"""
+        """Get all messages for a specific agent_id across all user conversations in chronological order"""
         if not is_mongodb_available():
             return []
         
@@ -278,40 +297,126 @@ class MongoDBMessageStore:
             if collection is None:
                 return []
             
-            # Get the document for this agent_id (one document per phone number)
-            doc = await collection.find_one({"agent_id": agent_id})
+            normalized_agent = normalize_phone_number(agent_id)
             
-            if not doc:
-                logger.info(f"No messages found for agent_id: {agent_id}")
-                return []
+            # Get all documents for this agent_id (multiple documents, one per user_number)
+            cursor = collection.find({"agent_id": normalized_agent})
             
-            # Extract messages array from the document
-            messages_array = doc.get("messages", [])
+            all_messages = []
+            async for doc in cursor:
+                messages_array = doc.get("messages", [])
+                user_number = doc.get("user_number", "")
+                
+                # Add user_number and agent_id to each message
+                for msg in messages_array:
+                    msg["agent_id"] = normalized_agent
+                    msg["user_number"] = user_number  # Add user_number from document level
+                    # Ensure role field exists
+                    if "role" not in msg:
+                        msg["role"] = "user" if msg.get("direction") == "inbound" else "assistant"
+                    all_messages.append(msg)
             
             # Sort messages by timestamp (chronological order)
-            messages_array.sort(key=lambda x: x.get("timestamp", ""))
+            all_messages.sort(key=lambda x: x.get("timestamp", ""))
             
             # Apply limit
-            messages = messages_array[:limit]
+            messages = all_messages[:limit]
             
-            # Add agent_id to each message for consistency
-            for msg in messages:
-                msg["agent_id"] = agent_id
-                # Ensure role field exists
-                if "role" not in msg:
-                    msg["role"] = "user" if msg.get("direction") == "inbound" else "assistant"
-            
-            logger.info(f"Retrieved {len(messages)} messages for agent_id: {agent_id}")
+            logger.info(f"Retrieved {len(messages)} messages for agent_id: {normalized_agent}")
             return messages
             
         except Exception as e:
             logger.error(f"Error getting messages by agent_id: {e}")
             return []
     
+    async def check_conversation_exists(self, agent_id: str, user_number: str) -> bool:
+        """Check if a conversation document exists for agent_id + user_number combination"""
+        if not is_mongodb_available():
+            return False
+        
+        try:
+            collection = self._get_collection()
+            if collection is None:
+                return False
+            
+            # Normalize phone numbers
+            normalized_agent = normalize_phone_number(agent_id)
+            normalized_user = normalize_phone_number(user_number)
+            
+            # Check if document exists with both agent_id and user_number
+            doc = await collection.find_one({
+                "agent_id": normalized_agent,
+                "user_number": normalized_user
+            })
+            
+            return doc is not None
+            
+        except Exception as e:
+            logger.error(f"Error checking conversation existence: {e}")
+            return False
+    
+    async def get_last_24h_messages(self, agent_id: str, user_number: str) -> List[Dict[str, Any]]:
+        """Get messages from the last 24 hours for a specific agent_id + user_number combination"""
+        if not is_mongodb_available():
+            return []
+        
+        try:
+            collection = self._get_collection()
+            if collection is None:
+                return []
+            
+            # Normalize phone numbers
+            normalized_agent = normalize_phone_number(agent_id)
+            normalized_user = normalize_phone_number(user_number)
+            
+            # Calculate 24 hours ago timestamp
+            now = datetime.utcnow()
+            twenty_four_hours_ago = now - timedelta(hours=24)
+            cutoff_timestamp = twenty_four_hours_ago.isoformat()
+            
+            logger.info(f"📅 Getting messages from last 24 hours (since {cutoff_timestamp})")
+            logger.info(f"   agent_id: {normalized_agent}, user_number: {normalized_user}")
+            
+            # Get the document for this agent_id + user_number combination
+            doc = await collection.find_one({
+                "agent_id": normalized_agent,
+                "user_number": normalized_user
+            })
+            
+            if not doc:
+                logger.info(f"No document found for agent_id={normalized_agent}, user_number={normalized_user}")
+                return []
+            
+            # Filter messages by timestamp (last 24 hours)
+            messages_array = doc.get("messages", [])
+            
+            last_24h_messages = []
+            for msg in messages_array:
+                msg_timestamp = msg.get("timestamp", "")
+                
+                # Check if message is within last 24 hours
+                if msg_timestamp >= cutoff_timestamp:
+                    # Ensure role field exists
+                    if "role" not in msg:
+                        msg["role"] = "user" if msg.get("direction") == "inbound" else "assistant"
+                    last_24h_messages.append(msg)
+            
+            # Sort by timestamp (oldest first)
+            last_24h_messages.sort(key=lambda x: x.get("timestamp", ""))
+            
+            logger.info(f"📅 Found {len(last_24h_messages)} message(s) from last 24 hours")
+            
+            return last_24h_messages
+            
+        except Exception as e:
+            logger.error(f"Error getting last 24h messages: {e}", exc_info=True)
+            return []
+    
     async def get_conversation_history(self, from_number: str, to_number: str, 
                                       agent_id: Optional[str] = None,
                                       limit: int = 50) -> List[Dict[str, Any]]:
-        """Get conversation history between two phone numbers for personalization"""
+        """Get conversation history between two phone numbers for personalization
+        Now returns last 24 hours of messages for LLM inference"""
         if not is_mongodb_available():
             return []
         
@@ -324,35 +429,12 @@ class MongoDBMessageStore:
             if not agent_id:
                 agent_id = to_number
             
-            conversation_id = await self.get_conversation_id(from_number, to_number, agent_id)
+            # Use the new method to get last 24 hours of messages
+            messages = await self.get_last_24h_messages(agent_id, from_number)
             
-            if not conversation_id:
-                logger.info(f"No existing conversation found for {from_number} <-> {to_number}")
-                return []
-            
-            # Get the document for this agent_id
-            doc = await collection.find_one({"agent_id": agent_id})
-            
-            if not doc:
-                return []
-            
-            # Filter messages by conversation_id from the messages array
-            messages_array = doc.get("messages", [])
-            conversation_messages = [
-                msg for msg in messages_array 
-                if msg.get("conversation_id") == conversation_id
-            ]
-            
-            # Sort by timestamp
-            conversation_messages.sort(key=lambda x: x.get("timestamp", ""))
-            
-            # Apply limit
-            messages = conversation_messages[:limit]
-            
-            # Ensure role field exists
-            for msg in messages:
-                if "role" not in msg:
-                    msg["role"] = "user" if msg.get("direction") == "inbound" else "assistant"
+            # Apply limit if needed
+            if limit and len(messages) > limit:
+                messages = messages[-limit:]  # Get most recent messages
             
             return messages
             
@@ -364,7 +446,7 @@ class MongoDBMessageStore:
                               conversation_id: Optional[str] = None,
                               limit: int = 100) -> List[Dict[str, Any]]:
         """Get all messages with optional filtering
-        Works with new structure: one document per phone number with messages array
+        Works with new structure: one document per agent_id + user_number combination
         """
         if not is_mongodb_available():
             return []
@@ -374,17 +456,18 @@ class MongoDBMessageStore:
             if collection is None:
                 return []
             
-            # Build query - get documents by agent_id (one document per phone number)
+            # Build query - get documents by agent_id (normalize if provided)
             query = {}
             if agent_id:
-                query["agent_id"] = agent_id
+                query["agent_id"] = normalize_phone_number(agent_id)
             
             messages = []
             
-            # Get all documents matching the query
+            # Get all documents matching the query (one per agent_id + user_number)
             cursor = collection.find(query)
             async for doc in cursor:
                 agent_id_doc = doc.get("agent_id")
+                user_number_doc = doc.get("user_number")  # Get from document level
                 messages_array = doc.get("messages", [])
                 
                 # Filter by conversation_id if specified
@@ -393,15 +476,13 @@ class MongoDBMessageStore:
                 
                 # Add messages to result
                 for msg in messages_array:
-                    # Use new field names (agent_number/user_number) with backward compatibility
-                    agent_number = msg.get("agent_number") or msg.get("from_number", "")
-                    user_number = msg.get("user_number") or msg.get("to_number", "")
+                    agent_number = msg.get("agent_number") or agent_id_doc
                     
                     messages.append({
                         "id": msg.get("message_sid"),
                         "message_sid": msg.get("message_sid"),
                         "agent_number": agent_number,
-                        "user_number": user_number,
+                        "user_number": user_number_doc,  # From document level
                         "body": msg.get("body"),
                         "agent_id": agent_id_doc,
                         "conversation_id": msg.get("conversation_id"),
@@ -422,8 +503,8 @@ class MongoDBMessageStore:
             return []
     
     async def get_conversations(self, agent_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
-        """Get all conversations grouped by conversation_id with latest message info
-        Works with new structure: one document per phone number with messages array
+        """Get all conversations grouped by agent_id + user_number
+        Works with new structure: one document per agent_id + user_number combination
         """
         if not is_mongodb_available():
             return []
@@ -433,111 +514,84 @@ class MongoDBMessageStore:
             if collection is None:
                 return []
             
-            # Build query - get documents by agent_id (one document per phone number)
+            # Build query - get documents by agent_id (normalize if provided)
             query = {}
             if agent_id:
-                query["agent_id"] = agent_id
+                query["agent_id"] = normalize_phone_number(agent_id)
             
-            # Get all documents matching the query (one per phone number)
+            # Get all documents matching the query (one per agent_id + user_number)
             cursor = collection.find(query)
             all_conversations = {}
             
             async for doc in cursor:
                 agent_id_doc = doc.get("agent_id")
-                if not agent_id_doc:
+                user_number_doc = doc.get("user_number")
+                
+                if not agent_id_doc or not user_number_doc:
                     continue
                 
                 messages_array = doc.get("messages", [])
                 if not messages_array:
                     continue
                 
-                # Group messages by user_number (customer) to keep conversation threads together
-                conversations_by_user = {}
+                # Sort messages by timestamp
+                messages_array.sort(key=lambda x: x.get("timestamp", ""))
                 
+                # Get conversation_id from most recent message
+                conversation_id = None
+                for msg in reversed(messages_array):
+                    if msg.get("conversation_id"):
+                        conversation_id = msg.get("conversation_id")
+                        break
+                
+                if not conversation_id:
+                    conversation_id = str(uuid.uuid4())
+                
+                # Get latest message info
+                latest_message_obj = messages_array[-1] if messages_array else None
+                latest_timestamp = latest_message_obj.get("timestamp", "") if latest_message_obj else ""
+                latest_message = latest_message_obj.get("body", "") if latest_message_obj else ""
+                
+                # Build conversation array for UI
+                conversation_messages = []
                 for msg in messages_array:
-                    # Identify the user number (the other party)
-                    # Use new field names with backward compatibility
-                    msg_agent = msg.get("agent_number") or msg.get("from_number", "") if msg.get("direction") == "outbound" else msg.get("to_number", "")
-                    msg_user = msg.get("user_number") or msg.get("to_number", "") if msg.get("direction") == "outbound" else msg.get("from_number", "")
+                    # Get or infer direction field (for backward compatibility with old messages)
+                    direction = msg.get("direction")
+                    if not direction:
+                        # Infer direction from role field if direction is missing
+                        role = msg.get("role")
+                        if role == "user" or role == "customer":
+                            direction = "inbound"
+                        else:
+                            direction = "outbound"
                     
-                    logger.debug(f"Processing message: sid={msg.get('message_sid')}, direction={msg.get('direction')}, user={msg_user}, agent={msg_agent}, body={msg.get('body', '')[:30]}")
+                    # Determine role (with direction fallback)
+                    role = msg.get("role") or ("user" if direction == "inbound" else "assistant")
                     
-                    # If we can't identify the user, skip
-                    if not msg_user:
-                        logger.warning(f"Skipping message {msg.get('message_sid')} - could not identify user_number")
-                        continue
-                        
-                    # Normalize user number for grouping
-                    user_key = msg_user.strip()
-                    
-                    if user_key not in conversations_by_user:
-                        conversations_by_user[user_key] = {
-                            "conversation_id": msg.get("conversation_id") or str(uuid.uuid4()), # Use latest or generate one
-                            "phoneNumberId": agent_id_doc,
-                            "callerNumber": user_key,
-                            "agentNumber": agent_id_doc,
-                            "messages": [],
-                            "latest_timestamp": "",
-                            "latest_message": ""
-                        }
-                    
-                    # Add message to this user's thread
-                    conversations_by_user[user_key]["messages"].append(msg)
-                    
-                    # Track latest message
-                    msg_timestamp = msg.get("timestamp", "")
-                    if msg_timestamp > conversations_by_user[user_key]["latest_timestamp"]:
-                        conversations_by_user[user_key]["latest_timestamp"] = msg_timestamp
-                        conversations_by_user[user_key]["latest_message"] = msg.get("body", "")
-                        # Update conversation_id to the latest one used (if any)
-                        if msg.get("conversation_id"):
-                            conversations_by_user[user_key]["conversation_id"] = msg.get("conversation_id")
+                    conversation_messages.append({
+                        "role": role,
+                        "direction": direction,  # Always include direction for UI to use
+                        "text": msg.get("body", ""),
+                        "timestamp": msg.get("timestamp")
+                    })
                 
-                # Convert to conversation format
-                for user_key, conv_data in conversations_by_user.items():
-                    # Sort messages by timestamp
-                    conv_data["messages"].sort(key=lambda x: x.get("timestamp", ""))
-                    
-                    # Build conversation array for UI
-                    conversation_messages = []
-                    for msg in conv_data["messages"]:
-                        # Get or infer direction field (for backward compatibility with old messages)
-                        direction = msg.get("direction")
-                        if not direction:
-                            # Infer direction from role field if direction is missing
-                            role = msg.get("role")
-                            if role == "user" or role == "customer":
-                                direction = "inbound"
-                            else:
-                                direction = "outbound"
-                        
-                        # Determine role (with direction fallback)
-                        role = msg.get("role") or ("user" if direction == "inbound" else "assistant")
-                        
-                        conversation_messages.append({
-                            "role": role,
-                            "direction": direction,  # Always include direction for UI to use
-                            "text": msg.get("body", ""),
-                            "timestamp": msg.get("timestamp")
-                        })
-                    
-                    # Store conversation
-                    # Use composite ID to ensure uniqueness in the list: agent_id + user_number
-                    unique_id = f"{agent_id_doc}_{user_key}"
-                    
-                    if unique_id not in all_conversations:
-                        all_conversations[unique_id] = {
-                            "id": unique_id,
-                            "conversation_id": conv_data["conversation_id"], # Keep for reference
-                            "phoneNumberId": conv_data["phoneNumberId"],
-                            "callerNumber": conv_data["callerNumber"],
-                            "agentNumber": conv_data["agentNumber"],
-                            "status": "active",
-                            "timestamp": conv_data["latest_timestamp"],
-                            "latest_message": conv_data["latest_message"],
-                            "message_count": len(conv_data["messages"]),
-                            "conversation": conversation_messages
-                        }
+                # Store conversation
+                # Use composite ID to ensure uniqueness: agent_id + user_number
+                unique_id = f"{agent_id_doc}_{user_number_doc}"
+                
+                if unique_id not in all_conversations:
+                    all_conversations[unique_id] = {
+                        "id": unique_id,
+                        "conversation_id": conversation_id,
+                        "phoneNumberId": agent_id_doc,
+                        "callerNumber": user_number_doc,
+                        "agentNumber": agent_id_doc,
+                        "status": "active",
+                        "timestamp": latest_timestamp,
+                        "latest_message": latest_message,
+                        "message_count": len(messages_array),
+                        "conversation": conversation_messages
+                    }
             
             # Convert to list and sort by latest timestamp
             conversations = list(all_conversations.values())

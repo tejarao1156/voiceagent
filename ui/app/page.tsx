@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, KeyboardEvent } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Activity,
@@ -1148,8 +1148,10 @@ const MessagesView = () => {
   const [conversations, setConversations] = useState<any[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [messageText, setMessageText] = useState('')
+  const [sending, setSending] = useState(false)
 
-  useEffect(() => {
+  const fetchConversations = () => {
     fetch('/api/messages')
       .then(res => res.json())
       .then(data => {
@@ -1160,9 +1162,66 @@ const MessagesView = () => {
         console.error(err)
         setLoading(false)
       })
+  }
+
+  useEffect(() => {
+    fetchConversations()
   }, [])
 
-  const selectedConversation = conversations.find(c => c.conversation_id === selectedId)
+  const handleSendMessage = async () => {
+    if (!messageText.trim() || !selectedConversation || sending) return
+
+    const fromNumber = selectedConversation.agentNumber
+    const toNumber = selectedConversation.callerNumber
+
+    if (!fromNumber || !toNumber) {
+      alert('Missing phone number information')
+      return
+    }
+
+    setSending(true)
+    try {
+      const response = await fetch('/api/messages/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: fromNumber,
+          to: toNumber,
+          body: messageText.trim()
+        })
+      })
+
+      const data = await response.json()
+      
+      if (response.ok && data.success) {
+        setMessageText('')
+        // Refresh conversations to show the new message
+        setTimeout(() => {
+          fetchConversations()
+        }, 500)
+      } else {
+        alert(data.detail || 'Failed to send message')
+      }
+    } catch (error) {
+      console.error('Error sending message:', error)
+      alert('Failed to send message. Please try again.')
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const handleKeyPress = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleSendMessage()
+    }
+  }
+
+  const selectedConversation = conversations.find(c => 
+    c.conversation_id === selectedId || c.id === selectedId
+  )
 
   if (loading) {
     return (
@@ -1192,11 +1251,13 @@ const MessagesView = () => {
           <h3 className="font-bold text-slate-800">Conversations</h3>
         </div>
         <div className="overflow-y-auto flex-1">
-          {conversations.map((conv) => (
+          {conversations.map((conv) => {
+            const convId = conv.conversation_id || conv.id;
+            return (
             <div
-              key={conv.conversation_id}
-              onClick={() => setSelectedId(conv.conversation_id)}
-              className={`p-4 border-b border-slate-50 cursor-pointer hover:bg-white/80 transition-colors ${selectedId === conv.conversation_id ? 'bg-blue-50/50 border-l-4 border-l-blue-500' : 'border-l-4 border-l-transparent'}`}
+              key={convId}
+              onClick={() => setSelectedId(convId)}
+              className={`p-4 border-b border-slate-50 cursor-pointer hover:bg-white/80 transition-colors ${selectedId === convId ? 'bg-blue-50/50 border-l-4 border-l-blue-500' : 'border-l-4 border-l-transparent'}`}
             >
               <div className="flex justify-between items-start mb-2">
                 <div className="flex-1">
@@ -1207,13 +1268,14 @@ const MessagesView = () => {
                   <span className="font-bold text-slate-800 text-sm">{conv.callerNumber || 'Unknown'}</span>
                   <div className="flex items-center gap-1 mt-1">
                     <span className="text-[10px] text-slate-400 font-medium">Agent:</span>
-                    <span className="text-[10px] text-slate-500 font-mono">{conv.agentNumber}</span>
+                    <span className="text-[10px] text-slate-500 font-mono">{conv.agentNumber || 'Unknown'}</span>
                   </div>
                 </div>
               </div>
-              <p className="text-sm text-slate-500 truncate italic">"{conv.latest_message}"</p>
+              <p className="text-sm text-slate-500 truncate italic">"{conv.latest_message || 'No messages'}"</p>
             </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
@@ -1230,54 +1292,89 @@ const MessagesView = () => {
                   <div className="flex items-center gap-2 mb-1">
                     <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded uppercase tracking-wider">Customer</span>
                   </div>
-                  <h3 className="font-bold text-slate-800 text-base">{selectedConversation.callerNumber}</h3>
+                  <h3 className="font-bold text-slate-800 text-base">{selectedConversation.callerNumber || 'Unknown'}</h3>
                   <div className="flex items-center gap-2 mt-1">
                     <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded uppercase tracking-wider">Agent</span>
-                    <span className="text-xs text-slate-600 font-mono">{selectedConversation.agentNumber}</span>
+                    <span className="text-xs text-slate-600 font-mono">{selectedConversation.agentNumber || 'Unknown'}</span>
                   </div>
                 </div>
               </div>
             </div>
             <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/30">
-              {selectedConversation.conversation.map((msg: any, idx: number) => {
+              {selectedConversation.conversation && selectedConversation.conversation.length > 0 ? (
+                selectedConversation.conversation.map((msg: any, idx: number) => {
                 // Determine if this is a customer message or agent message
-                // Check multiple fields for maximum compatibility:
-                // 1. role field: "user" or "customer" = customer message
-                // 2. direction field: "inbound" = customer message  
+                // Priority order for maximum compatibility:
+                // 1. role field: "user" or "customer" = customer message, "assistant" = agent message
+                // 2. direction field: "inbound" = customer message, "outbound" = agent message
                 // 3. sender field: "customer" = customer message
-                const isCustomer = 
-                  msg.role === 'user' || 
-                  msg.role === 'customer' || 
-                  msg.sender === 'customer' ||
-                  msg.direction === 'inbound';
+                const role = msg.role?.toLowerCase() || '';
+                const direction = msg.direction?.toLowerCase() || '';
+                const sender = msg.sender?.toLowerCase() || '';
                 
-                const isAgent = !isCustomer;
+                // Determine message source based on priority:
+                // 1. Check role first (most reliable)
+                // 2. Then check direction
+                // 3. Then check sender
+                // Default to agent if unclear (for backward compatibility)
+                let messageFromCustomer = false;
+                
+                if (role === 'user' || role === 'customer') {
+                  messageFromCustomer = true;
+                } else if (role === 'assistant' || role === 'agent') {
+                  messageFromCustomer = false;
+                } else if (direction === 'inbound') {
+                  messageFromCustomer = true;
+                } else if (direction === 'outbound') {
+                  messageFromCustomer = false;
+                } else if (sender === 'customer') {
+                  messageFromCustomer = true;
+                }
+                // If none of the above match, default to agent (false)
                 
                 return (
-                  <div key={idx} className={`flex ${isCustomer ? 'justify-start' : 'justify-end'}`}>
+                  <div key={idx} className={`flex ${messageFromCustomer ? 'justify-start' : 'justify-end'}`}>
                     <div className={`max-w-[75%] rounded-2xl px-4 py-3 ${
-                      isCustomer
+                      messageFromCustomer
                         ? 'bg-slate-200/80 text-slate-900 rounded-tl-none shadow-sm border border-slate-300/50'
                         : 'bg-gradient-to-br from-blue-600 to-blue-700 text-white rounded-tr-none shadow-md shadow-blue-500/30'
                     }`}>
-                      <p className="text-sm leading-relaxed">{msg.text}</p>
-                      <p className={`text-[10px] mt-1.5 ${isCustomer ? 'text-slate-500' : 'text-blue-100'}`}>
+                      <p className="text-sm leading-relaxed">{msg.text || msg.body || ''}</p>
+                      <p className={`text-[10px] mt-1.5 ${messageFromCustomer ? 'text-slate-500' : 'text-blue-100'}`}>
                         {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}
                       </p>
                     </div>
                   </div>
                 );
-              })}
+              })
+              ) : (
+                <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                  <MessageSquare className="h-12 w-12 mb-3 opacity-20" />
+                  <p>No messages in this conversation yet</p>
+                </div>
+              )}
             </div>
             <div className="p-4 bg-white/60 border-t border-slate-100 backdrop-blur-md">
               <div className="relative">
                 <input
                   type="text"
                   placeholder="Type a message..."
-                  className="w-full pl-4 pr-12 py-3 rounded-xl border border-slate-200 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-white/80 transition-all"
+                  value={messageText}
+                  onChange={(e) => setMessageText(e.target.value)}
+                  onKeyPress={handleKeyPress}
+                  disabled={sending}
+                  className="w-full pl-4 pr-12 py-3 rounded-xl border border-slate-200 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-white/80 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 />
-                <button className="absolute right-2 top-2 p-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-md shadow-blue-500/20">
-                  <Send className="h-4 w-4" />
+                <button 
+                  onClick={handleSendMessage}
+                  disabled={!messageText.trim() || sending}
+                  className="absolute right-2 top-2 p-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-md shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {sending ? (
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                  ) : (
+                    <Send className="h-4 w-4" />
+                  )}
                 </button>
               </div>
             </div>
