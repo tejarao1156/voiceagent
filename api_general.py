@@ -148,6 +148,16 @@ async def startup_event():
         logger.info("💡 Local Development: Make sure ngrok is running if using Twilio")
         logger.info("   Run: ngrok http 4002")
         logger.info("   The system will auto-detect ngrok if running")
+        
+    # Start Scheduled Call Worker
+    try:
+        from utils.scheduled_call_worker import ScheduledCallWorker
+        scheduled_worker = ScheduledCallWorker()
+        scheduled_worker.start()
+        app.state.scheduled_worker = scheduled_worker
+        logger.info("✅ Scheduled Call Worker initialized and started")
+    except Exception as e:
+        logger.error(f"❌ Failed to start Scheduled Call Worker: {e}")
     logger.info("="*50)
 
 # ============================================================================
@@ -1082,71 +1092,110 @@ async def twilio_incoming_call(request: Request):
         
         phone_store = MongoDBPhoneStore()
         
-        # Check if 'from' number is registered (outbound call)
-        if from_number:
-            normalized_from = normalize_phone_number(from_number)
-            registered_from = await phone_store.get_phone_by_number(normalized_from, type_filter="calls")
-            if registered_from and registered_from.get("isActive") != False and registered_from.get("isDeleted") != True:
-                is_outbound_call = True
-                agent_phone_number = normalized_from
-                logger.info(f"📤 Detected OUTBOUND call: {normalized_from} -> {to_number}")
+        # Extract query parameters (for scheduled calls)
+        query_params = request.query_params
+        scheduled_call_id = query_params.get("scheduled_call_id")
+        is_scheduled = query_params.get("is_scheduled") == "true"
+        
+        # If this is a scheduled call, we DON'T need to look up an active agent.
+        # We should use the configuration defined in the scheduled call itself.
+        if is_scheduled and scheduled_call_id:
+            logger.info(f"🗓️ Processing SCHEDULED call (Batch ID: {scheduled_call_id})")
+            try:
+                from databases.mongodb_scheduled_call_store import MongoDBScheduledCallStore
+                scheduled_store = MongoDBScheduledCallStore()
+                scheduled_call = await scheduled_store.get_scheduled_call(scheduled_call_id)
                 
-                # Check for custom context stored for this outbound call
-                if hasattr(twilio_phone_tool, 'outbound_call_contexts'):
-                    context_key = f"{normalized_from}_{normalize_phone_number(to_number)}"
-                    stored_context = twilio_phone_tool.outbound_call_contexts.get(context_key)
-                    if stored_context:
-                        custom_context = stored_context.get("context")
-                        logger.info(f"✅ Found custom context for outbound call: {context_key}")
-                        # Clean up after use (will be used when session is created)
-                        # Don't delete yet - we'll use it when creating the session
+                if scheduled_call:
+                    # Construct a "virtual" agent config from the scheduled call data
+                    # This bypasses the need for an active agent in the DB
+                    agent_config = {
+                        "name": "Scheduled Call Agent",
+                        "phoneNumber": from_number,
+                        "systemPrompt": scheduled_call.get("prompt") or "You are a helpful AI assistant.",
+                        "greeting": "Hello! I am calling regarding your scheduled appointment.", # Default, can be improved
+                        "inferenceModel": "gpt-4o-mini", # Default
+                        "voiceId": "alloy", # Default
+                        "active": True
+                    }
+                    
+                    # If the scheduled call has specific AI config, use it (future proofing)
+                    if scheduled_call.get("ai_config"):
+                        agent_config.update(scheduled_call.get("ai_config"))
+                        
+                    logger.info(f"✅ Created virtual agent config from Schedule {scheduled_call_id}")
+                    
+                    # Ensure we flag this as an outbound call so subsequent logic works
+                    is_outbound_call = True
+                    agent_phone_number = from_number
+                    
+            except Exception as e:
+                logger.error(f"❌ Error fetching scheduled call {scheduled_call_id}: {e}")
+                # Fallback to normal lookup if this fails
         
-        # If not outbound, check if 'to' number is registered (inbound call)
-        if not is_outbound_call and to_number:
-            normalized_to = normalize_phone_number(to_number)
-            registered_to = await phone_store.get_phone_by_number(normalized_to, type_filter="calls")
-            if registered_to and registered_to.get("isActive") != False and registered_to.get("isDeleted") != True:
-                agent_phone_number = normalized_to
-                logger.info(f"📥 Detected INBOUND call: {from_number} -> {normalized_to}")
-            else:
-                logger.warning(f"❌ Phone number '{to_number}' is NOT registered in MongoDB")
-                logger.warning(f"   Please ensure the phone number is registered through the app UI")
+        # If we didn't create a virtual config from schedule, proceed with normal lookup
+        if not agent_config:
+            # Check if 'from' number is registered (outbound call)
+            if from_number:
+                normalized_from = normalize_phone_number(from_number)
+                registered_from = await phone_store.get_phone_by_number(normalized_from, type_filter="calls")
+                if registered_from and registered_from.get("isActive") != False and registered_from.get("isDeleted") != True:
+                    is_outbound_call = True
+                    agent_phone_number = normalized_from
+                    logger.info(f"📤 Detected OUTBOUND call: {normalized_from} -> {to_number}")
+                    
+                    # Check for custom context stored for this outbound call
+                    if hasattr(twilio_phone_tool, 'outbound_call_contexts'):
+                        context_key = f"{normalized_from}_{normalize_phone_number(to_number)}"
+                        stored_context = twilio_phone_tool.outbound_call_contexts.get(context_key)
+                        if stored_context:
+                            custom_context = stored_context.get("context")
+                            logger.info(f"✅ Found custom context for outbound call: {context_key}")
+            
+            # If not outbound, check if 'to' number is registered (inbound call)
+            if not is_outbound_call and to_number:
+                normalized_to = normalize_phone_number(to_number)
+                registered_to = await phone_store.get_phone_by_number(normalized_to, type_filter="calls")
+                if registered_to and registered_to.get("isActive") != False and registered_to.get("isDeleted") != True:
+                    agent_phone_number = normalized_to
+                    logger.info(f"📥 Detected INBOUND call: {from_number} -> {normalized_to}")
+                else:
+                    logger.warning(f"❌ Phone number '{to_number}' is NOT registered in MongoDB")
+                    error_response = TwilioVoiceResponse()
+                    error_response.say("Sorry, this number is not registered. Please register the phone number through the app first. Goodbye.", voice="alice")
+                    error_response.hangup()
+                    return HTMLResponse(content=str(error_response))
+            
+            # Validate we have an agent phone number
+            if not agent_phone_number:
+                logger.error(f"❌ Cannot determine agent phone number for call {call_sid}")
                 error_response = TwilioVoiceResponse()
-                error_response.say("Sorry, this number is not registered. Please register the phone number through the app first. Goodbye.", voice="alice")
+                error_response.say("Sorry, the system cannot process this call. Please check your phone number registration. Goodbye.", voice="alice")
                 error_response.hangup()
-                logger.info(f"Call {call_sid} rejected: Phone number {to_number} not registered in MongoDB")
-                return HTMLResponse(content=str(error_response))
-        
-        # Validate we have an agent phone number
-        if not agent_phone_number:
-            logger.error(f"❌ Cannot determine agent phone number for call {call_sid}")
-            error_response = TwilioVoiceResponse()
-            error_response.say("Sorry, the system cannot process this call. Please check your phone number registration. Goodbye.", voice="alice")
-            error_response.hangup()
-            return HTMLResponse(content=str(error_response))
-        
-        # SECOND: Check if agent exists for this phone number (for both stream and batch modes)
-        agent_config = None
-        if agent_phone_number:
-            agent_config = await twilio_phone_tool._load_agent_config(agent_phone_number)
-            if not agent_config:
-                logger.warning(f"❌ No active agent found for phone number {agent_phone_number}")
-                error_response = TwilioVoiceResponse()
-                error_response.say("Sorry, no agent is configured for this number. Please create an agent for this phone number. Goodbye.", voice="alice")
-                error_response.hangup()
-                logger.info(f"Call {call_sid} rejected: Number {agent_phone_number} not found in voice_agents collection")
                 return HTMLResponse(content=str(error_response))
             
-            # Override system prompt with custom context if provided (for outbound calls)
-            # Note: For stream mode, we'll pass the context via stream parameters
-            # and let the stream handler use it (don't clean up yet)
-            if custom_context and is_outbound_call:
-                logger.info(f"🔄 Custom context available for outbound call (will be passed to stream handler)")
-                # Store custom context in agent_config temporarily for batch mode
-                agent_config = agent_config.copy()  # Don't modify original
-                agent_config["systemPrompt"] = custom_context
-                # For stream mode, we'll pass context via stream parameters
-                # Don't clean up stored context yet - stream handler needs it
+            # Load agent config from DB
+            if agent_phone_number:
+                agent_config = await twilio_phone_tool._load_agent_config(agent_phone_number)
+                if not agent_config:
+                    logger.warning(f"❌ No active agent found for phone number {agent_phone_number}")
+                    error_response = TwilioVoiceResponse()
+                    error_response.say("Sorry, no agent is configured for this number. Please create an agent for this phone number. Goodbye.", voice="alice")
+                    error_response.hangup()
+                    return HTMLResponse(content=str(error_response))
+                
+                # Override system prompt with custom context if provided
+                if custom_context and is_outbound_call:
+                    agent_config = agent_config.copy()
+                    agent_config["systemPrompt"] = custom_context
+
+        # Extract query parameters (for scheduled calls)
+        query_params = request.query_params
+        scheduled_call_id = query_params.get("scheduled_call_id")
+        is_scheduled = query_params.get("is_scheduled") == "true"
+        
+        if is_scheduled:
+            logger.info(f"🗓️ Processing SCHEDULED call (Batch ID: {scheduled_call_id})")
 
         # Create call record in MongoDB
         try:
@@ -1158,7 +1207,9 @@ async def twilio_incoming_call(request: Request):
                 call_sid=call_sid,
                 from_number=from_number or "unknown",
                 to_number=to_number or "unknown",
-                agent_id=agent_id_for_call
+                agent_id=agent_id_for_call,
+                scheduled_call_id=scheduled_call_id,
+                is_scheduled=is_scheduled
             )
             
             if success:
@@ -3702,7 +3753,22 @@ async def create_scheduled_call(request: Request):
             raise HTTPException(status_code=400, detail="From phone number ID is required")
         
         phone_store = MongoDBPhoneStore()
+        
+        # Try to get by ID first
         registered_phone = await phone_store.get_phone(phone_number_id)
+        
+        # If not found by ID, try by phone number
+        if not registered_phone:
+            try:
+                from databases.mongodb_phone_store import normalize_phone_number
+                normalized_phone = normalize_phone_number(phone_number_id)
+                # For scheduled calls (outbound), we typically use 'calls' type
+                registered_phone = await phone_store.get_phone_by_number(normalized_phone, type_filter="calls")
+                if not registered_phone:
+                     # Try without filter just in case
+                     registered_phone = await phone_store.get_phone_by_number(normalized_phone)
+            except Exception as e:
+                logger.warning(f"Failed to lookup phone by number: {e}")
         
         if not registered_phone or registered_phone.get("isActive") == False or registered_phone.get("isDeleted") == True:
             raise HTTPException(status_code=400, detail=f"Phone number is not registered or inactive. Please register the phone number first.")
