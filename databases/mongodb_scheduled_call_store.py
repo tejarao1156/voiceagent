@@ -69,7 +69,7 @@ class MongoDBScheduledCallStore:
             # Add timestamps and metadata
             call_data["created_at"] = datetime.utcnow().isoformat()
             call_data["updated_at"] = datetime.utcnow().isoformat()
-            call_data["status"] = call_data.get("status", "pending")
+            call_data["status"] = call_data.get("status", "scheduled")
             call_data["isDeleted"] = False
             
             # Insert scheduled call
@@ -124,7 +124,7 @@ class MongoDBScheduledCallStore:
         
         Args:
             phone_number_id: Optional phone number ID to filter calls
-            status: Optional status filter (pending, in_progress, completed, failed, cancelled)
+            status: Optional status filter (scheduled, in_progress, completed, failed, cancelled)
             call_type: Optional call type filter (ai, normal)
         
         Returns:
@@ -249,7 +249,7 @@ class MongoDBScheduledCallStore:
             
             query = {
                 "isDeleted": {"$ne": True},
-                "status": "pending"
+                "status": "scheduled"  # Changed from 'pending' to 'scheduled'
             }
             
             if before_datetime:

@@ -285,6 +285,12 @@ const LogsView = () => {
                       }`}>
                       {call.status}
                     </span>
+                    {call.is_scheduled && (
+                      <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-700 border border-purple-200 flex items-center">
+                        <Calendar className="h-3 w-3 mr-1" />
+                        SCHEDULED
+                      </span>
+                    )}
                   </div>
                   <span className="text-xs text-slate-400">
                     {call.timestamp ? new Date(call.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A'}
@@ -322,6 +328,15 @@ const LogsView = () => {
                   <span>{selectedCall.timestamp ? new Date(selectedCall.timestamp).toLocaleString() : 'N/A'}</span>
                   <span>•</span>
                   <span>Duration: {selectedCall.duration ? `${Number(selectedCall.duration).toFixed(0)}s` : '0s'}</span>
+                  {selectedCall.is_scheduled && (
+                    <>
+                      <span>•</span>
+                      <span className="text-purple-600 font-medium flex items-center" title={`Batch ID: ${selectedCall.scheduled_call_id}`}>
+                        <Calendar className="h-3 w-3 mr-1" />
+                        Scheduled Call
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
               {selectedCall.status === 'ongoing' && (

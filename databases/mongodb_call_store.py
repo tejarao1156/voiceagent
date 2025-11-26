@@ -32,7 +32,8 @@ class MongoDBCallStore:
             return None
     
     async def create_call(self, call_sid: str, from_number: str, to_number: str, 
-                         agent_id: Optional[str] = None, session_id: Optional[str] = None) -> bool:
+                         agent_id: Optional[str] = None, session_id: Optional[str] = None,
+                         scheduled_call_id: Optional[str] = None, is_scheduled: bool = False) -> bool:
         """Create a new call record when call starts
         
         Handles edge cases:
@@ -75,10 +76,12 @@ class MongoDBCallStore:
                 "transcript": [],  # Array of {role, text, timestamp}
                 "created_at": now,
                 "updated_at": now,
+                "scheduled_call_id": scheduled_call_id,
+                "is_scheduled": is_scheduled
             }
             
             await collection.insert_one(call_doc)
-            logger.info(f"Created call record: {call_sid} from {from_number} to {to_number}")
+            logger.info(f"Created call record: {call_sid} from {from_number} to {to_number} (Scheduled: {is_scheduled})")
             return True
             
         except Exception as e:
@@ -255,6 +258,8 @@ class MongoDBCallStore:
                     "duration": doc.get("duration_seconds"),
                     "conversation": conversation,
                     "callerNumber": doc.get("from_number"),  # Add for UI compatibility
+                    "scheduled_call_id": doc.get("scheduled_call_id"),
+                    "is_scheduled": doc.get("is_scheduled", False)
                 })
             
             return calls
@@ -307,6 +312,8 @@ class MongoDBCallStore:
                 "duration": doc.get("duration_seconds"),
                 "conversation": conversation,
                 "callerNumber": doc.get("from_number"),  # Add for UI compatibility
+                "scheduled_call_id": doc.get("scheduled_call_id"),
+                "is_scheduled": doc.get("is_scheduled", False)
             }
             
         except Exception as e:
