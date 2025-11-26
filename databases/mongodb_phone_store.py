@@ -90,17 +90,25 @@ class MongoDBPhoneStore:
             normalized_phone = normalize_phone_number(phone_number)
             logger.info(f"Normalizing phone number: '{phone_number}' -> '{normalized_phone}'")
             
-            # Check if phone number already exists (check both original and normalized formats)
+            # Get the type from phone_data (default to 'calls' for backward compatibility)
+            registration_type = phone_data.get("type", "calls")
+            
+            # Check if phone number already exists FOR THIS SPECIFIC TYPE
+            # This allows the same phone number to be registered for both 'calls' and 'messages' separately
             # Exclude deleted phones from the check
             try:
                 existing = await collection.find_one({
                     "phoneNumber": normalized_phone,
+                    "type": registration_type,  # Check within the same type only
                     "isDeleted": {"$ne": True}
                 })
                 if not existing:
                     # Also check if any phone with different format exists (normalize all and compare)
-                    # Exclude deleted phones
-                    async for doc in collection.find({"isDeleted": {"$ne": True}}):
+                    # Exclude deleted phones and check within same type
+                    async for doc in collection.find({
+                        "type": registration_type,
+                        "isDeleted": {"$ne": True}
+                    }):
                         stored_phone = doc.get("phoneNumber", "")
                         if normalize_phone_number(stored_phone) == normalized_phone:
                             existing = doc
@@ -113,15 +121,16 @@ class MongoDBPhoneStore:
                 existing_phone_id = str(existing.get("_id"))
                 existing_is_deleted = existing.get("isDeleted", False)
                 existing_is_active = existing.get("isActive", True)
+                existing_type = existing.get("type", "calls")
                 
-                # If phone exists and is not deleted, raise error (duplicate validation)
+                # If phone exists for this type and is not deleted, raise error (duplicate validation)
                 if not existing_is_deleted:
-                    error_msg = f"Phone number {normalized_phone} is already registered. Please delete the existing registration first or use a different phone number."
-                    logger.warning(f"❌ Duplicate phone number detected: {normalized_phone} (original: {phone_number}) already registered (ID: {existing_phone_id}, Active: {existing_is_active})")
+                    error_msg = f"Phone number {normalized_phone} is already registered for type '{registration_type}'. Please delete the existing registration first or use a different phone number."
+                    logger.warning(f"❌ Duplicate phone number detected: {normalized_phone} (original: {phone_number}) already registered for type '{registration_type}' (ID: {existing_phone_id}, Active: {existing_is_active})")
                     raise ValueError(error_msg)
                 
                 # If phone exists but is deleted, allow re-registration (restore it)
-                logger.info(f"Phone number {normalized_phone} was previously deleted. Restoring registration...")
+                logger.info(f"Phone number {normalized_phone} for type '{registration_type}' was previously deleted. Restoring registration...")
                 # Update the existing record instead of creating new one
                 # Only update the fields we want to change, preserve existing _id
                 update_data = {
@@ -133,7 +142,9 @@ class MongoDBPhoneStore:
                     "twilioAccountName": phone_data.get("twilioAccountName", "Twilio 0"),
                     "webhookUrl": phone_data.get("webhookUrl"),
                     "statusCallbackUrl": phone_data.get("statusCallbackUrl"),
+                    "smsWebhookUrl": phone_data.get("smsWebhookUrl"),  # Add SMS webhook support
                     "userId": phone_data.get("userId"),
+                    "type": registration_type,  # Ensure type is set
                     "isDeleted": False,
                     "isActive": True,
                     "updated_at": datetime.utcnow().isoformat()
@@ -142,7 +153,7 @@ class MongoDBPhoneStore:
                     {"_id": existing.get("_id")},
                     {"$set": update_data}
                 )
-                logger.info(f"✅ Restored previously deleted phone number {normalized_phone} (ID: {existing_phone_id})")
+                logger.info(f"✅ Restored previously deleted phone number {normalized_phone} for type '{registration_type}' (ID: {existing_phone_id})")
                 return existing_phone_id
             
             # Store normalized phone number
@@ -204,8 +215,16 @@ class MongoDBPhoneStore:
             logger.error(f"Error getting phone {phone_id}: {e}")
             return None
     
-    async def get_phone_by_number(self, phone_number: str) -> Optional[Dict[str, Any]]:
-        """Get a registered phone by phone number (with normalization)"""
+    async def get_phone_by_number(self, phone_number: str, type_filter: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get a registered phone by phone number (with normalization and optional type filtering)
+        
+        Args:
+            phone_number: Phone number to lookup
+            type_filter: Optional filter for 'calls' or 'messages' type
+        
+        Returns:
+            Phone dict if found, None otherwise
+        """
         if not is_mongodb_available():
             logger.debug("MongoDB not available, skipping phone retrieval")
             return None
@@ -217,33 +236,45 @@ class MongoDBPhoneStore:
             
             # Normalize the input phone number
             normalized_phone = normalize_phone_number(phone_number)
-            logger.debug(f"Looking up phone number: '{phone_number}' -> normalized: '{normalized_phone}'")
+            log_suffix = f" (type={type_filter})" if type_filter else ""
+            logger.debug(f"Looking up phone number: '{phone_number}' -> normalized: '{normalized_phone}'{log_suffix}")
             
-            # First try exact match with normalized number (exclude deleted phones)
-            phone = await collection.find_one({
+            # Build query - exclude deleted phones
+            query = {
                 "phoneNumber": normalized_phone,
                 "isDeleted": {"$ne": True}
-            })
+            }
+            
+            # Add type filter if provided
+            if type_filter:
+                query["type"] = type_filter
+            
+            # First try exact match with normalized number
+            phone = await collection.find_one(query)
             
             if phone:
                 phone_dict = dict(phone)
                 phone_dict["id"] = str(phone_dict["_id"])
                 del phone_dict["_id"]
-                logger.debug(f"✅ Found phone by normalized number: {normalized_phone}")
+                logger.debug(f"✅ Found phone by normalized number: {normalized_phone}{log_suffix}")
                 return phone_dict
             
-            # If not found, try to find by normalizing all stored phones (exclude deleted)
+            # If not found, try to find by normalizing all stored phones
             # This handles cases where phone was stored in a different format
-            async for doc in collection.find({"isDeleted": {"$ne": True}}):
+            search_query = {"isDeleted": {"$ne": True}}
+            if type_filter:
+                search_query["type"] = type_filter
+            
+            async for doc in collection.find(search_query):
                 stored_phone = doc.get("phoneNumber", "")
                 if normalize_phone_number(stored_phone) == normalized_phone:
                     phone_dict = dict(doc)
                     phone_dict["id"] = str(phone_dict["_id"])
                     del phone_dict["_id"]
-                    logger.info(f"✅ Found phone by normalized comparison: stored '{stored_phone}' matches '{normalized_phone}'")
+                    logger.info(f"✅ Found phone by normalized comparison: stored '{stored_phone}' matches '{normalized_phone}'{log_suffix}")
                     return phone_dict
             
-            logger.warning(f"❌ Phone number not found: '{phone_number}' (normalized: '{normalized_phone}')")
+            logger.warning(f"❌ Phone number not found: '{phone_number}' (normalized: '{normalized_phone}'){log_suffix}")
             return None
             
         except Exception as e:

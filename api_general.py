@@ -1085,7 +1085,7 @@ async def twilio_incoming_call(request: Request):
         # Check if 'from' number is registered (outbound call)
         if from_number:
             normalized_from = normalize_phone_number(from_number)
-            registered_from = await phone_store.get_phone_by_number(normalized_from)
+            registered_from = await phone_store.get_phone_by_number(normalized_from, type_filter="calls")
             if registered_from and registered_from.get("isActive") != False and registered_from.get("isDeleted") != True:
                 is_outbound_call = True
                 agent_phone_number = normalized_from
@@ -1104,7 +1104,7 @@ async def twilio_incoming_call(request: Request):
         # If not outbound, check if 'to' number is registered (inbound call)
         if not is_outbound_call and to_number:
             normalized_to = normalize_phone_number(to_number)
-            registered_to = await phone_store.get_phone_by_number(normalized_to)
+            registered_to = await phone_store.get_phone_by_number(normalized_to, type_filter="calls")
             if registered_to and registered_to.get("isActive") != False and registered_to.get("isDeleted") != True:
                 agent_phone_number = normalized_to
                 logger.info(f"📥 Detected INBOUND call: {from_number} -> {normalized_to}")
@@ -1347,7 +1347,7 @@ async def twilio_incoming_sms(request: Request):
         
         normalized_to = normalize_phone_number(to_number)
         logger.info(f"🔍 Looking up registered phone: {normalized_to}")
-        registered_phone = await phone_store.get_phone_by_number(normalized_to)
+        registered_phone = await phone_store.get_phone_by_number(normalized_to, type_filter="messages")
         
         if not registered_phone or registered_phone.get("isActive") == False or registered_phone.get("isDeleted") == True:
             logger.warning(f"❌ Phone number '{to_number}' is NOT registered or inactive")
@@ -2702,7 +2702,7 @@ async def create_message_agent(request: Request):
         phone_store = MongoDBPhoneStore()
         from databases.mongodb_phone_store import normalize_phone_number
         normalized_phone = normalize_phone_number(phone_number)
-        registered_phone = await phone_store.get_phone_by_number(normalized_phone)
+        registered_phone = await phone_store.get_phone_by_number(normalized_phone, type_filter="messages")
         
         if not registered_phone or registered_phone.get("isActive") == False or registered_phone.get("isDeleted") == True:
             raise HTTPException(status_code=400, detail=f"Phone number {phone_number} is not registered or inactive. Please register the phone number first.")
@@ -2945,7 +2945,7 @@ async def register_phone(request: Request):
     """
     try:
         phone_data = await request.json()
-        logger.info(f"Received phone registration request for: {phone_data.get('phoneNumber')}")
+        logger.info(f"Received phone registration request for: {phone_data.get('phoneNumber')} (type: {phone_data.get('type', 'calls')})")
         
         from databases.mongodb_phone_store import MongoDBPhoneStore
         from databases.mongodb_db import is_mongodb_available
@@ -3038,8 +3038,10 @@ async def register_phone(request: Request):
                 logger.error(f"❌ Failed to auto-update Twilio webhook: {e}")
                 # Don't fail the registration, just log the error
         
+        registration_type = phone_data.get("type", "calls")
         logger.info(f"✅ Phone number registered successfully with ID: {phone_id}")
         logger.info(f"📞 Phone: {phone_number}")
+        logger.info(f"📋 Type: {registration_type.upper()}")
         logger.info(f"🔗 Webhook URLs:")
         logger.info(f"   Incoming (Calls): {incoming_url}")
         logger.info(f"   Status (Calls): {status_url}")
@@ -4129,7 +4131,7 @@ async def make_outbound_call(request: Request):
             )
         
         phone_store = MongoDBPhoneStore()
-        registered_phone = await phone_store.get_phone_by_number(normalized_from)
+        registered_phone = await phone_store.get_phone_by_number(normalized_from, type_filter="calls")
         
         if not registered_phone:
             logger.warning(f"❌ Phone number '{normalized_from}' is NOT registered in MongoDB")
@@ -4901,7 +4903,7 @@ async def send_sms_message(request: Request):
         
         # Check if 'from' number is registered and active
         phone_store = MongoDBPhoneStore()
-        registered_phone = await phone_store.get_phone_by_number(normalized_from)
+        registered_phone = await phone_store.get_phone_by_number(normalized_from, type_filter="messages")
         
         if not registered_phone:
             raise HTTPException(
@@ -5780,24 +5782,23 @@ async def test_tts_synthesize(
 ):
     """Test TTS by converting text to speech"""
     try:
-        # Use existing TTS tool
+        # Use existing TTS tool (note: TTS tool always returns MP3 format)
         result = await tts_tool.synthesize(
             text,
             voice=voice,
-            model=model,
-            response_format=response_format
+            model=model
         )
         
         if result.get("success"):
-            audio_data = result.get("audio_data")
+            audio_bytes = result.get("audio_bytes")
             
             # Return audio file
             from fastapi.responses import Response
             return Response(
-                content=audio_data,
-                media_type=f"audio/{response_format}",
+                content=audio_bytes,
+                media_type="audio/mp3",
                 headers={
-                    "Content-Disposition": f"attachment; filename=tts_output.{response_format}"
+                    "Content-Disposition": "attachment; filename=tts_output.mp3"
                 }
             )
         else:
@@ -5821,17 +5822,16 @@ async def test_tts_synthesize_base64(
     try:
         import base64
         
-        # Use existing TTS tool
+        # Use existing TTS tool (note: TTS tool always returns MP3 format)
         result = await tts_tool.synthesize(
             text,
             voice=voice,
-            model=model,
-            response_format="mp3"
+            model=model
         )
         
         if result.get("success"):
-            audio_data = result.get("audio_data")
-            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+            audio_bytes = result.get("audio_bytes")
+            audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
             
             return {
                 "success": True,
@@ -5839,7 +5839,7 @@ async def test_tts_synthesize_base64(
                 "audio_base64": audio_base64,
                 "voice": voice,
                 "model": model,
-                "audio_size_bytes": len(audio_data),
+                "audio_size_bytes": len(audio_bytes),
                 "timestamp": datetime.utcnow().isoformat()
             }
         else:
@@ -5897,8 +5897,7 @@ async def test_flow_audio_to_response(
         tts_result = await tts_tool.synthesize(
             ai_response,
             voice=tts_voice,
-            model=tts_model,
-            response_format="mp3"
+            model=tts_model
         )
         
         if not tts_result.get("success"):
@@ -5906,7 +5905,7 @@ async def test_flow_audio_to_response(
         
         # Return complete flow result
         import base64
-        response_audio_base64 = base64.b64encode(tts_result.get("audio_data")).decode('utf-8')
+        response_audio_base64 = base64.b64encode(tts_result.get("audio_bytes")).decode('utf-8')
         
         return {
             "success": True,

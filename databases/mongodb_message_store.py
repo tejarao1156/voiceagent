@@ -304,7 +304,7 @@ class MongoDBMessageStore:
             
             all_messages = []
             async for doc in cursor:
-            messages_array = doc.get("messages", [])
+                messages_array = doc.get("messages", [])
                 user_number = doc.get("user_number", "")
                 
                 # Add user_number and agent_id to each message
@@ -551,47 +551,47 @@ class MongoDBMessageStore:
                 latest_message_obj = messages_array[-1] if messages_array else None
                 latest_timestamp = latest_message_obj.get("timestamp", "") if latest_message_obj else ""
                 latest_message = latest_message_obj.get("body", "") if latest_message_obj else ""
-                    
-                    # Build conversation array for UI
-                    conversation_messages = []
+                
+                # Build conversation array for UI
+                conversation_messages = []
                 for msg in messages_array:
-                        # Get or infer direction field (for backward compatibility with old messages)
-                        direction = msg.get("direction")
-                        if not direction:
-                            # Infer direction from role field if direction is missing
-                            role = msg.get("role")
-                            if role == "user" or role == "customer":
-                                direction = "inbound"
-                            else:
-                                direction = "outbound"
-                        
-                        # Determine role (with direction fallback)
-                        role = msg.get("role") or ("user" if direction == "inbound" else "assistant")
-                        
-                        conversation_messages.append({
-                            "role": role,
-                            "direction": direction,  # Always include direction for UI to use
-                            "text": msg.get("body", ""),
-                            "timestamp": msg.get("timestamp")
-                        })
+                    # Get or infer direction field (for backward compatibility with old messages)
+                    direction = msg.get("direction")
+                    if not direction:
+                        # Infer direction from role field if direction is missing
+                        role = msg.get("role")
+                        if role == "user" or role == "customer":
+                            direction = "inbound"
+                        else:
+                            direction = "outbound"
                     
-                    # Store conversation
+                    # Determine role (with direction fallback)
+                    role = msg.get("role") or ("user" if direction == "inbound" else "assistant")
+                    
+                    conversation_messages.append({
+                        "role": role,
+                        "direction": direction,  # Always include direction for UI to use
+                        "text": msg.get("body", ""),
+                        "timestamp": msg.get("timestamp")
+                    })
+                
+                # Store conversation
                 # Use composite ID to ensure uniqueness: agent_id + user_number
                 unique_id = f"{agent_id_doc}_{user_number_doc}"
-                    
-                    if unique_id not in all_conversations:
-                        all_conversations[unique_id] = {
-                            "id": unique_id,
+                
+                if unique_id not in all_conversations:
+                    all_conversations[unique_id] = {
+                        "id": unique_id,
                         "conversation_id": conversation_id,
                         "phoneNumberId": agent_id_doc,
                         "callerNumber": user_number_doc,
                         "agentNumber": agent_id_doc,
-                            "status": "active",
+                        "status": "active",
                         "timestamp": latest_timestamp,
                         "latest_message": latest_message,
                         "message_count": len(messages_array),
-                            "conversation": conversation_messages
-                        }
+                        "conversation": conversation_messages
+                    }
             
             # Convert to list and sort by latest timestamp
             conversations = list(all_conversations.values())
