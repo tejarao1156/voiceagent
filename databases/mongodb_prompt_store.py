@@ -24,7 +24,7 @@ class MongoDBPromptStore:
             return None
         return db[self.collection_name]
     
-    async def create_prompt(self, prompt_data: Dict[str, Any]) -> Optional[str]:
+    async def create_prompt(self, prompt_data: Dict[str, Any], user_id: str) -> Optional[str]:
         """Create a new prompt
         
         Args:
@@ -34,6 +34,7 @@ class MongoDBPromptStore:
                 - phoneNumberId: Phone number ID this prompt is linked to (required)
                 - description: Optional description
                 - category: Optional category (e.g., "sales", "support", "reminder")
+            user_id: User ID for multi-tenancy
         
         Returns:
             Prompt ID if successful, None otherwise
@@ -56,10 +57,11 @@ class MongoDBPromptStore:
             if not prompt_data.get("phoneNumberId"):
                 raise ValueError("Phone number ID is required")
             
-            # Add timestamps and metadata
+            # Add timestamps, metadata, and user ID
             prompt_data["created_at"] = datetime.utcnow().isoformat()
             prompt_data["updated_at"] = datetime.utcnow().isoformat()
             prompt_data["isDeleted"] = False
+            prompt_data["userId"] = user_id  # Store user ID for multi-tenancy
             
             # Insert prompt
             result = await collection.insert_one(prompt_data)
@@ -72,8 +74,8 @@ class MongoDBPromptStore:
             logger.error(f"❌ Error creating prompt: {e}", exc_info=True)
             return None
     
-    async def get_prompt(self, prompt_id: str) -> Optional[Dict[str, Any]]:
-        """Get a prompt by ID"""
+    async def get_prompt(self, prompt_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get a prompt by ID, optionally filtered by user_id"""
         if not is_mongodb_available():
             logger.debug("MongoDB not available, skipping prompt retrieval")
             return None
@@ -84,10 +86,13 @@ class MongoDBPromptStore:
                 return None
             
             from bson import ObjectId
-            prompt = await collection.find_one({
+            query = {
                 "_id": ObjectId(prompt_id),
                 "isDeleted": {"$ne": True}
-            })
+            }
+            if user_id:
+                query["userId"] = user_id
+            prompt = await collection.find_one(query)
             
             if prompt:
                 prompt_dict = dict(prompt)
@@ -100,11 +105,12 @@ class MongoDBPromptStore:
             logger.error(f"Error getting prompt {prompt_id}: {e}")
             return None
     
-    async def list_prompts(self, phone_number_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """List all prompts, optionally filtered by phone number
+    async def list_prompts(self, phone_number_id: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List all prompts, optionally filtered by phone number and user
         
         Args:
             phone_number_id: Optional phone number ID to filter prompts
+            user_id: Optional user ID for multi-tenancy filtering
         
         Returns:
             List of prompt dictionaries
@@ -123,6 +129,8 @@ class MongoDBPromptStore:
             query = {"isDeleted": {"$ne": True}}
             if phone_number_id:
                 query["phoneNumberId"] = phone_number_id
+            if user_id:
+                query["userId"] = user_id
             
             logger.debug(f"Querying prompts with query: {query}")
             
@@ -171,8 +179,13 @@ class MongoDBPromptStore:
             logger.error(f"Error updating prompt {prompt_id}: {e}")
             return False
     
-    async def delete_prompt(self, prompt_id: str) -> bool:
-        """Soft delete a prompt (set isDeleted=True)"""
+    async def delete_prompt(self, prompt_id: str, user_id: Optional[str] = None) -> bool:
+        """Soft delete a prompt (set isDeleted=True)
+        
+        Args:
+            prompt_id: Prompt ID to delete
+            user_id: Optional user ID for validation (prevents users from deleting other users' prompts)
+        """
         if not is_mongodb_available():
             logger.warning("MongoDB not available, skipping prompt deletion")
             return False
@@ -185,8 +198,11 @@ class MongoDBPromptStore:
             from bson import ObjectId
             
             # Soft delete: set isDeleted to True
+            delete_query = {"_id": ObjectId(prompt_id)}
+            if user_id:
+                delete_query["userId"] = user_id
             result = await collection.update_one(
-                {"_id": ObjectId(prompt_id)},
+                delete_query,
                 {"$set": {
                     "isDeleted": True,
                     "updated_at": datetime.utcnow().isoformat()

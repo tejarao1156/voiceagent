@@ -53,7 +53,7 @@ class MongoDBPhoneStore:
             return None
         return db[self.collection_name]
     
-    async def register_phone(self, phone_data: Dict[str, Any]) -> Optional[str]:
+    async def register_phone(self, phone_data: Dict[str, Any], user_id: str) -> Optional[str]:
         """Register a new phone number with Twilio credentials
         
         Args:
@@ -63,7 +63,7 @@ class MongoDBPhoneStore:
                 - twilioAuthToken: Twilio Auth Token
                 - webhookUrl: Incoming webhook URL (provided by system)
                 - statusCallbackUrl: Status callback URL (provided by system)
-                - userId: Optional user/tenant ID
+            user_id: User ID (required for multi-tenancy)
         
         Returns:
             Phone registration ID if successful, None otherwise
@@ -93,20 +93,23 @@ class MongoDBPhoneStore:
             # Get the type from phone_data (default to 'calls' for backward compatibility)
             registration_type = phone_data.get("type", "calls")
             
-            # Check if phone number already exists FOR THIS SPECIFIC TYPE
+            # Check if phone number already exists FOR THIS SPECIFIC TYPE AND USER
             # This allows the same phone number to be registered for both 'calls' and 'messages' separately
+            # But each user can only register a phone number once per type
             # Exclude deleted phones from the check
             try:
                 existing = await collection.find_one({
                     "phoneNumber": normalized_phone,
                     "type": registration_type,  # Check within the same type only
+                    "userId": user_id,  # Check within the same user
                     "isDeleted": {"$ne": True}
                 })
                 if not existing:
                     # Also check if any phone with different format exists (normalize all and compare)
-                    # Exclude deleted phones and check within same type
+                    # Exclude deleted phones and check within same type and user
                     async for doc in collection.find({
                         "type": registration_type,
+                        "userId": user_id,
                         "isDeleted": {"$ne": True}
                     }):
                         stored_phone = doc.get("phoneNumber", "")
@@ -143,7 +146,7 @@ class MongoDBPhoneStore:
                     "webhookUrl": phone_data.get("webhookUrl"),
                     "statusCallbackUrl": phone_data.get("statusCallbackUrl"),
                     "smsWebhookUrl": phone_data.get("smsWebhookUrl"),  # Add SMS webhook support
-                    "userId": phone_data.get("userId"),
+                    "userId": user_id,  # Store user ID
                     "type": registration_type,  # Ensure type is set
                     "isDeleted": False,
                     "isActive": True,
@@ -160,10 +163,11 @@ class MongoDBPhoneStore:
             phone_data["phoneNumber"] = normalized_phone
             phone_data["originalPhoneNumber"] = phone_number  # Keep original for reference
             
-            # Add timestamps
+            # Add timestamps and user ID
             phone_data["created_at"] = datetime.utcnow().isoformat()
             phone_data["updated_at"] = datetime.utcnow().isoformat()
             phone_data["isActive"] = True
+            phone_data["userId"] = user_id  # Store user ID for multi-tenancy
             
             # NEW: Add isDeleted, uuid, and type
             phone_data["isDeleted"] = False
@@ -190,8 +194,8 @@ class MongoDBPhoneStore:
             logger.error(f"❌ Unexpected error registering phone number: {e}", exc_info=True)
             raise ValueError(f"Failed to register phone number due to an unexpected error: {str(e)}")
     
-    async def get_phone(self, phone_id: str) -> Optional[Dict[str, Any]]:
-        """Get a registered phone by ID"""
+    async def get_phone(self, phone_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get a registered phone by ID, optionally filtered by user_id"""
         if not is_mongodb_available():
             logger.debug("MongoDB not available, skipping phone retrieval")
             return None
@@ -202,7 +206,10 @@ class MongoDBPhoneStore:
                 return None
             
             from bson import ObjectId
-            phone = await collection.find_one({"_id": ObjectId(phone_id)})
+            query = {"_id": ObjectId(phone_id)}
+            if user_id:
+                query["userId"] = user_id  # Filter by user if provided
+            phone = await collection.find_one(query)
             
             if phone:
                 phone_dict = dict(phone)
@@ -215,12 +222,13 @@ class MongoDBPhoneStore:
             logger.error(f"Error getting phone {phone_id}: {e}")
             return None
     
-    async def get_phone_by_number(self, phone_number: str, type_filter: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    async def get_phone_by_number(self, phone_number: str, type_filter: Optional[str] = None, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get a registered phone by phone number (with normalization and optional type filtering)
         
         Args:
             phone_number: Phone number to lookup
             type_filter: Optional filter for 'calls' or 'messages' type
+            user_id: Optional user ID filter for multi-tenancy
         
         Returns:
             Phone dict if found, None otherwise
@@ -249,6 +257,10 @@ class MongoDBPhoneStore:
             if type_filter:
                 query["type"] = type_filter
             
+            # Add user filter if provided
+            if user_id:
+                query["userId"] = user_id
+            
             # First try exact match with normalized number
             phone = await collection.find_one(query)
             
@@ -264,6 +276,8 @@ class MongoDBPhoneStore:
             search_query = {"isDeleted": {"$ne": True}}
             if type_filter:
                 search_query["type"] = type_filter
+            if user_id:
+                search_query["userId"] = user_id
             
             async for doc in collection.find(search_query):
                 stored_phone = doc.get("phoneNumber", "")
@@ -281,12 +295,13 @@ class MongoDBPhoneStore:
             logger.error(f"Error getting phone by number {phone_number}: {e}")
             return None
     
-    async def list_phones(self, active_only: bool = True, type_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def list_phones(self, active_only: bool = True, type_filter: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """List all registered phone numbers
         
         Args:
             active_only: If True, only return active phones
             type_filter: Optional filter for 'calls' or 'messages'
+            user_id: Optional user ID filter for multi-tenancy
         
         Returns:
             List of phone dictionaries
@@ -311,7 +326,11 @@ class MongoDBPhoneStore:
             if type_filter:
                 query["type"] = type_filter
             
-            logger.debug(f"Querying phones with query: {query}, active_only={active_only}, type={type_filter}")
+            # Add user filter if provided
+            if user_id:
+                query["userId"] = user_id
+            
+            logger.debug(f"Querying phones with query: {query}, active_only={active_only}, type={type_filter}, user_id={user_id}")
             
             phones = []
             total_count = 0
@@ -366,7 +385,7 @@ class MongoDBPhoneStore:
             logger.error(f"Error updating phone {phone_id}: {e}")
             return False
     
-    async def delete_phone(self, phone_id: str) -> bool:
+    async def delete_phone(self, phone_id: str, user_id: Optional[str] = None) -> bool:
         """Soft delete a registered phone number (set isDeleted=True) and deactivate associated agents"""
         if not is_mongodb_available():
             logger.warning("MongoDB not available, skipping phone deletion")
@@ -380,7 +399,10 @@ class MongoDBPhoneStore:
             from bson import ObjectId
             
             # First, get the phone number before deleting (to deactivate associated agents)
-            phone_doc = await collection.find_one({"_id": ObjectId(phone_id)})
+            query = {"_id": ObjectId(phone_id)}
+            if user_id:
+                query["userId"] = user_id  # Only allow deletion if user owns the phone
+            phone_doc = await collection.find_one(query)
             if not phone_doc:
                 logger.warning(f"No phone found with ID {phone_id}")
                 return False

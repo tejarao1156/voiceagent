@@ -20,8 +20,11 @@ from models import (
     ConversationRequest, ConversationResponse, ConversationStartRequest, ConversationStartResponse,
     VoiceAgentProcessResponse, PersonaSummary,
     ErrorResponse, SuccessResponse,
-    PaginationRequest, PaginationResponse
+    PaginationRequest, PaginationResponse,
+    # Authentication models
+    UserRegistrationRequest, UserLoginRequest, UserLoginResponse, UserInfoResponse
 )
+
 
 import base64
 import webrtcvad
@@ -466,6 +469,290 @@ async def legacy_persona_catalog():
 async def legacy_persona_catalog_alias():
     """Alias for `/persona`."""
     return {"personas": _legacy_persona_payload()}
+
+# ============================================================================
+# AUTHENTICATION DEPENDENCY
+# ============================================================================
+
+async def get_current_active_user(request: Request) -> Dict[str, Any]:
+    """
+    Dependency to get the current active user from the JWT token.
+    Raises HTTPException if token is missing, invalid, or user is inactive.
+    
+    This should be used as a dependency in all protected endpoints:
+    @app.get("/api/protected")
+    async def protected_endpoint(user: Dict = Depends(get_current_active_user)):
+        # user contains: user_id, email, isActive, created_at
+        pass
+    """
+    try:
+        from utils.auth_utils import verify_jwt_token, get_cookie_settings
+        from databases.mongodb_user_store import MongoDBUserStore
+        
+        # Get token from cookie
+        cookie_settings = get_cookie_settings()
+        token = request.cookies.get(cookie_settings["key"])
+        
+        # Also check Authorization header for API clients
+        if not token:
+            auth_header = request.headers.get("Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header.split(" ")[1]
+        
+        if not token:
+            raise HTTPException(
+                status_code=401, 
+                detail="Not authenticated. Please log in."
+            )
+        
+        # Verify token
+        payload = verify_jwt_token(token)
+        if not payload:
+            raise HTTPException(
+                status_code=401, 
+                detail="Invalid or expired token. Please log in again."
+            )
+            
+        # Get user from database to ensure they still exist and are active
+        user_store = MongoDBUserStore()
+        user = await user_store.get_user_by_id(payload["user_id"])
+        
+        if not user:
+            raise HTTPException(
+                status_code=401, 
+                detail="User not found. Please log in again."
+            )
+            
+        if not user.get("isActive", True):
+            raise HTTPException(
+                status_code=403, 
+                detail="User account is inactive. Please contact support."
+            )
+            
+        return user
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Authentication error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Authentication failed")
+
+# ============================================================================
+# AUTHENTICATION ENDPOINTS
+# ============================================================================
+
+@app.post(
+    "/auth/register",
+    response_model=UserLoginResponse,
+    summary="User Registration",
+    description="Register a new user account with email and password",
+    tags=["Authentication"]
+)
+async def register_user(request: UserRegistrationRequest, response: Response):
+    """
+    Register a new user account.
+    
+    **Example usage**:
+    ```bash
+    curl -X POST "http://localhost:4002/auth/register" \
+         -H "Content-Type: application/json" \
+         -d '{"email": "user@example.com", "password": "securepassword123"}'
+    ```
+    """
+    try:
+        from databases.mongodb_user_store import MongoDBUserStore
+        from utils.auth_utils import generate_jwt_token, get_cookie_settings
+        
+        user_store = MongoDBUserStore()
+        
+        # Create user in MongoDB
+        user = await user_store.create_user(request.email, request.password)
+        
+        # Generate JWT token
+        token = generate_jwt_token(user["user_id"], user["email"])
+        
+        # Set HTTP-only cookie
+        cookie_settings = get_cookie_settings(secure=False)  # Set to True in production
+        response.set_cookie(
+            cookie_settings["key"],
+            token,
+            httponly=cookie_settings["httponly"],
+            samesite=cookie_settings["samesite"],
+            secure=cookie_settings["secure"],
+            max_age=cookie_settings["max_age"]
+        )
+        
+        logger.info(f"✅ User registered successfully: {user['email']}")
+        
+        return UserLoginResponse(
+            success=True,
+            message="User registered successfully",
+            token=token,
+            user={
+                "user_id": user["user_id"],
+                "email": user["email"],
+                "created_at": user["created_at"]
+            }
+        )
+    except Exception as e:
+        logger.error(f"Registration error: {str(e)}")
+        if "already exists" in str(e).lower():
+            raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(
+    "/auth/login",
+    response_model=UserLoginResponse,
+    summary="User Login",
+    description="Login with email and password to receive authentication token",
+    tags=["Authentication"]
+)
+async def login_user(request: UserLoginRequest, response: Response):
+    """
+    Login to existing user account.
+    
+    **Example usage**:
+    ```bash
+    curl -X POST "http://localhost:4002/auth/login" \
+         -H "Content-Type: application/json" \
+         -d '{"email": "user@example.com", "password": "securepassword123"}'
+    ```
+    """
+    try:
+        from databases.mongodb_user_store import MongoDBUserStore
+        from utils.auth_utils import generate_jwt_token, get_cookie_settings
+        
+        user_store = MongoDBUserStore()
+        
+        # Verify password and get user
+        user = await user_store.verify_password(request.email, request.password)
+        
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        if not user.get("isActive", True):
+            raise HTTPException(status_code=403, detail="Account is deactivated")
+        
+        # Generate JWT token
+        token = generate_jwt_token(user["user_id"], user["email"])
+        
+        # Set HTTP-only cookie
+        cookie_settings = get_cookie_settings(secure=False)  # Set to True in production
+        response.set_cookie(
+            cookie_settings["key"],
+            token,
+            httponly=cookie_settings["httponly"],
+            samesite=cookie_settings["samesite"],
+            secure=cookie_settings["secure"],
+            max_age=cookie_settings["max_age"]
+        )
+        
+        logger.info(f"✅ User logged in successfully: {user['email']}")
+        
+        return UserLoginResponse(
+            success=True,
+            message="Login successful",
+            token=token,
+            user={
+                "user_id": user["user_id"],
+                "email": user["email"],
+                "created_at": user.get("created_at")
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Login error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(
+    "/auth/logout",
+    summary="User Logout",
+    description="Logout and clear authentication session",
+    tags=["Authentication"]
+)
+async def logout_user(response: Response):
+    """
+    Logout user by clearing authentication cookie.
+    
+    **Example usage**:
+    ```bash
+    curl -X POST "http://localhost:4002/auth/logout"
+    ```
+    """
+    try:
+        from utils.auth_utils import get_cookie_settings
+        
+        cookie_settings = get_cookie_settings()
+        response.delete_cookie(cookie_settings["key"])
+        
+        logger.info("✅ User logged out successfully")
+        
+        return {"success": True, "message": "Logout successful"}
+    except Exception as e:
+        logger.error(f"Logout error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/auth/me",
+    response_model=UserInfoResponse,
+    summary="Get Current User",
+    description="Get information about the currently authenticated user",
+    tags=["Authentication"]
+)
+async def get_current_user(user: Dict[str, Any] = Depends(get_current_active_user)):
+    """
+    Get current user information from JWT token.
+    
+    **Example usage**:
+    ```bash
+    curl -X GET "http://localhost:4002/auth/me"
+    ```
+    """
+    return UserInfoResponse(
+        user_id=user["user_id"],
+        email=user["email"],
+        isActive=user.get("isActive", True),
+        created_at=user.get("created_at", "")
+    )
+
+@app.get(
+    "/auth/validate",
+    summary="Validate Session",
+    description="Check if current session is valid",
+    tags=["Authentication"]
+)
+async def validate_session(request: Request):
+    """
+    Validate if the authentication session is valid.
+    
+    **Example usage**:
+    ```bash
+    curl -X GET "http://localhost:4002/auth/validate"
+    ```
+    """
+    try:
+        from utils.auth_utils import verify_jwt_token, get_cookie_settings
+        
+        # Get token from cookie
+        cookie_settings = get_cookie_settings()
+        token = request.cookies.get(cookie_settings["key"])
+        
+        if not token:
+            return {"valid": False, "message": "No authentication token found"}
+        
+        # Verify token
+        payload = verify_jwt_token(token)
+        if not payload:
+            return {"valid": False, "message": "Invalid or expired token"}
+        
+        return {
+            "valid": True,
+            "user_id": payload.get("user_id"),
+            "email": payload.get("email")
+        }
+    except Exception as e:
+        logger.error(f"Validate session error: {str(e)}")
+        return {"valid": False, "message": str(e)}
 
 # ============================================================================
 # VOICE PROCESSING ENDPOINTS
@@ -2836,7 +3123,7 @@ async def nextjs_session_api(request: Request, path: str = ""):
         }
     }
 )
-async def create_agent(request: Request):
+async def create_agent(request: Request, user: Dict[str, Any] = Depends(get_current_active_user)):
     """
     Create a new agent with full configuration.
     
@@ -2907,8 +3194,8 @@ async def create_agent(request: Request):
 
         agent_store = MongoDBAgentStore()
         
-        # Create agent first (this returns the agent_id)
-        agent_id = await agent_store.create_agent(agent_data)
+        # Create agent with user_id for multi-tenancy
+        agent_id = await agent_store.create_agent(agent_data, user["user_id"])
         
         if not agent_id:
             logger.error("Failed to create agent - agent_store.create_agent returned None")
@@ -3001,10 +3288,11 @@ async def create_agent(request: Request):
 )
 async def list_agents(
     active_only: Optional[bool] = Query(False, description="Only return active agents (active=true)"),
-    include_deleted: Optional[bool] = Query(False, description="Include soft-deleted agents (isDeleted=true)")
+    include_deleted: Optional[bool] = Query(False, description="Include soft-deleted agents (isDeleted=true)"),
+    user: Dict[str, Any] = Depends(get_current_active_user)
 ):
     """
-    List all agents from MongoDB.
+    List all agents from MongoDB for the authenticated user.
     
     **Query Parameters:**
     - `active_only` (boolean, optional): If true, only returns agents where active=true
@@ -3023,9 +3311,14 @@ async def list_agents(
             return {"success": True, "agents": [], "count": 0, "mongodb_available": False}
         
         agent_store = MongoDBAgentStore()
-        agents = await agent_store.list_agents(active_only=active_only, include_deleted=include_deleted)
+        # Filter by user_id for multi-tenancy
+        agents = await agent_store.list_agents(
+            active_only=active_only, 
+            include_deleted=include_deleted,
+            user_id=user["user_id"]
+        )
         
-        logger.info(f"✅ Returning {len(agents)} agent(s) from MongoDB (include_deleted={include_deleted})")
+        logger.info(f"✅ User {user['email']} - Returning {len(agents)} agent(s) from MongoDB (active_only={active_only}, include_deleted={include_deleted})")
         return {"success": True, "agents": agents, "count": len(agents), "mongodb_available": True}
         
     except Exception as e:
@@ -3040,7 +3333,7 @@ async def list_agents(
     tags=["Message Agents"],
     response_model=Dict[str, Any]
 )
-async def create_message_agent(request: Request):
+async def create_message_agent(request: Request, user: Dict[str, Any] = Depends(get_current_active_user)):
     """
     Create a new messaging agent with configuration.
     
@@ -3086,8 +3379,8 @@ async def create_message_agent(request: Request):
         
         message_agent_store = MongoDBMessageAgentStore()
         
-        # Create message agent
-        agent_id = await message_agent_store.create_message_agent(agent_data)
+        # Create message agent with user_id
+        agent_id = await message_agent_store.create_message_agent(agent_data, user["user_id"])
         
         if not agent_id:
             logger.error("Failed to create message agent - create_message_agent returned None")
@@ -3122,10 +3415,10 @@ async def create_message_agent(request: Request):
 )
 async def list_message_agents(
     active_only: Optional[bool] = Query(False, description="Only return active agents (active=true)"),
-    include_deleted: Optional[bool] = Query(False, description="Include soft-deleted agents (isDeleted=true)")
+    include_deleted: Optional[bool] = Query(False, description="Include soft-deleted agents (isDeleted=true)"),
+    user: Dict[str, Any] = Depends(get_current_active_user)
 ):
-    """
-    List all messaging agents from MongoDB.
+    """List all messaging agents for the authenticated user
     
     **Query Parameters:**
     - `active_only` (boolean, optional): If true, only returns agents where active=true
@@ -3144,9 +3437,13 @@ async def list_message_agents(
             return {"success": True, "agents": [], "count": 0, "mongodb_available": False}
         
         message_agent_store = MongoDBMessageAgentStore()
-        agents = await message_agent_store.list_message_agents(active_only=active_only, include_deleted=include_deleted)
+        agents = await message_agent_store.list_message_agents(
+            active_only=active_only, 
+            include_deleted=include_deleted,
+            user_id=user["user_id"]
+        )
         
-        logger.info(f"✅ Returning {len(agents)} message agent(s) from MongoDB (include_deleted={include_deleted})")
+        logger.info(f"✅ User {user['email']} - Returning {len(agents)} message agent(s)")
         return {"success": True, "agents": agents, "count": len(agents), "mongodb_available": True}
         
     except Exception as e:
@@ -3194,8 +3491,11 @@ async def update_message_agent(agent_id: str, request: Request):
     tags=["Message Agents"],
     response_model=Dict[str, Any]
 )
-async def delete_message_agent(agent_id: str):
-    """Delete a messaging agent (soft delete)"""
+async def delete_message_agent(
+    agent_id: str,
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Delete a messaging agent (soft delete) - only if user owns it"""
     try:
         from databases.mongodb_message_agent_store import MongoDBMessageAgentStore
         from databases.mongodb_db import is_mongodb_available
@@ -3204,10 +3504,12 @@ async def delete_message_agent(agent_id: str):
             raise HTTPException(status_code=503, detail="MongoDB is not available")
         
         message_agent_store = MongoDBMessageAgentStore()
-        success = await message_agent_store.delete_message_agent(agent_id)
+        success = await message_agent_store.delete_message_agent(agent_id, user_id=user["user_id"])
         
         if not success:
-            raise HTTPException(status_code=404, detail="Message agent not found")
+            raise HTTPException(status_code=404, detail="Message agent not found or you don't have permission to delete it")
+        
+        logger.info(f"✅ User {user['email']} deleted message agent {agent_id}")
         
         return {"success": True, "message": "Message agent deleted successfully"}
         
@@ -3305,7 +3607,7 @@ async def get_available_voices():
         }
     }
 )
-async def register_phone(request: Request):
+async def register_phone(request: Request, user: Dict[str, Any] = Depends(get_current_active_user)):
     """
     Register a new phone number with Twilio credentials.
     
@@ -3315,14 +3617,13 @@ async def register_phone(request: Request):
     - `twilioAccountSid` (string, required): Twilio Account SID
     - `twilioAuthToken` (string, required): Twilio Auth Token
     - `twilioAccountName` (string, optional): Descriptive name for when to use this account (e.g., "Twilio 0", "Twilio 1", "Production")
-    - `userId` (string, optional): User/tenant ID (for multi-tenant support)
     
     **Returns:**
     - Webhook URLs (incoming and status callback) that should be configured in Twilio Console
     """
     try:
         phone_data = await request.json()
-        logger.info(f"Received phone registration request for: {phone_data.get('phoneNumber')} (type: {phone_data.get('type', 'calls')})")
+        logger.info(f"📞 User {user['email']} registering phone: {phone_data.get('phoneNumber')} (type: {phone_data.get('type', 'calls')})")
         
         from databases.mongodb_phone_store import MongoDBPhoneStore
         from databases.mongodb_db import is_mongodb_available
@@ -3356,32 +3657,31 @@ async def register_phone(request: Request):
         status_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/status"
         sms_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/sms"
         
-        # Prepare phone data
+        # Prepare phone data (userId will be added by register_phone)
         registration_data = {
             "phoneNumber": phone_number,
             "provider": provider,
             "twilioAccountSid": twilio_account_sid,
             "twilioAuthToken": twilio_auth_token,
-            "twilioAccountName": phone_data.get("twilioAccountName", "Twilio 0"),  # Default to "Twilio 0"
+            "twilioAccountName": phone_data.get("twilioAccountName", "Two 0"),  # Default to "Twilio 0"
             "webhookUrl": incoming_url,
             "statusCallbackUrl": status_url,
             "smsWebhookUrl": sms_url,  # Add SMS webhook URL
-            "userId": phone_data.get("userId"),
             "type": phone_data.get("type", "calls")  # Default to 'calls'
         }
         
-        # Register phone (with duplicate validation)
+        # Register phone (with duplicate validation) - pass user_id
         try:
-            phone_id = await phone_store.register_phone(registration_data)
+            phone_id = await phone_store.register_phone(registration_data, user["user_id"])
         except ValueError as e:
             # Duplicate phone number validation error
             error_message = str(e)
-            logger.warning(f"❌ Duplicate phone registration attempt: {phone_number} - {error_message}")
+            logger.warning(f"❌ Duplicate phone registration attempt by {user['email']}: {phone_number} - {error_message}")
             raise HTTPException(status_code=409, detail=error_message)
         except Exception as e:
             # Catch any other exceptions from register_phone (e.g., MongoDB errors)
             error_message = f"Failed to register phone number: {str(e)}"
-            logger.error(f"❌ Error registering phone {phone_number}: {e}", exc_info=True)
+            logger.error(f"❌ Error registering phone {phone_number} for user {user['email']}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=error_message)
         
         if not phone_id:
@@ -3516,9 +3816,10 @@ async def register_phone_alias(request: Request):
 )
 async def list_phones(
     active_only: bool = Query(False, description="Only return active phones"),
-    type: Optional[str] = Query(None, description="Filter by type ('calls' or 'messages')")
+    type: Optional[str] = Query(None, description="Filter by type ('calls' or 'messages')"),
+    user: Dict[str, Any] = Depends(get_current_active_user)
 ):
-    """List all registered phone numbers"""
+    """List all registered phone numbers for the authenticated user"""
     try:
         from databases.mongodb_phone_store import MongoDBPhoneStore
         from databases.mongodb_db import is_mongodb_available
@@ -3534,9 +3835,10 @@ async def list_phones(
             }
         
         phone_store = MongoDBPhoneStore()
-        phones = await phone_store.list_phones(active_only=active_only, type_filter=type)
+        # Filter by user_id to only show this user's phones
+        phones = await phone_store.list_phones(active_only=active_only, type_filter=type, user_id=user["user_id"])
         
-        logger.info(f"✅ Found {len(phones)} phone(s) in MongoDB (active_only={active_only}, type={type})")
+        logger.info(f"✅ User {user['email']} - Found {len(phones)} phone(s) (active_only={active_only}, type={type})")
         if phones:
             logger.info(f"   Phone numbers: {[p.get('phoneNumber', 'N/A') for p in phones]}")
         
@@ -3577,7 +3879,10 @@ async def list_phones(
         }
     }
 )
-async def delete_phone(phone_id: str = Path(..., description="MongoDB Phone ID")):
+async def delete_phone(
+    phone_id: str = Path(..., description="MongoDB Phone ID"),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
     """
     Delete a registered phone number from MongoDB (soft delete).
     
@@ -3585,6 +3890,7 @@ async def delete_phone(phone_id: str = Path(..., description="MongoDB Phone ID")
     - `phone_id` (string, required): MongoDB ObjectID of the phone number
     
     **Note:** This is a soft delete - sets isDeleted=True. The phone remains in MongoDB for audit purposes.
+    **Security:** Users can only delete their own phone numbers.
     """
     try:
         from databases.mongodb_phone_store import MongoDBPhoneStore
@@ -3597,10 +3903,11 @@ async def delete_phone(phone_id: str = Path(..., description="MongoDB Phone ID")
             raise HTTPException(status_code=503, detail="MongoDB is not available. Please check MongoDB connection.")
         
         phone_store = MongoDBPhoneStore()
-        success = await phone_store.delete_phone(phone_id)
+        # Only allow deletion if user owns the phone
+        success = await phone_store.delete_phone(phone_id, user_id=user["user_id"])
         
         if success:
-            logger.info(f"✅ Phone {phone_id} soft deleted successfully")
+            logger.info(f"✅ User {user['email']} deleted phone {phone_id}")
             return {"success": True, "message": "Phone deleted successfully"}
         else:
             logger.warning(f"❌ Phone {phone_id} not found or deletion failed")
@@ -3788,7 +4095,10 @@ async def update_agent(agent_id: str = Path(..., description="MongoDB Agent ID")
         }
     }
 )
-async def delete_agent(agent_id: str = Path(..., description="MongoDB Agent ID")):
+async def delete_agent(
+    agent_id: str = Path(..., description="MongoDB Agent ID"),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
     """
     Delete an agent from MongoDB.
     
@@ -3801,9 +4111,10 @@ async def delete_agent(agent_id: str = Path(..., description="MongoDB Agent ID")
         from databases.mongodb_agent_store import MongoDBAgentStore
         
         agent_store = MongoDBAgentStore()
-        success = await agent_store.delete_agent(agent_id)
+        success = await agent_store.delete_agent(agent_id, user_id=user["user_id"])
         
         if success:
+            logger.info(f"✅ User {user['email']} deleted agent {agent_id}")
             return {"success": True, "message": "Agent deleted successfully"}
         else:
             raise HTTPException(status_code=404, detail="Agent not found")
@@ -3825,7 +4136,7 @@ async def delete_agent(agent_id: str = Path(..., description="MongoDB Agent ID")
     tags=["Prompts"],
     response_model=Dict[str, Any]
 )
-async def create_prompt(request: Request):
+async def create_prompt(request: Request, user: Dict[str, Any] = Depends(get_current_active_user)):
     """
     Create a new prompt for outgoing calls.
     
@@ -3853,7 +4164,7 @@ async def create_prompt(request: Request):
             raise HTTPException(status_code=503, detail="MongoDB is not available. Please check MongoDB connection.")
         
         prompt_store = MongoDBPromptStore()
-        prompt_id = await prompt_store.create_prompt(prompt_data)
+        prompt_id = await prompt_store.create_prompt(prompt_data, user["user_id"])
         
         if not prompt_id:
             logger.error("Failed to create prompt - create_prompt returned None")
@@ -3888,10 +4199,10 @@ async def create_prompt(request: Request):
     response_model=Dict[str, Any]
 )
 async def list_prompts(
-    phone_number_id: Optional[str] = Query(None, description="Filter by phone number ID")
+    phone_number_id: Optional[str] = Query(None, description="Filter by phone number ID"),
+    user: Dict[str, Any] = Depends(get_current_active_user)
 ):
-    """
-    List all prompts from MongoDB.
+    """List all prompts for the authenticated user
     
     **Query Parameters:**
     - `phone_number_id` (string, optional): Filter prompts by phone number ID
@@ -3909,9 +4220,9 @@ async def list_prompts(
             return {"success": True, "prompts": [], "count": 0, "mongodb_available": False}
         
         prompt_store = MongoDBPromptStore()
-        prompts = await prompt_store.list_prompts(phone_number_id=phone_number_id)
+        prompts = await prompt_store.list_prompts(phone_number_id=phone_number_id, user_id=user["user_id"])
         
-        logger.info(f"✅ Returning {len(prompts)} prompt(s) from MongoDB")
+        logger.info(f"✅ User {user['email']} - Returning {len(prompts)} prompt(s)")
         return {"success": True, "prompts": prompts, "count": len(prompts), "mongodb_available": True}
         
     except Exception as e:
@@ -4003,9 +4314,11 @@ async def update_prompt(prompt_id: str = Path(..., description="MongoDB Prompt I
     tags=["Prompts"],
     response_model=Dict[str, Any]
 )
-async def delete_prompt(prompt_id: str = Path(..., description="MongoDB Prompt ID")):
-    """
-    Delete a prompt from MongoDB (soft delete).
+async def delete_prompt(
+    prompt_id: str = Path(..., description="MongoDB Prompt ID"),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Delete a prompt from MongoDB (soft delete) - only if user owns it
     
     **Path Parameters:**
     - `prompt_id` (string, required): MongoDB ObjectID of the prompt
@@ -4020,9 +4333,10 @@ async def delete_prompt(prompt_id: str = Path(..., description="MongoDB Prompt I
             raise HTTPException(status_code=503, detail="MongoDB is not available")
         
         prompt_store = MongoDBPromptStore()
-        success = await prompt_store.delete_prompt(prompt_id)
+        success = await prompt_store.delete_prompt(prompt_id, user_id=user["user_id"])
         
         if success:
+            logger.info(f"✅ User {user['email']} deleted prompt {prompt_id}")
             return {"success": True, "message": "Prompt deleted successfully"}
         else:
             raise HTTPException(status_code=404, detail="Prompt not found")
@@ -4044,7 +4358,7 @@ async def delete_prompt(prompt_id: str = Path(..., description="MongoDB Prompt I
     tags=["Scheduled Calls"],
     response_model=Dict[str, Any]
 )
-async def create_scheduled_call(request: Request):
+async def create_scheduled_call(request: Request, user: Dict[str, Any] = Depends(get_current_active_user)):
     """
     Schedule a new outgoing call.
     
@@ -4100,7 +4414,7 @@ async def create_scheduled_call(request: Request):
             raise HTTPException(status_code=400, detail=f"Phone number is not registered or inactive. Please register the phone number first.")
         
         scheduled_call_store = MongoDBScheduledCallStore()
-        call_id = await scheduled_call_store.create_scheduled_call(call_data)
+        call_id = await scheduled_call_store.create_scheduled_call(call_data, user["user_id"])
         
         if not call_id:
             logger.error("Failed to create scheduled call - create_scheduled_call returned None")
@@ -4137,10 +4451,10 @@ async def create_scheduled_call(request: Request):
 async def list_scheduled_calls(
     phone_number_id: Optional[str] = Query(None, description="Filter by phone number ID"),
     status: Optional[str] = Query(None, description="Filter by status (pending, in_progress, completed, failed, cancelled)"),
-    call_type: Optional[str] = Query(None, description="Filter by call type (ai, normal)")
+    call_type: Optional[str] = Query(None, description="Filter by call type (ai, normal)"),
+    user: Dict[str, Any] = Depends(get_current_active_user)
 ):
-    """
-    List all scheduled calls from MongoDB.
+    """List all scheduled calls for the authenticated user
     
     **Query Parameters:**
     - `phone_number_id` (string, optional): Filter by phone number ID
@@ -4163,10 +4477,11 @@ async def list_scheduled_calls(
         calls = await scheduled_call_store.list_scheduled_calls(
             phone_number_id=phone_number_id,
             status=status,
-            call_type=call_type
+            call_type=call_type,
+            user_id=user["user_id"]
         )
         
-        logger.info(f"✅ Returning {len(calls)} scheduled call(s) from MongoDB")
+        logger.info(f"✅ User {user['email']} - Returning {len(calls)} scheduled call(s)")
         return {"success": True, "calls": calls, "count": len(calls), "mongodb_available": True}
         
     except Exception as e:
@@ -4258,9 +4573,11 @@ async def update_scheduled_call(call_id: str = Path(..., description="MongoDB Sc
     tags=["Scheduled Calls"],
     response_model=Dict[str, Any]
 )
-async def delete_scheduled_call(call_id: str = Path(..., description="MongoDB Scheduled Call ID")):
-    """
-    Delete a scheduled call from MongoDB (soft delete).
+async def delete_scheduled_call(
+    call_id: str = Path(..., description="MongoDB Scheduled Call ID"),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Delete a scheduled call from MongoDB (soft delete) - only if user owns it
     
     **Path Parameters:**
     - `call_id` (string, required): MongoDB ObjectID of the scheduled call
@@ -4275,9 +4592,10 @@ async def delete_scheduled_call(call_id: str = Path(..., description="MongoDB Sc
             raise HTTPException(status_code=503, detail="MongoDB is not available")
         
         scheduled_call_store = MongoDBScheduledCallStore()
-        success = await scheduled_call_store.delete_scheduled_call(call_id)
+        success = await scheduled_call_store.delete_scheduled_call(call_id, user_id=user["user_id"])
         
         if success:
+            logger.info(f"✅ User {user['email']} deleted scheduled call {call_id}")
             return {"success": True, "message": "Scheduled call deleted successfully"}
         else:
             raise HTTPException(status_code=404, detail="Scheduled call not found")
@@ -4467,21 +4785,21 @@ async def make_outbound_call(request: Request):
     {
         "from": "+15551234567",  // Your registered Twilio number (required)
         "to": "+15559876543",    // Destination number (required)
-        "context": "You are calling to follow up on a customer inquiry about product availability."  // Optional custom context
+        "context": "calling to follow up on product inquiry"  // Optional custom context
     }
     ```
     
     **Validation:**
-    - The 'from' phone number MUST be registered and active in MongoDB
-    - The 'to' phone number must be in valid E.164 format
-    - Custom context is optional - if not provided, uses agent's default system prompt
+    - The from phone number MUST be registered and active in MongoDB
+    - The to phone number must be in valid E.164 format
+    - Custom context is optional - if not provided, uses default agent system prompt
     
     **Flow:**
-    1. Validates 'from' number is registered and active
-    2. Gets Twilio credentials for the 'from' number
+    1. Validates from number is registered and active
+    2. Gets Twilio credentials for the from number
     3. Initiates call via Twilio REST API
-    4. When call connects, webhook uses 'from' number to identify agent
-    5. Custom context (if provided) is used instead of agent's default prompt
+    4. When call connects, webhook uses from number to identify agent
+    5. Custom context (if provided) is used instead of default agent prompt
     """
     try:
         from databases.mongodb_phone_store import MongoDBPhoneStore, normalize_phone_number
@@ -4693,7 +5011,7 @@ async def make_outbound_call(request: Request):
 )
 async def twilio_fallback_handler(request: Request):
     """
-    Fallback handler for when Media Stream doesn't work.
+    Fallback handler for when Media Stream does not work.
     Uses simple TwiML with Say for more reliable operation.
     """
     try:
@@ -6384,7 +6702,27 @@ async def test_flow_text_conversation_turn(
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
+# CATCH-ALL ROUTE FOR NEXT.JS PAGES
+# ============================================================================
 
+# Catch-all route to proxy all other requests to Next.js
+# This must be defined LAST to avoid catching API routes
+@app.api_route(
+    "/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
+    include_in_schema=False,
+    summary="Next.js Catch-All",
+    description="Proxy all other routes to Next.js UI",
+    tags=["UI"]
+)
+async def nextjs_catchall(request: Request, path: str = ""):
+    """Catch-all route to proxy all other requests to Next.js"""
+    # Don't proxy API routes (they should be handled by FastAPI first)
+    if path.startswith("api/") and not path.startswith("api/session"):
+        # Let FastAPI return 404 for unhandled API routes
+        raise HTTPException(status_code=404, detail="Not Found")
+    
+    return await proxy_to_nextjs(request, path)
 
 
 @app.exception_handler(HTTPException)

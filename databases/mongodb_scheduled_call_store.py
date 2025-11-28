@@ -24,7 +24,7 @@ class MongoDBScheduledCallStore:
             return None
         return db[self.collection_name]
     
-    async def create_scheduled_call(self, call_data: Dict[str, Any]) -> Optional[str]:
+    async def create_scheduled_call(self, call_data: Dict[str, Any], user_id: str) -> Optional[str]:
         """Create a new scheduled call
         
         Args:
@@ -36,6 +36,7 @@ class MongoDBScheduledCallStore:
                 - promptId: Prompt ID for AI calls (optional, required for AI calls)
                 - promptContent: Prompt content (optional, for quick reference)
                 - status: "pending", "in_progress", "completed", "failed", "cancelled"
+            user_id: User ID for multi-tenancy
         
         Returns:
             Scheduled call ID if successful, None otherwise
@@ -66,11 +67,12 @@ class MongoDBScheduledCallStore:
             if call_data.get("callType") == "ai" and not call_data.get("promptId"):
                 raise ValueError("Prompt ID is required for AI calls")
             
-            # Add timestamps and metadata
+            # Add timestamps, metadata, and user ID
             call_data["created_at"] = datetime.utcnow().isoformat()
             call_data["updated_at"] = datetime.utcnow().isoformat()
             call_data["status"] = call_data.get("status", "scheduled")
             call_data["isDeleted"] = False
+            call_data["userId"] = user_id  # Store user ID for multi-tenancy
             
             # Insert scheduled call
             result = await collection.insert_one(call_data)
@@ -86,8 +88,8 @@ class MongoDBScheduledCallStore:
             logger.error(f"❌ Error creating scheduled call: {e}", exc_info=True)
             return None
     
-    async def get_scheduled_call(self, call_id: str) -> Optional[Dict[str, Any]]:
-        """Get a scheduled call by ID"""
+    async def get_scheduled_call(self, call_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get a scheduled call by ID, optionally filtered by user_id"""
         if not is_mongodb_available():
             logger.debug("MongoDB not available, skipping scheduled call retrieval")
             return None
@@ -98,10 +100,13 @@ class MongoDBScheduledCallStore:
                 return None
             
             from bson import ObjectId
-            call = await collection.find_one({
+            query = {
                 "_id": ObjectId(call_id),
                 "isDeleted": {"$ne": True}
-            })
+            }
+            if user_id:
+                query["userId"] = user_id
+            call = await collection.find_one(query)
             
             if call:
                 call_dict = dict(call)
@@ -118,7 +123,8 @@ class MongoDBScheduledCallStore:
         self, 
         phone_number_id: Optional[str] = None,
         status: Optional[str] = None,
-        call_type: Optional[str] = None
+        call_type: Optional[str] = None,
+        user_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """List scheduled calls with optional filters
         
@@ -126,6 +132,7 @@ class MongoDBScheduledCallStore:
             phone_number_id: Optional phone number ID to filter calls
             status: Optional status filter (scheduled, in_progress, completed, failed, cancelled)
             call_type: Optional call type filter (ai, normal)
+            user_id: Optional user ID for multi-tenancy filtering
         
         Returns:
             List of scheduled call dictionaries
@@ -148,6 +155,8 @@ class MongoDBScheduledCallStore:
                 query["status"] = status
             if call_type:
                 query["callType"] = call_type
+            if user_id:
+                query["userId"] = user_id
             
             logger.debug(f"Querying scheduled calls with query: {query}")
             
@@ -196,8 +205,13 @@ class MongoDBScheduledCallStore:
             logger.error(f"Error updating scheduled call {call_id}: {e}")
             return False
     
-    async def delete_scheduled_call(self, call_id: str) -> bool:
-        """Soft delete a scheduled call (set isDeleted=True)"""
+    async def delete_scheduled_call(self, call_id: str, user_id: Optional[str] = None) -> bool:
+        """Soft delete a scheduled call (set isDeleted=True)
+        
+        Args:
+            call_id: Scheduled call ID to delete
+            user_id: Optional user ID for validation (prevents users from deleting other users' calls)
+        """
         if not is_mongodb_available():
             logger.warning("MongoDB not available, skipping scheduled call deletion")
             return False
@@ -210,8 +224,11 @@ class MongoDBScheduledCallStore:
             from bson import ObjectId
             
             # Soft delete: set isDeleted to True
+            delete_query = {"_id": ObjectId(call_id)}
+            if user_id:
+                delete_query["userId"] = user_id
             result = await collection.update_one(
-                {"_id": ObjectId(call_id)},
+                delete_query,
                 {"$set": {
                     "isDeleted": True,
                     "updated_at": datetime.utcnow().isoformat()
