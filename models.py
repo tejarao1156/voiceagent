@@ -205,6 +205,33 @@ class PaginationResponse(BaseModel):
     pages: int = Field(..., description="Total pages")
 
 
+# Authentication Models
+class UserRegistrationRequest(BaseModel):
+    """User registration request model"""
+    email: str = Field(..., description="User email address", example="user@example.com")
+    password: str = Field(..., description="User password (min 6 characters)", min_length=6)
+
+class UserLoginRequest(BaseModel):
+    """User login request model"""
+    email: str = Field(..., description="User email address", example="user@example.com")
+    password: str = Field(..., description="User password")
+
+class UserLoginResponse(BaseModel):
+    """User login response model"""
+    success: bool = Field(..., description="Login success status")
+    message: str = Field(..., description="Response message")
+    token: Optional[str] = Field(None, description="JWT authentication token")
+    user: Optional[Dict[str, Any]] = Field(None, description="User information")
+
+class UserInfoResponse(BaseModel):
+    """User info response model"""
+    user_id: str = Field(..., description="User's unique UUID")
+    email: str = Field(..., description="User's email address")
+    isActive: bool = Field(..., description="Whether user account is active")
+    created_at: str = Field(..., description="Account creation timestamp")
+
+
+
 class PersonaSummary(BaseModel):
     """Lightweight persona metadata"""
     id: str = Field(..., description="Persona identifier", example="friendly_guide")
@@ -232,5 +259,10 @@ __all__ = [
     "VoiceAgentProcessResponse",
     "ErrorResponse", "SuccessResponse",
     "PaginationRequest", "PaginationResponse",
-    "PersonaSummary"
+    "PersonaSummary",
+    
+    # Authentication models
+    "UserRegistrationRequest", "UserLoginRequest",
+    "UserLoginResponse", "UserInfoResponse"
 ]
+

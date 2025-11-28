@@ -26,13 +26,17 @@ class MongoDBMessageAgentStore:
             return None
         return db[self.collection_name]
     
-    async def create_message_agent(self, agent_data: Dict[str, Any]) -> Optional[str]:
+    async def create_message_agent(self, agent_data: Dict[str, Any], user_id: str) -> Optional[str]:
         """Create a new messaging agent in MongoDB
         
+        Args:
+            agent_data: Agent configuration dictionary
+            user_id: User ID for multi-tenancy
+        
         Validation rules:
-        - If an agent with the same phone number exists, deactivate all existing agents with that number
-        - Only one agent per phone number can be active at a time
-        - If creating with active=True (or default), ensure no other agents with same phone are active
+        - If an agent with the same phone number exists for this user, deactivate all existing agents with that number
+        - Only one agent per phone number per user can be active at a time
+        - If creating with active=True (or default), ensure no other agents with same phone are active for this user
         """
         if not is_mongodb_available():
             logger.warning("MongoDB not available, skipping message agent creation")
@@ -67,11 +71,12 @@ class MongoDBMessageAgentStore:
             if will_be_active is None:
                 will_be_active = True  # Default to active
             
-            # If creating an active agent, deactivate all existing agents with the same phone number
+            # If creating an active agent, deactivate all existing agents with the same phone number FOR THIS USER
             if phone_number and will_be_active:
                 existing_agents = []
                 async for doc in collection.find({
                     "phoneNumber": phone_number,
+                    "userId": user_id,
                     "isDeleted": {"$ne": True}
                 }):
                     existing_agents.append(doc)
@@ -80,14 +85,15 @@ class MongoDBMessageAgentStore:
                     logger.info(f"Found {len(existing_agents)} existing message agent(s) with phone number {phone_number}")
                     
                     deactivate_result = await collection.update_many(
-                        {"phoneNumber": phone_number, "isDeleted": {"$ne": True}},
+                        {"phoneNumber": phone_number, "userId": user_id, "isDeleted": {"$ne": True}},
                         {"$set": {"active": False, "updated_at": datetime.utcnow().isoformat()}}
                     )
                     logger.info(f"Deactivated {deactivate_result.modified_count} existing message agent(s) with phone number {phone_number}")
             
-            # Add timestamps
+            # Add timestamps and user ID
             agent_data["created_at"] = datetime.utcnow().isoformat()
             agent_data["updated_at"] = datetime.utcnow().isoformat()
+            agent_data["userId"] = user_id  # Store user ID for multi-tenancy
             
             # Ensure new agent is active (unless explicitly set to False)
             if agent_data.get("active") is None:
@@ -115,8 +121,8 @@ class MongoDBMessageAgentStore:
             logger.error(f"❌ Error creating message agent in MongoDB: {e}", exc_info=True)
             return None
     
-    async def get_message_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
-        """Get a message agent by ID (excluding deleted ones)"""
+    async def get_message_agent(self, agent_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get a message agent by ID (excluding deleted ones), optionally filtered by user_id"""
         if not is_mongodb_available():
             logger.debug("MongoDB not available, skipping message agent retrieval")
             return None
@@ -139,10 +145,13 @@ class MongoDBMessageAgentStore:
                 logger.error(f"Invalid agent ID format: {agent_id} - {e}")
                 return None
             
-            agent = await collection.find_one({
+            query = {
                 "_id": object_id,
                 "isDeleted": {"$ne": True}
-            })
+            }
+            if user_id:
+                query["userId"] = user_id
+            agent = await collection.find_one(query)
             
             if agent:
                 # Convert ObjectId to string and add as 'id'
@@ -157,8 +166,8 @@ class MongoDBMessageAgentStore:
             logger.error(f"Error getting message agent: {e}", exc_info=True)
             return None
     
-    async def get_message_agent_by_phone(self, phone_number: str) -> Optional[Dict[str, Any]]:
-        """Get a message agent by phone number (excluding deleted ones)"""
+    async def get_message_agent_by_phone(self, phone_number: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get a message agent by phone number (excluding deleted ones), optionally filtered by user_id"""
         if not is_mongodb_available():
             logger.debug("MongoDB not available, skipping message agent retrieval")
             return None
@@ -171,10 +180,13 @@ class MongoDBMessageAgentStore:
             # Normalize phone number
             normalized_phone = normalize_phone_number(phone_number)
             
-            agent = await collection.find_one({
+            query = {
                 "phoneNumber": normalized_phone,
                 "isDeleted": {"$ne": True}
-            })
+            }
+            if user_id:
+                query["userId"] = user_id
+            agent = await collection.find_one(query)
             
             if agent:
                 # Convert ObjectId to string and add as 'id'
@@ -189,12 +201,13 @@ class MongoDBMessageAgentStore:
             logger.error(f"Error getting message agent by phone: {e}", exc_info=True)
             return None
     
-    async def list_message_agents(self, active_only: bool = False, include_deleted: bool = False) -> List[Dict[str, Any]]:
+    async def list_message_agents(self, active_only: bool = False, include_deleted: bool = False, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """List all message agents
         
         Args:
             active_only: If True, only return agents where active=True
             include_deleted: If True, include soft-deleted agents (isDeleted=True)
+            user_id: If provided, only return agents for this user (multi-tenancy)
         """
         if not is_mongodb_available():
             logger.debug("MongoDB not available, skipping message agent list")
@@ -231,6 +244,10 @@ class MongoDBMessageAgentStore:
             # Handle active filter
             if active_only:
                 query["active"] = True
+            
+            # Handle user filter for multi-tenancy
+            if user_id:
+                query["userId"] = user_id
             
             # Query and convert
             agents = []
@@ -307,8 +324,13 @@ class MongoDBMessageAgentStore:
             logger.error(f"Error updating message agent: {e}", exc_info=True)
             return False
     
-    async def delete_message_agent(self, agent_id: str) -> bool:
-        """Soft delete a message agent (set isDeleted=True)"""
+    async def delete_message_agent(self, agent_id: str, user_id: Optional[str] = None) -> bool:
+        """Soft delete a message agent (set isDeleted=True)
+        
+        Args:
+            agent_id: Agent ID to delete
+            user_id: Optional user ID for validation (prevents users from deleting other users' agents)
+        """
         if not is_mongodb_available():
             logger.warning("MongoDB not available, skipping message agent deletion")
             return False
@@ -331,8 +353,11 @@ class MongoDBMessageAgentStore:
                 logger.error(f"Invalid agent ID format: {agent_id} - {e}")
                 return False
             
+            delete_query = {"_id": object_id}
+            if user_id:
+                delete_query["userId"] = user_id
             result = await collection.update_one(
-                {"_id": object_id},
+                delete_query,
                 {"$set": {"isDeleted": True, "active": False, "updated_at": datetime.utcnow().isoformat()}}
             )
             

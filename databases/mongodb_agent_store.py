@@ -25,13 +25,17 @@ class MongoDBAgentStore:
             return None
         return db[self.collection_name]
     
-    async def create_agent(self, agent_data: Dict[str, Any]) -> Optional[str]:
+    async def create_agent(self, agent_data: Dict[str, Any], user_id: str) -> Optional[str]:
         """Create a new agent in MongoDB
         
+        Args:
+            agent_data: Agent configuration dictionary
+            user_id: User ID for multi-tenancy
+        
         Validation rules:
-        - If an agent with the same phone number exists, deactivate all existing agents with that number
-        - Only one agent per phone number can be active at a time
-        - If creating with active=True (or default), ensure no other agents with same phone are active
+        - If an agent with the same phone number exists for this user, deactivate all existing agents with that number
+        - Only one agent per phone number per user can be active at a time
+        - If creating with active=True (or default), ensure no other agents with same phone are active for this user
         """
         if not is_mongodb_available():
             logger.warning("MongoDB not available, skipping agent creation")
@@ -59,20 +63,21 @@ class MongoDBAgentStore:
             if will_be_active is None:
                 will_be_active = True  # Default to active
             
-            # If creating an active agent, deactivate all existing agents with the same phone number
+            # If creating an active agent, deactivate all existing agents with the same phone number FOR THIS USER
             # Check both exact match and normalized match
             if phone_number and will_be_active:
                 existing_agents = []
-                # First try exact match
+                # First try exact match (scoped to user)
                 async for doc in collection.find({
                     "phoneNumber": phone_number,
+                    "userId": user_id,
                     "isDeleted": {"$ne": True}
                 }):
                     existing_agents.append(doc)
                 
                 # Also check normalized matches (for backward compatibility with old formats)
                 if not existing_agents:
-                    async for doc in collection.find({"isDeleted": {"$ne": True}}):
+                    async for doc in collection.find({"userId": user_id, "isDeleted": {"$ne": True}}):
                         stored_phone = doc.get("phoneNumber", "")
                         if normalize_phone_number(stored_phone) == phone_number:
                             existing_agents.append(doc)
@@ -87,23 +92,24 @@ class MongoDBAgentStore:
                         logger.warning(f"Agent with same name '{agent_name}' and phone '{phone_number}' already exists")
                         # User might be trying to create a duplicate - we'll still create it but deactivate old ones
                     
-                    # Deactivate all existing agents with this phone number (normalized match)
+                    # Deactivate all existing agents with this phone number (normalized match) FOR THIS USER
                     # Get all phone numbers that normalize to the same value
                     phone_numbers_to_deactivate = [phone_number]
-                    async for doc in collection.find({"isDeleted": {"$ne": True}}):
+                    async for doc in collection.find({"userId": user_id, "isDeleted": {"$ne": True}}):
                         stored_phone = doc.get("phoneNumber", "")
                         if stored_phone not in phone_numbers_to_deactivate and normalize_phone_number(stored_phone) == phone_number:
                             phone_numbers_to_deactivate.append(stored_phone)
                     
                     deactivate_result = await collection.update_many(
-                        {"phoneNumber": {"$in": phone_numbers_to_deactivate}, "isDeleted": {"$ne": True}},
+                        {"phoneNumber": {"$in": phone_numbers_to_deactivate}, "userId": user_id, "isDeleted": {"$ne": True}},
                         {"$set": {"active": False, "updated_at": datetime.utcnow().isoformat()}}
                     )
                     logger.info(f"Deactivated {deactivate_result.modified_count} existing agent(s) with phone number {phone_number} to ensure only one active agent per number")
             
-            # Add timestamps
+            # Add timestamps and user ID
             agent_data["created_at"] = datetime.utcnow().isoformat()
             agent_data["updated_at"] = datetime.utcnow().isoformat()
+            agent_data["userId"] = user_id  # Store user ID for multi-tenancy
             
             # Ensure new agent is active (unless explicitly set to False)
             if agent_data.get("active") is None:
@@ -128,8 +134,8 @@ class MongoDBAgentStore:
             logger.error(f"❌ Error creating agent in MongoDB: {e}", exc_info=True)
             return None
     
-    async def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
-        """Get an agent by ID (excluding deleted ones)"""
+    async def get_agent(self, agent_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get an agent by ID (excluding deleted ones), optionally filtered by user_id"""
         if not is_mongodb_available():
             logger.debug("MongoDB not available, skipping agent retrieval")
             return None
@@ -140,10 +146,13 @@ class MongoDBAgentStore:
                 return None
             
             from bson import ObjectId
-            agent = await collection.find_one({
+            query = {
                 "_id": ObjectId(agent_id),
                 "isDeleted": {"$ne": True}
-            })
+            }
+            if user_id:
+                query["userId"] = user_id  # Filter by user if provided
+            agent = await collection.find_one(query)
             
             if agent:
                 # Convert ObjectId to string and add as 'id'
@@ -158,8 +167,8 @@ class MongoDBAgentStore:
             logger.error(f"Error getting agent from MongoDB: {e}")
             return None
     
-    async def get_agent_by_phone(self, phone_number: str) -> Optional[Dict[str, Any]]:
-        """Get an agent by phone number (with normalization)"""
+    async def get_agent_by_phone(self, phone_number: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get an agent by phone number (with normalization), optionally filtered by user_id"""
         if not is_mongodb_available():
             logger.debug("MongoDB not available, skipping agent retrieval")
             return None
@@ -174,10 +183,13 @@ class MongoDBAgentStore:
             logger.debug(f"Looking up agent by phone: '{phone_number}' -> normalized: '{normalized_phone}'")
             
             # First try exact match with normalized number
-            agent = await collection.find_one({
+            query = {
                 "phoneNumber": normalized_phone,
                 "isDeleted": {"$ne": True}
-            })
+            }
+            if user_id:
+                query["userId"] = user_id
+            agent = await collection.find_one(query)
             
             if agent:
                 agent_dict = dict(agent)
@@ -187,7 +199,10 @@ class MongoDBAgentStore:
                 return agent_dict
             
             # If not found, try to find by normalizing all stored agents
-            async for doc in collection.find({"isDeleted": {"$ne": True}}):
+            search_query = {"isDeleted": {"$ne": True}}
+            if user_id:
+                search_query["userId"] = user_id
+            async for doc in collection.find(search_query):
                 stored_phone = doc.get("phoneNumber", "")
                 if normalize_phone_number(stored_phone) == normalized_phone:
                     agent_dict = dict(doc)
@@ -203,12 +218,13 @@ class MongoDBAgentStore:
             logger.error(f"Error getting agent by phone from MongoDB: {e}")
             return None
     
-    async def list_agents(self, active_only: bool = False, include_deleted: bool = False) -> List[Dict[str, Any]]:
+    async def list_agents(self, active_only: bool = False, include_deleted: bool = False, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """List all agents
         
         Args:
             active_only: If True, only return agents where active=True
             include_deleted: If True, include soft-deleted agents (isDeleted=True)
+            user_id: If provided, only return agents for this user (multi-tenancy)
         """
         if not is_mongodb_available():
             logger.debug("MongoDB not available, skipping agent list")
@@ -248,6 +264,10 @@ class MongoDBAgentStore:
             if active_only:
                 # For active_only, also require active field to be True
                 query["active"] = True
+            
+            # Handle user filter for multi-tenancy
+            if user_id:
+                query["userId"] = user_id
             
             cursor = collection.find(query).sort("created_at", -1)
             agents = []
@@ -297,12 +317,17 @@ class MongoDBAgentStore:
             logger.error(f"Error listing agents from MongoDB: {e}")
             return []
     
-    async def update_agent(self, agent_id: str, updates: Dict[str, Any]) -> bool:
+    async def update_agent(self, agent_id: str, updates: Dict[str, Any], user_id: Optional[str] = None) -> bool:
         """Update an agent (phone number cannot be updated)
         
+        Args:
+            agent_id: Agent ID to update
+            updates: Dictionary of fields to update
+            user_id: Optional user ID for validation (prevents users from updating other users' agents)
+        
         Validation rules:
-        - If setting active=True, deactivate all other agents with the same phone number
-        - Only one agent per phone number can be active at a time
+        - If setting active=True, deactivate all other agents with the same phone number for this user
+        - Only one agent per phone number per user can be active at a time
         """
         if not is_mongodb_available():
             logger.debug("MongoDB not available, skipping agent update")
@@ -323,25 +348,29 @@ class MongoDBAgentStore:
                 logger.warning(f"Attempted to update isDeleted for agent {agent_id} - use delete_agent method instead")
                 del updates["isDeleted"]
             
-            # If activating an agent, deactivate all other agents with the same phone number
+            # If activating an agent, deactivate all other agents with the same phone number FOR THIS USER
             if updates.get("active") is True:
                 from bson import ObjectId
                 # Get the current agent to find its phone number
-                current_agent = await collection.find_one({
-                    "_id": ObjectId(agent_id),
-                    "isDeleted": {"$ne": True}
-                })
+                query = {"_id": ObjectId(agent_id), "isDeleted": {"$ne": True}}
+                if user_id:
+                    query["userId"] = user_id  # Validate user owns this agent
+                current_agent = await collection.find_one(query)
                 
                 if current_agent:
                     phone_number = current_agent.get("phoneNumber")
+                    agent_user_id = current_agent.get("userId")  # Get user from agent
                     if phone_number:
-                        # Deactivate all other agents with the same phone number (excluding this one)
+                        # Deactivate all other agents with the same phone number FOR THIS USER (excluding this one)
+                        deactivate_query = {
+                            "phoneNumber": phone_number,
+                            "_id": {"$ne": ObjectId(agent_id)},
+                            "isDeleted": {"$ne": True}
+                        }
+                        if agent_user_id:
+                            deactivate_query["userId"] = agent_user_id
                         deactivate_result = await collection.update_many(
-                            {
-                                "phoneNumber": phone_number,
-                                "_id": {"$ne": ObjectId(agent_id)},
-                                "isDeleted": {"$ne": True}
-                            },
+                            deactivate_query,
                             {"$set": {"active": False, "updated_at": datetime.utcnow().isoformat()}}
                         )
                         if deactivate_result.modified_count > 0:
@@ -353,8 +382,11 @@ class MongoDBAgentStore:
             updates["updated_at"] = datetime.utcnow().isoformat()
             
             from bson import ObjectId
+            update_query = {"_id": ObjectId(agent_id), "isDeleted": {"$ne": True}}
+            if user_id:
+                update_query["userId"] = user_id  # Only update if user owns the agent
             result = await collection.update_one(
-                {"_id": ObjectId(agent_id), "isDeleted": {"$ne": True}},
+                update_query,
                 {"$set": updates}
             )
             
@@ -429,8 +461,13 @@ class MongoDBAgentStore:
             logger.error(f"Error deactivating agents by phone in MongoDB: {e}", exc_info=True)
             return 0
     
-    async def delete_agent(self, agent_id: str) -> bool:
-        """Soft delete an agent by setting isDeleted to True"""
+    async def delete_agent(self, agent_id: str, user_id: Optional[str] = None) -> bool:
+        """Soft delete an agent by setting isDeleted to True
+        
+        Args:
+            agent_id: Agent ID to delete
+            user_id: Optional user ID for validation (prevents users from deleting other users' agents)
+        """
         if not is_mongodb_available():
             logger.debug("MongoDB not available, skipping agent deletion")
             return False
@@ -442,8 +479,11 @@ class MongoDBAgentStore:
             
             from bson import ObjectId
             # Soft delete: set isDeleted to True instead of actually deleting
+            delete_query = {"_id": ObjectId(agent_id)}
+            if user_id:
+                delete_query["userId"] = user_id  # Only delete if user owns the agent
             result = await collection.update_one(
-                {"_id": ObjectId(agent_id)},
+                delete_query,
                 {"$set": {
                     "isDeleted": True,
                     "active": False,  # Also deactivate when deleting
