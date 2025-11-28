@@ -190,6 +190,17 @@ class ScheduledCallWorker:
             )
             
             logger.info(f"      ✅ Initiated call to {normalized_to}: {call.sid}")
+            
+            # Log the call to MongoDB calllogs collection
+            await self._log_call_to_mongodb(
+                call_sid=call.sid,
+                from_number=from_number,
+                to_number=normalized_to,
+                scheduled_call_id=scheduled_call_id,
+                direction="outbound",
+                status="initiated"
+            )
+            
             return {
                 "to": normalized_to,
                 "status": "initiated",
@@ -203,4 +214,35 @@ class ScheduledCallWorker:
                 "status": "failed",
                 "error": str(e)
             }
+    
+    async def _log_call_to_mongodb(
+        self,
+        call_sid: str,
+        from_number: str,
+        to_number: str,
+        scheduled_call_id: str,
+        direction: str,
+        status: str
+    ):
+        """Log the call to MongoDB calllogs collection"""
+        try:
+            from databases.mongodb_call_store import MongoDBCallStore
+            
+            call_store = MongoDBCallStore()
+            
+            # Create call log entry using the correct MongoDB interface
+            # The create_call method expects: call_sid, from_number, to_number as positional args
+            # and scheduled_call_id, is_scheduled as optional kwargs
+            await call_store.create_call(
+                call_sid=call_sid,
+                from_number=from_number,
+                to_number=to_number,
+                scheduled_call_id=scheduled_call_id,
+                is_scheduled=True
+            )
+            
+            logger.info(f"      📝 Logged call {call_sid} to MongoDB calllogs")
+            
+        except Exception as e:
+            logger.error(f"      ⚠️ Failed to log call {call_sid} to MongoDB: {e}", exc_info=True)
 
