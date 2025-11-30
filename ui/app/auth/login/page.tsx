@@ -29,7 +29,7 @@ export default function LoginPage() {
 
             if (response.ok && data.success) {
                 // Successful login - redirect to dashboard
-                router.push('/dashboard')
+                window.location.href = '/dashboard'
             } else {
                 setError(data.message || 'Invalid email or password')
             }

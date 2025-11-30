@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, KeyboardEvent } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useRouter } from 'next/navigation'
 import {
   Activity,
   Phone,
@@ -43,8 +44,11 @@ import {
   ChevronDown,
   ChevronUp,
   AlertCircle,
-  DollarSign
+  DollarSign,
+  LogOut,
+  Moon
 } from 'lucide-react'
+// import { useTheme } from '../components/ThemeProvider'
 
 // --- Components ---
 
@@ -53,7 +57,7 @@ const LightGlassCard = ({ children, className = "", delay = 0 }: { children: Rea
     initial={{ opacity: 0, y: 20 }}
     animate={{ opacity: 1, y: 0 }}
     transition={{ duration: 0.5, delay }}
-    className={`relative overflow-hidden rounded-2xl border border-white/60 bg-white/60 p-6 backdrop-blur-xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:shadow-[0_8px_30px_rgb(0,0,0,0.08)] transition-shadow duration-300 ${className}`}
+    className={`relative overflow-hidden rounded-2xl border border-white/60 dark:border-slate-700/60 bg-white/60 dark:bg-slate-800/60 p-6 backdrop-blur-xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.2)] hover:shadow-[0_8px_30px_rgb(0,0,0,0.08)] transition-shadow duration-300 ${className}`}
   >
     <div className="absolute -top-24 -right-24 h-48 w-48 rounded-full bg-blue-400/10 blur-3xl" />
     <div className="absolute -bottom-24 -left-24 h-48 w-48 rounded-full bg-purple-400/10 blur-3xl" />
@@ -86,8 +90,8 @@ const NavItem = ({ icon: Icon, label, active, onClick }: any) => (
   <button
     onClick={onClick}
     className={`relative flex w-full items-center space-x-3 rounded-xl px-4 py-3 text-sm font-medium transition-all duration-200 ${active
-      ? 'bg-white text-blue-600 shadow-md shadow-slate-200/50'
-      : 'text-slate-500 hover:bg-white/50 hover:text-slate-800'
+      ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400 shadow-md shadow-slate-200/50 dark:shadow-slate-900/50'
+      : 'text-slate-500 dark:text-slate-400 hover:bg-white/50 dark:hover:bg-slate-800/50 hover:text-slate-800 dark:hover:text-slate-200'
       }`}
   >
     <Icon className={`h-5 w-5 ${active ? 'text-blue-600' : 'text-slate-400'}`} />
@@ -3389,21 +3393,35 @@ const OutgoingAgentView = () => {
   )
 }
 
+
 export default function FuturisticDemo() {
+  const router = useRouter()
+  // const { theme, toggleTheme } = useTheme()
   const [activeTab, setActiveTab] = useState('dashboard')
   const [isLoaded, setIsLoaded] = useState(false)
+  const [showProfileMenu, setShowProfileMenu] = useState(false)
 
   useEffect(() => {
     setIsLoaded(true)
   }, [])
 
+  const handleLogout = async () => {
+    try {
+      await fetch('/auth/logout', { method: 'POST' })
+      router.push('/')
+    } catch (error) {
+      console.error('Logout failed:', error)
+    }
+  }
+
+
   return (
-    <div className="min-h-screen bg-[#F8FAFC] text-slate-800 font-sans selection:bg-blue-100 selection:text-blue-900">
+    <div className="min-h-screen bg-[#F8FAFC] dark:bg-slate-900 text-slate-800 dark:text-slate-100 font-sans selection:bg-blue-100 selection:text-blue-900 transition-colors duration-300">
       {/* Ambient Background Effects */}
       <div className="fixed inset-0 z-0 pointer-events-none overflow-hidden">
-        <div className="absolute -top-[20%] -left-[10%] h-[800px] w-[800px] rounded-full bg-blue-200/20 blur-[120px]" />
-        <div className="absolute top-[20%] right-[0%] h-[600px] w-[600px] rounded-full bg-purple-200/20 blur-[120px]" />
-        <div className="absolute bottom-0 left-1/3 h-[500px] w-[500px] rounded-full bg-emerald-100/30 blur-[100px]" />
+        <div className="absolute -top-[20%] -left-[10%] h-[800px] w-[800px] rounded-full bg-blue-200/20 dark:bg-blue-500/10 blur-[120px]" />
+        <div className="absolute top-[20%] right-[0%] h-[600px] w-[600px] rounded-full bg-purple-200/20 dark:bg-purple-500/10 blur-[120px]" />
+        <div className="absolute bottom-0 left-1/3 h-[500px] w-[500px] rounded-full bg-emerald-100/30 dark:bg-emerald-500/10 blur-[100px]" />
         <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-30 mix-blend-overlay"></div>
       </div>
 
@@ -3413,15 +3431,15 @@ export default function FuturisticDemo() {
           initial={{ x: -50, opacity: 0 }}
           animate={{ x: 0, opacity: 1 }}
           transition={{ duration: 0.6 }}
-          className="w-72 border-r border-slate-200/60 bg-white/50 backdrop-blur-2xl flex flex-col z-20"
+          className="w-72 border-r border-slate-200/60 dark:border-slate-700/60 bg-white/50 dark:bg-slate-900/50 backdrop-blur-2xl flex flex-col z-20"
         >
           <div className="p-6 flex items-center space-x-3">
             <div className="relative h-10 w-10 flex items-center justify-center rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white shadow-lg shadow-blue-500/20">
               <Radio className="h-6 w-6" />
             </div>
             <div>
-              <h1 className="text-xl font-black text-slate-800 tracking-tight">DoDash<span className="text-blue-600">.AI</span></h1>
-              <p className="text-[10px] text-slate-500 font-bold tracking-widest uppercase">Voice Intelligence</p>
+              <h1 className="text-xl font-black text-slate-800 dark:text-white tracking-tight">DoDash<span className="text-blue-600 dark:text-blue-400">.AI</span></h1>
+              <p className="text-[10px] text-slate-500 dark:text-slate-400 font-bold tracking-widest uppercase">Voice Intelligence</p>
             </div>
           </div>
 
@@ -3434,24 +3452,25 @@ export default function FuturisticDemo() {
             <NavItem icon={PhoneOutgoing} label="Outgoing Agent" active={activeTab === 'outgoing-agent'} onClick={() => setActiveTab('outgoing-agent')} />
             <NavItem icon={FileText} label="Prompts" active={activeTab === 'prompts'} onClick={() => setActiveTab('prompts')} />
             <NavItem icon={MessageSquare} label="Messaging Agents" active={activeTab === 'messaging-agents'} onClick={() => setActiveTab('messaging-agents')} />
-            <NavItem icon={MessageSquare} label="Messages" active={activeTab === 'messages'} onClick={() => setActiveTab('messages')} />
-            <NavItem icon={History} label="Call Logs" active={activeTab === 'logs'} onClick={() => setActiveTab('logs')} />
+            <NavItem icon={Send} label="Messages & SMS" active={activeTab === 'messages'} onClick={() => setActiveTab('messages')} />
+            <NavItem icon={History} label="Call History" active={activeTab === 'logs'} onClick={() => setActiveTab('logs')} />
             <NavItem icon={Volume2} label="Voice Customization" active={activeTab === 'voices'} onClick={() => setActiveTab('voices')} />
+            <NavItem icon={Link} label="Endpoints & Webhooks" active={activeTab === 'endpoints'} onClick={() => setActiveTab('endpoints')} />
 
             <div className="text-xs font-bold text-slate-400 uppercase tracking-wider px-4 mb-3 mt-8">System</div>
-            <NavItem icon={Globe} label="Endpoints" active={activeTab === 'endpoints'} onClick={() => setActiveTab('endpoints')} />
-            <NavItem icon={FileText} label="Activity Logs" active={activeTab === 'activity'} onClick={() => setActiveTab('activity')} />
+            <NavItem icon={Activity} label="Activity Logs" active={activeTab === 'activity'} onClick={() => setActiveTab('activity')} />
             <NavItem icon={Settings} label="Settings" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
           </nav>
 
-          <div className="p-4">
-            <div className="rounded-2xl bg-gradient-to-br from-slate-900 to-slate-800 p-4 text-white shadow-xl shadow-slate-900/10">
-              <div className="flex items-center space-x-3 mb-3">
-                <div className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
-                <span className="text-xs font-bold tracking-wide">SYSTEM OPERATIONAL</span>
+          <div className="p-4 border-t border-slate-200/60 dark:border-slate-700/60">
+            <div className="bg-gradient-to-br from-slate-800 to-slate-900 dark:from-slate-700 dark:to-slate-800 rounded-xl p-4 text-white relative overflow-hidden group cursor-pointer">
+              <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
+                <Cpu className="h-16 w-16" />
               </div>
-              <div className="h-1 w-full bg-white/10 rounded-full overflow-hidden">
-                <div className="h-full w-3/4 bg-gradient-to-r from-emerald-400 to-blue-400 rounded-full" />
+              <p className="text-xs font-medium text-slate-400 mb-1">System Status</p>
+              <div className="flex items-center space-x-2">
+                <div className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="font-bold text-sm">All Systems Operational</span>
               </div>
             </div>
           </div>
@@ -3468,7 +3487,7 @@ export default function FuturisticDemo() {
                   key={activeTab}
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className="text-3xl font-black text-slate-800 tracking-tight capitalize"
+                  className="text-3xl font-black text-slate-800 dark:text-white tracking-tight capitalize"
                 >
                   {activeTab === 'dashboard' ? 'Dashboard' :
 
@@ -3484,7 +3503,7 @@ export default function FuturisticDemo() {
                                       activeTab === 'settings' ? 'Settings' :
                                         'Command Center'}
                 </motion.h2>
-                <p className="text-slate-500 mt-1 font-medium">
+                <p className="text-slate-500 dark:text-slate-400 mt-1 font-medium">
                   {activeTab === 'dialer' ? 'Make calls and manage active connections.' :
 
                     activeTab === 'incoming-agent' ? 'Create and manage Voice Agents for your Business.' :
@@ -3502,13 +3521,59 @@ export default function FuturisticDemo() {
               </div>
 
               <div className="flex items-center space-x-4">
-                <button className="h-10 w-10 rounded-full bg-white flex items-center justify-center shadow-sm ring-1 ring-slate-200 hover:bg-slate-50 transition-colors relative">
-                  <Bell className="h-5 w-5 text-slate-600" />
-                  <span className="absolute top-2 right-2 h-2 w-2 rounded-full bg-red-500 ring-2 ring-white" />
+                {/* Temporarily disabled theme toggle
+                <button
+                  onClick={toggleTheme}
+                  className="h-10 w-10 rounded-full bg-white dark:bg-slate-800 flex items-center justify-center shadow-sm ring-1 ring-slate-200 dark:ring-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+                >
+                  {theme === 'dark' ? <Sun className="h-5 w-5 text-yellow-400" /> : <Moon className="h-5 w-5 text-slate-600" />}
                 </button>
-                <button className="h-10 w-10 rounded-full bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/30 transition-transform hover:scale-105">
-                  <Zap className="h-5 w-5 text-white" />
+                */}
+
+                <button className="h-10 w-10 rounded-full bg-white dark:bg-slate-800 flex items-center justify-center shadow-sm ring-1 ring-slate-200 dark:ring-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors relative">
+                  <Bell className="h-5 w-5 text-slate-600 dark:text-slate-300" />
+                  <span className="absolute top-2 right-2 h-2 w-2 rounded-full bg-red-500 ring-2 ring-white dark:ring-slate-800" />
                 </button>
+                <div className="relative">
+                  <button
+                    onClick={() => setShowProfileMenu(!showProfileMenu)}
+                    className="h-10 w-10 rounded-full bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/30 transition-transform hover:scale-105"
+                  >
+                    <User className="h-5 w-5 text-white" />
+                  </button>
+
+                  <AnimatePresence>
+                    {showProfileMenu && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                        className="absolute right-0 top-12 w-48 rounded-xl bg-white dark:bg-slate-800 shadow-xl ring-1 ring-black/5 dark:ring-white/10 p-1 z-50"
+                      >
+                        <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700">
+                          <p className="text-sm font-bold text-slate-800 dark:text-white">My Account</p>
+                          <p className="text-xs text-slate-500 dark:text-slate-400 truncate">user@example.com</p>
+                        </div>
+                        <div className="p-1">
+                          <button
+                            onClick={() => setActiveTab('settings')}
+                            className="flex w-full items-center space-x-2 rounded-lg px-3 py-2 text-sm text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+                          >
+                            <Settings className="h-4 w-4" />
+                            <span>Settings</span>
+                          </button>
+                          <button
+                            onClick={handleLogout}
+                            className="flex w-full items-center space-x-2 rounded-lg px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                          >
+                            <LogOut className="h-4 w-4" />
+                            <span>Sign Out</span>
+                          </button>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
               </div>
             </header>
 
