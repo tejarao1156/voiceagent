@@ -9,10 +9,11 @@ export function middleware(request: NextRequest) {
   const isAuthPage = pathname.startsWith('/auth/')
   const isProtectedPage = pathname.startsWith('/dashboard')
 
-  // 1. If user is on an auth page and has a token -> Redirect to Dashboard
-  if (isAuthPage && token) {
-    return NextResponse.redirect(new URL('/dashboard', request.url))
-  }
+  // 1. If user is on an auth page and has a token -> Allow access (don't redirect)
+  // This allows users to switch accounts or re-login if they want
+  // if (isAuthPage && token) {
+  //   return NextResponse.redirect(new URL('/dashboard', request.url))
+  // }
 
   // 2. If user is on a protected page (dashboard) and has NO token -> Redirect to Home
   if (isProtectedPage && !token) {

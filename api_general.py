@@ -11,6 +11,7 @@ import asyncio
 import os
 from datetime import datetime
 import httpx
+import websockets
 
 # Import all models from the unified models file
 from models import (
@@ -6700,6 +6701,45 @@ async def test_flow_text_conversation_turn(
     except Exception as e:
         logger.error(f"Error in conversation turn test: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# NEXT.JS HMR WEBSOCKET PROXY
+# ============================================================================
+
+@app.websocket("/_next/webpack-hmr")
+async def nextjs_hmr_proxy(websocket: WebSocket):
+    """Proxy WebSocket connection for Next.js Hot Module Replacement"""
+    await websocket.accept()
+    try:
+        # Connect to Next.js HMR server
+        nextjs_ws_url = f"{NEXTJS_INTERNAL_URL.replace('http', 'ws')}/_next/webpack-hmr"
+        async with websockets.connect(nextjs_ws_url) as nextjs_ws:
+            async def forward_to_nextjs():
+                try:
+                    while True:
+                        data = await websocket.receive_text()
+                        await nextjs_ws.send(data)
+                except Exception:
+                    pass
+
+            async def forward_to_client():
+                try:
+                    while True:
+                        data = await nextjs_ws.recv()
+                        await websocket.send_text(data)
+                except Exception:
+                    pass
+
+            # Run both forwarders concurrently
+            await asyncio.gather(forward_to_nextjs(), forward_to_client())
+    except Exception as e:
+        # It's normal for this to disconnect when page reloads
+        pass
+    finally:
+        try:
+            await websocket.close()
+        except:
+            pass
 
 # ============================================================================
 # CATCH-ALL ROUTE FOR NEXT.JS PAGES

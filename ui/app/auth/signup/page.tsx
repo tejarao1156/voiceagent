@@ -59,10 +59,10 @@ export default function SignupPage() {
             const data = await response.json()
 
             if (response.ok && data.success) {
-                // Successful registration
+                // Successful registration - redirect to login page
                 setSuccess(true)
                 setTimeout(() => {
-                    router.push('/dashboard')
+                    window.location.href = '/auth/login'
                 }, 1500)
             } else {
                 setError(data.detail || data.message || 'Registration failed')
@@ -86,7 +86,7 @@ export default function SignupPage() {
                         <CheckCircle2 className="h-12 w-12 text-green-600" />
                     </div>
                     <h2 className="text-3xl font-black text-slate-800 mb-2">Account Created!</h2>
-                    <p className="text-slate-600">Redirecting to dashboard...</p>
+                    <p className="text-slate-600">Redirecting to login page...</p>
                 </motion.div>
             </div>
         )
