@@ -10,7 +10,7 @@ cleanup() {
   echo "🔌 Shutting down services..."
   # Use pkill to find processes by name, which is more robust
   pkill -f "ngrok http 4002" || true
-  pkill -f "python.*main.py" || true
+  pkill -f "python3.*main.py" || true
   pkill -f "uvicorn.*main:app" || true
   pkill -f "node.*server.js" || true
   pkill -f "next.*dev" || true
@@ -23,7 +23,7 @@ trap cleanup INT TERM EXIT
 echo "🔍 Checking for existing services..."
 # Terminate any running instances before starting new ones to prevent port conflicts.
 pkill -f "ngrok http 4002" 2>/dev/null || true
-pkill -f "python.*main.py" 2>/dev/null || true
+pkill -f "python3.*main.py" 2>/dev/null || true
 pkill -f "uvicorn.*main:app" 2>/dev/null || true
 pkill -f "node.*server.js" 2>/dev/null || true
 pkill -f "next.*dev" 2>/dev/null || true
@@ -36,7 +36,7 @@ echo ""
 
 # --- Start the main API server ---
 echo "Starting Voice Agent API server (FastAPI)..."
-python "$SCRIPT_DIR/main.py" &
+python3 "$SCRIPT_DIR/main.py" &
 API_PID=$!
 
 # Wait a moment and check if the server started successfully
