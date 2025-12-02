@@ -31,9 +31,11 @@ export default function LoginPage() {
                 // Successful login - redirect to dashboard
                 window.location.href = '/dashboard'
             } else {
-                setError(data.message || 'Invalid email or password')
+                // Get error message from response (backend uses 'error' field)
+                setError(data.error || data.detail || data.message || 'Invalid email or password')
             }
         } catch (err) {
+            console.error('Login error:', err)
             setError('An error occurred. Please try again.')
         } finally {
             setLoading(false)

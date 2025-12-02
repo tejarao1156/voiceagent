@@ -594,11 +594,32 @@ async def register_user(request: UserRegistrationRequest, response: Response):
                 "created_at": user["created_at"]
             }
         )
+    except HTTPException:
+        # Re-raise HTTPExceptions as-is
+        raise
     except Exception as e:
-        logger.error(f"Registration error: {str(e)}")
-        if "already exists" in str(e).lower():
-            raise HTTPException(status_code=409, detail=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        error_msg = str(e)
+        logger.error(f"Registration error: {error_msg}")
+        
+        # Handle duplicate email error
+        if "already exists" in error_msg.lower():
+            raise HTTPException(
+                status_code=409, 
+                detail="An account with this email address already exists. Please use a different email or try logging in."
+            )
+        
+        # Handle MongoDB not available error
+        if "mongodb is not available" in error_msg.lower():
+            raise HTTPException(
+                status_code=503, 
+                detail="Database service is currently unavailable. Please try again later."
+            )
+        
+        # Handle other errors
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Registration failed: {error_msg}"
+        )
 
 @app.post(
     "/auth/login",

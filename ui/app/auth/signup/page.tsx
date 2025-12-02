@@ -65,9 +65,11 @@ export default function SignupPage() {
                     window.location.href = '/auth/login'
                 }, 1500)
             } else {
-                setError(data.detail || data.message || 'Registration failed')
+                // Get error message from response (backend uses 'error' field)
+                setError(data.error || data.detail || data.message || 'Registration failed')
             }
         } catch (err) {
+            console.error('Registration error:', err)
             setError('An error occurred. Please try again.')
         } finally {
             setLoading(false)
