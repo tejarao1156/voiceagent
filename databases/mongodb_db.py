@@ -33,9 +33,11 @@ def initialize_mongodb():
         # Create MongoDB client
         # For mongodb+srv:// URLs, TLS is automatically enabled by MongoDB
         # Increase timeout for better reliability
+        # tlsAllowInvalidCertificates=True is needed for macOS SSL certificate issues
         _mongo_client = AsyncIOMotorClient(
             MONGODB_URL,
-            serverSelectionTimeoutMS=10000  # 10 second timeout (increased from 5s)
+            serverSelectionTimeoutMS=10000,  # 10 second timeout (increased from 5s)
+            tlsAllowInvalidCertificates=True  # Fix for macOS SSL certificate verification
         )
         
         # Get database
