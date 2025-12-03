@@ -82,6 +82,14 @@ class VoiceInputResponse(BaseModel):
     """Voice input response model"""
     success: bool = Field(..., description="Whether the operation was successful")
     text: Optional[str] = Field(None, description="Transcribed text from audio")
+    transcription: Optional[str] = Field(
+        None,
+        description="Alias for transcription text (legacy clients expect this key)"
+    )
+    transcript: Optional[str] = Field(
+        None,
+        description="Another alias for transcription text"
+    )
     error: Optional[str] = Field(None, description="Error message if operation failed")
 
 class VoiceOutputRequest(BaseModel):
@@ -89,31 +97,58 @@ class VoiceOutputRequest(BaseModel):
     text: str = Field(..., description="Text to convert to speech", example="Hello, how can I help you?")
     voice: Optional[str] = Field(None, description="Voice to use; overrides persona voice if provided", example="alloy")
     persona: Optional[str] = Field(None, description="Persona identifier influencing voice and style", example="friendly_guide")
+    audio_format: Optional[str] = Field(None, description="Desired audio container (e.g., mp3)")
 
 class VoiceOutputResponse(BaseModel):
     """Voice output response model"""
     success: bool = Field(..., description="Whether the operation was successful")
     audio_base64: Optional[str] = Field(None, description="Base64 encoded audio data")
+    audioContent: Optional[str] = Field(
+        None,
+        description="CamelCase alias for base64 audio content (legacy clients)"
+    )
     text: Optional[str] = Field(None, description="Original text")
     error: Optional[str] = Field(None, description="Error message if operation failed")
     persona: Optional[str] = Field(None, description="Persona used for synthesis")
     voice: Optional[str] = Field(None, description="Voice identifier used for synthesis")
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Additional metadata like model, voice, duration, and byte length"
+    )
 
 # Conversation Models
 class ConversationRequest(BaseModel):
     """Conversation request model"""
-    text: str = Field(..., description="User input text", example="Hello, how can you help me?")
+    # Enable both attribute and alias-based population
+    model_config = {"populate_by_name": True}
+    
+    text: Optional[str] = Field(None, description="User input text", example="Hello, how can you help me?")
+    input_text: Optional[str] = Field(None, description="Legacy alias for user text")
+    user_input: Optional[str] = Field(None, description="Alternate user text field")
     session_id: Optional[str] = Field(None, description="Conversation session ID")
+    conversation_id: Optional[str] = Field(None, description="Legacy alias for session_id")
     customer_id: Optional[str] = Field(None, description="Customer ID")
-    persona: Optional[str] = Field(None, description="Persona identifier to use for this turn")
+    persona: Optional[str] = Field(None, description="Persona identifier (deprecated, use prompt)")
+    prompt: Optional[str] = Field(None, description="Custom prompt for AI behavior")
+    persona_id: Optional[str] = Field(None, description="Legacy persona identifier")
+
+    def resolved_text(self) -> str:
+        return self.text or self.input_text or self.user_input or ""
+
+    def resolved_session_id(self) -> Optional[str]:
+        return self.session_id or self.conversation_id
 
 class ConversationResponse(BaseModel):
     """Conversation response model"""
     response: str = Field(..., description="Agent response text")
     session_data: Dict[str, Any] = Field(..., description="Updated session data")
+    session_id: Optional[str] = Field(None, description="Echo of the session identifier for convenience")
     next_state: Optional[str] = Field(None, description="Next conversation state")
     actions: List[str] = Field(default=[], description="Actions to take")
-    persona: Optional[str] = Field(None, description="Persona that generated this response")
+    persona: Optional[Dict[str, Any]] = Field(None, description="Persona metadata that generated this response")
+    response_text: Optional[str] = Field(None, description="Alias for response text")
+    history: List[Dict[str, Any]] = Field(default_factory=list, description="Simplified conversation history")
+    voice_profile: Optional[Dict[str, Any]] = Field(None, description="Persona voice profile metadata")
 
 class ConversationStartRequest(BaseModel):
     """Conversation start request model"""
@@ -123,9 +158,11 @@ class ConversationStartRequest(BaseModel):
 class ConversationStartResponse(BaseModel):
     """Conversation start response model"""
     session_id: str = Field(..., description="New session ID")
+    conversation_id: Optional[str] = Field(None, description="Alias for session_id (legacy clients)")
     session_data: Dict[str, Any] = Field(..., description="Initial session data")
     message: str = Field(..., description="Success message")
-    persona: Optional[str] = Field(None, description="Persona associated with the session")
+    persona: Optional[Dict[str, Any]] = Field(None, description="Persona metadata associated with the session")
+    created_at: Optional[str] = Field(None, description="Timestamp when the session was created")
 
 # Voice Agent Pipeline Models
 class VoiceAgentProcessResponse(BaseModel):
@@ -168,6 +205,33 @@ class PaginationResponse(BaseModel):
     pages: int = Field(..., description="Total pages")
 
 
+# Authentication Models
+class UserRegistrationRequest(BaseModel):
+    """User registration request model"""
+    email: str = Field(..., description="User email address", example="user@example.com")
+    password: str = Field(..., description="User password (min 6 characters)", min_length=6)
+
+class UserLoginRequest(BaseModel):
+    """User login request model"""
+    email: str = Field(..., description="User email address", example="user@example.com")
+    password: str = Field(..., description="User password")
+
+class UserLoginResponse(BaseModel):
+    """User login response model"""
+    success: bool = Field(..., description="Login success status")
+    message: str = Field(..., description="Response message")
+    token: Optional[str] = Field(None, description="JWT authentication token")
+    user: Optional[Dict[str, Any]] = Field(None, description="User information")
+
+class UserInfoResponse(BaseModel):
+    """User info response model"""
+    user_id: str = Field(..., description="User's unique UUID")
+    email: str = Field(..., description="User's email address")
+    isActive: bool = Field(..., description="Whether user account is active")
+    created_at: str = Field(..., description="Account creation timestamp")
+
+
+
 class PersonaSummary(BaseModel):
     """Lightweight persona metadata"""
     id: str = Field(..., description="Persona identifier", example="friendly_guide")
@@ -195,5 +259,10 @@ __all__ = [
     "VoiceAgentProcessResponse",
     "ErrorResponse", "SuccessResponse",
     "PaginationRequest", "PaginationResponse",
-    "PersonaSummary"
+    "PersonaSummary",
+    
+    # Authentication models
+    "UserRegistrationRequest", "UserLoginRequest",
+    "UserLoginResponse", "UserInfoResponse"
 ]
+

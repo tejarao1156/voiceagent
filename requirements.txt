@@ -1,6 +1,7 @@
 fastapi==0.104.1
 uvicorn==0.24.0
 websockets==12.0
+websocket-client==1.8.0
 pydantic==2.5.0
 sqlalchemy==2.0.23
 alembic==1.13.1
@@ -17,4 +18,13 @@ httpx==0.25.2
 transformers>=4.35.0
 torch>=2.0.0
 soundfile>=0.12.1
-kokoro-tts>=0.1.0
+twilio>=8.0.0
+# MongoDB for conversation storage
+pymongo>=4.6.0
+motor>=3.3.0
+# Authentication dependencies
+bcrypt>=4.0.0
+PyJWT>=2.8.0
+
+# Voice Agent specific dependencies
+webrtcvad-wheels

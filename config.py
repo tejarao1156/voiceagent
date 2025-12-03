@@ -10,6 +10,13 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@localhost:5432/voiceagent")
 
 # ============================================================================
+# MONGODB CONFIGURATION (for conversation storage)
+# ============================================================================
+MONGODB_URL = os.getenv("MONGODB_URL", "")
+MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "voiceagent")
+MONGODB_CONVERSATIONS_COLLECTION = os.getenv("MONGODB_CONVERSATIONS_COLLECTION", "conversations")
+
+# ============================================================================
 # OPENAI CONFIGURATION
 # ============================================================================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -24,7 +31,7 @@ HF_TOKEN = os.getenv("HF_TOKEN")  # Required for fal-ai provider
 # VOICE PROCESSING CONFIGURATION
 # ============================================================================
 VOICE_MODEL = os.getenv("VOICE_MODEL", "whisper-1")
-TTS_MODEL = os.getenv("TTS_MODEL", "tts-1-hd")
+TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")  # Use tts-1 for faster response (lower latency)
 INFERENCE_MODEL = os.getenv("INFERENCE_MODEL", "gpt-4o-mini")
 
 # ============================================================================
@@ -69,3 +76,29 @@ SESSION_TIMEOUT_MINUTES = int(os.getenv("SESSION_TIMEOUT_MINUTES", "30"))
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+
+# ============================================================================
+# ENVIRONMENT DETECTION
+# ============================================================================
+from utils.environment_detector import detect_runtime_environment, get_webhook_base_url
+
+# Detect runtime environment (local, kubernetes, docker, unknown)
+RUNTIME_ENVIRONMENT = detect_runtime_environment()
+
+# ============================================================================
+# TWILIO CONFIGURATION
+# ============================================================================
+# Note: Twilio credentials MUST be registered through the app UI.
+# All credentials are stored in MongoDB via the "Register Phone Number" feature.
+# No credentials should be set in .env file - they are pulled from MongoDB only.
+
+# Get webhook base URL based on environment detection
+# This will automatically use:
+# - Explicit TWILIO_WEBHOOK_BASE_URL if set
+# - Kubernetes ingress/service URL if in pod
+# - ngrok URL if available locally
+# - localhost fallback otherwise
+TWILIO_WEBHOOK_BASE_URL = get_webhook_base_url()
+
+# Determines how to process calls: "batch" for <Record>, "stream" for Media Streams.
+TWILIO_PROCESSING_MODE = os.getenv("TWILIO_PROCESSING_MODE", "batch").lower()

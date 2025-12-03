@@ -14,7 +14,6 @@ import io
 
 from voice_processor import VoiceProcessor
 from conversation_manager import ConversationManager
-from database import SessionLocal
 from config import MAX_AUDIO_FILE_SIZE, ALLOWED_AUDIO_FORMATS
 
 logger = logging.getLogger(__name__)

@@ -107,7 +107,7 @@ app.prepare().then(() => {
 
   server.listen(port, (err) => {
     if (err) throw err;
-    console.log(`> Ready on http://${hostname}:${port}`);
+    console.log(`> Next.js server running internally on http://${hostname}:${port} (proxied through FastAPI on port 4002)`);
   });
 });
 

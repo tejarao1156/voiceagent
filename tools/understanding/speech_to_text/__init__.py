@@ -20,8 +20,14 @@ class SpeechToTextTool:
     def __init__(self, client: Optional[openai.OpenAI] = None) -> None:
         self.client = client or openai.OpenAI(api_key=OPENAI_API_KEY)
 
-    async def transcribe(self, audio_data: bytes, file_format: str = "wav") -> Dict[str, Any]:
-        """Transcribe raw audio bytes into text using OpenAI Whisper."""
+    async def transcribe(self, audio_data: bytes, file_format: str = "wav", model: Optional[str] = None) -> Dict[str, Any]:
+        """Transcribe raw audio bytes into text using OpenAI Whisper.
+        
+        Args:
+            audio_data: Raw audio bytes to transcribe
+            file_format: Audio file format (default: "wav")
+            model: Optional STT model override (e.g., "whisper-1"). If not provided, uses VOICE_MODEL from config.
+        """
         if not audio_data:
             return {
                 "success": False,
@@ -33,8 +39,11 @@ class SpeechToTextTool:
             audio_file = io.BytesIO(audio_data)
             audio_file.name = f"audio.{file_format}"
 
+            # Use provided model or fall back to config default
+            stt_model = model or VOICE_MODEL
+
             transcript = self.client.audio.transcriptions.create(
-                model=VOICE_MODEL,
+                model=stt_model,
                 file=audio_file,
                 response_format="text",
             )

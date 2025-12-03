@@ -35,16 +35,25 @@ class ConversationManager:
 7. Always be polite and helpful
 8. Keep responses concise but informative
 
+CRITICAL: Always respond to the MOST RECENT user query. The conversation history is provided for context, but you must prioritize and directly address the user's current/latest question or statement. Do not respond to questions from earlier in the conversation unless the user explicitly references them.
+
 Guidelines:
 - Be conversational and natural, not robotic
 - Ask one question at a time to avoid confusion
-- Handle interruptions gracefully
+- Handle interruptions gracefully - when interrupted, respond to the NEW question, not the previous one
 - Be patient with users who may be unclear
 - Always be polite and helpful
 - If you don't understand something, ask for clarification
 - Keep responses concise but informative
+- ALWAYS respond to the most recent user input - ignore older queries unless explicitly referenced
 
-Current conversation state will be provided to help you understand context."""
+Current conversation state will be provided to help you understand context.
+
+CRITICAL INSTRUCTIONS:
+- Always respond to the MOST RECENT user query.
+- If the user says something unclear or if you hear silence/noise, DO NOT say "Bye". Instead, ask "I'm sorry, I didn't catch that. Could you please repeat?" or "Are you still there?"
+- Only say "Bye" or end the conversation if the user explicitly says "Bye", "Goodbye", or indicates they want to end the call.
+- Never assume the conversation is over based on a short input."""
     
     def create_session(self, customer_id: Optional[str] = None) -> Dict[str, Any]:
         """Create a new conversation session"""
@@ -82,7 +91,10 @@ Current conversation state will be provided to help you understand context."""
         self,
         session_data: Dict[str, Any],
         user_input: str,
-        persona_config: Optional[Dict[str, Any]] = None
+        persona_config: Optional[Dict[str, Any]] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Process user input and generate appropriate response
@@ -104,8 +116,15 @@ Current conversation state will be provided to help you understand context."""
                 conversation_history = []
                 session_data["conversation_history"] = conversation_history
             
+            # Get custom system prompt from session_data if available (for messaging agents)
+            custom_system_prompt = session_data.get("system_prompt")
+            
             # Generate response using OpenAI with conversation history
-            response = await self._generate_response(context, user_input, conversation_history, persona_config)
+            response = await self._generate_response(
+                context, user_input, conversation_history, persona_config,
+                model=model, temperature=temperature, max_tokens=max_tokens,
+                custom_system_prompt=custom_system_prompt
+            )
             
             # Update session based on response
             session_data = self._update_session_from_response(session_data, user_input, response)
@@ -153,11 +172,18 @@ Current conversation history: {len(session_data.get('conversation_history', []))
         context: str,
         user_input: str,
         conversation_history: List[Dict[str, Any]],
-        persona_config: Optional[Dict[str, Any]] = None
+        persona_config: Optional[Dict[str, Any]] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        custom_system_prompt: Optional[str] = None
     ) -> Dict[str, Any]:
         """Generate response using OpenAI with conversation history"""
         try:
-            if persona_config and persona_config.get("conversation_prompt"):
+            # Use custom system prompt if provided (from agent config for messaging)
+            if custom_system_prompt:
+                system_prompt = custom_system_prompt
+            elif persona_config and persona_config.get("conversation_prompt"):
                 system_prompt = (
                     self.system_prompt
                     + "\n\nPersona Style Instructions:\n"
@@ -171,33 +197,52 @@ Current conversation history: {len(session_data.get('conversation_history', []))
                 {"role": "system", "content": system_prompt + "\n\nContext:\n" + context}
             ]
             
-            # Add ALL conversation history to maintain complete context
+            # CRITICAL: Add ALL conversation history to maintain complete context
+            # This ensures the AI has access to all previous questions and answers
             # Each interaction has user_input and agent_response
-            for interaction in conversation_history:
+            logger.info(f"📚 Building messages array with {len(conversation_history)} previous interactions")
+            for idx, interaction in enumerate(conversation_history):
                 # Add user message
                 if interaction.get("user_input"):
                     messages.append({
                         "role": "user",
                         "content": interaction["user_input"]
                     })
+                    logger.debug(f"   Added history[{idx}] user: '{interaction['user_input'][:50]}...'")
                 # Add assistant response
                 if interaction.get("agent_response"):
                     messages.append({
                         "role": "assistant",
                         "content": interaction["agent_response"]
                     })
+                    logger.debug(f"   Added history[{idx}] assistant: '{interaction['agent_response'][:50]}...'")
             
-            # Add current user input
+            # Add current user input (this is the question we're answering now)
             messages.append({"role": "user", "content": user_input})
+            logger.info(f"📝 Added current user input: '{user_input[:50]}...'")
+            logger.info(f"📊 Total messages being sent to AI: {len(messages)} (1 system + {len(conversation_history) * 2} history + 1 current)")
             
-            response = self.client.chat.completions.create(
-                model=INFERENCE_MODEL,
+            # Use provided model/temperature/maxTokens or fall back to defaults
+            inference_model = model or INFERENCE_MODEL
+            temp = temperature if temperature is not None else 0.7
+            max_toks = max_tokens if max_tokens is not None else 800
+            
+            # Use streaming for faster response (get chunks as they arrive)
+            stream = self.client.chat.completions.create(
+                model=inference_model,
                 messages=messages,
-                temperature=0.7,
-                max_tokens=800  # Increased to allow better responses with context
+                temperature=temp,
+                max_tokens=max_toks,
+                stream=True  # Enable streaming for faster first token
             )
             
-            response_text = response.choices[0].message.content.strip()
+            # Collect streaming response chunks
+            response_text = ""
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    response_text += chunk.choices[0].delta.content
+            
+            response_text = response_text.strip()
             
             # Parse response for state changes and actions
             parsed_response = self._parse_ai_response(response_text)

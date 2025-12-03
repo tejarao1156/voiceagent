@@ -2,7 +2,6 @@
 .env
 .env.local
 .env.*.local
-dev.env
 
 # Next.js
 .next/
@@ -92,3 +91,5 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
+.env.backup
+.env.backup*
