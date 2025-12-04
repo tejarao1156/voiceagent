@@ -1836,6 +1836,12 @@ async def twilio_incoming_call(request: Request):
             stream.parameter(name="To", value=call_data.get("To"))
             stream.parameter(name="AgentPhoneNumber", value=agent_phone_number)
             stream.parameter(name="IsOutbound", value="true" if is_outbound_call else "false")
+            
+            # Pass ScheduledCallId if available
+            if scheduled_call_id:
+                stream.parameter(name="ScheduledCallId", value=scheduled_call_id)
+                logger.info(f"🗓️ Passed ScheduledCallId to stream: {scheduled_call_id}")
+
             # Pass custom context via stream parameter if available
             if custom_context and is_outbound_call:
                 # Encode context to avoid issues with special characters

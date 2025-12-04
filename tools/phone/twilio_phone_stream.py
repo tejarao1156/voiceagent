@@ -109,7 +109,36 @@ class TwilioStreamHandler:
         if is_outbound:
             logger.info(f"📤 Detected OUTBOUND call in stream handler - AI will drive the conversation")
         
-        # Load agent config by phone number if not already provided
+        # Check for Scheduled Call ID (Priority 1)
+        scheduled_call_id = custom_params.get('ScheduledCallId')
+        if not self.agent_config and scheduled_call_id:
+            try:
+                logger.info(f"🗓️ Loading config from Scheduled Call ID: {scheduled_call_id}")
+                from databases.mongodb_scheduled_call_store import MongoDBScheduledCallStore
+                scheduled_store = MongoDBScheduledCallStore()
+                scheduled_call = await scheduled_store.get_scheduled_call(scheduled_call_id)
+                
+                if scheduled_call:
+                    # Construct virtual agent config
+                    self.agent_config = {
+                        "name": "Scheduled Call Agent",
+                        "phoneNumber": from_number,
+                        "systemPrompt": scheduled_call.get("prompt") or "You are a helpful AI assistant.",
+                        "greeting": scheduled_call.get("introduction") or "Hello! I am calling regarding your scheduled appointment.",
+                        "inferenceModel": "gpt-4o-mini",
+                        "ttsVoice": "alloy",
+                        "active": True
+                    }
+                    # Merge specific AI config if present
+                    if scheduled_call.get("ai_config"):
+                        self.agent_config.update(scheduled_call.get("ai_config"))
+                        
+                    logger.info(f"✅ Loaded virtual agent config from Schedule {scheduled_call_id}")
+                    logger.info(f"   Greeting: '{self.agent_config.get('greeting')}'")
+            except Exception as e:
+                logger.error(f"❌ Error loading scheduled call config: {e}", exc_info=True)
+
+        # Load agent config by phone number if not already provided (Priority 2)
         # For outbound calls, use AgentPhoneNumber; for inbound, use to_number
         phone_number_to_use = agent_phone_number if agent_phone_number else to_number
         
