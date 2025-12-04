@@ -5300,11 +5300,32 @@ async def get_recent_calls(
 async def get_all_calls(
     agent_id: Optional[str] = Query(None, description="Filter by agent/phone number"),
     status: Optional[str] = Query(None, description="Filter by status: 'active' or 'completed'"),
-    limit: int = Query(100, description="Maximum number of calls to return", ge=1, le=1000)
+    limit: int = Query(100, description="Maximum number of calls to return", ge=1, le=1000),
+    user: Dict[str, Any] = Depends(get_current_active_user)
 ):
-    """Get all calls with transcripts"""
+    """Get all calls with transcripts (user-filtered)"""
     try:
         from databases.mongodb_call_store import MongoDBCallStore
+        from databases.mongodb_phone_store import MongoDBPhoneStore
+        
+        logger.info(f"📞 GET /api/calls called - agent_id: {agent_id}, status: {status}, user: {user['email']}")
+        
+        # Get user's phone numbers for filtering
+        phone_store = MongoDBPhoneStore()
+        user_phones = await phone_store.list_phones(user_id=user["user_id"])
+        user_phone_numbers = [p["phoneNumber"] for p in user_phones]
+        
+        logger.info(f"   User {user['email']} has {len(user_phone_numbers)} registered phone(s)")
+        
+        # If agent_id filter is provided, validate it belongs to this user
+        if agent_id:
+            if agent_id not in user_phone_numbers:
+                logger.warning(f"❌ User {user['email']} attempted to access phone {agent_id} (not owned)")
+                raise HTTPException(
+                    status_code=403,
+                    detail="Access denied: You do not own this phone number"
+                )
+        
         call_store = MongoDBCallStore()
         
         # Map UI status to DB status
@@ -5316,7 +5337,9 @@ async def get_all_calls(
         elif status:
             db_status = status
         
-        calls = await call_store.get_all_calls(
+        # Get calls only for user's phone numbers
+        calls = await call_store.get_calls_for_user(
+            user_phone_numbers=user_phone_numbers,
             agent_id=agent_id,
             status=db_status,
             limit=limit
@@ -5324,6 +5347,9 @@ async def get_all_calls(
         
         return {"calls": calls}
         
+    except HTTPException:
+        # Re-raise HTTPExceptions as-is (e.g., 403 Forbidden)
+        raise
     except Exception as e:
         logger.error(f"Error getting calls: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -5453,22 +5479,41 @@ async def debug_messages():
 )
 async def get_all_messages(
     agent_id: Optional[str] = Query(None, description="Filter by agent/phone number"),
-    limit: int = Query(100, description="Maximum number of conversations to return", ge=1, le=1000)
+    limit: int = Query(100, description="Maximum number of conversations to return", ge=1, le=1000),
+    user: Dict[str, Any] = Depends(get_current_active_user)
 ):
-    """Get all message conversations grouped by conversation_id"""
+    """Get all message conversations grouped by conversation_id (user-filtered)"""
     try:
         from databases.mongodb_message_store import MongoDBMessageStore
+        from databases.mongodb_phone_store import MongoDBPhoneStore
         from databases.mongodb_db import is_mongodb_available
         
-        logger.info(f"📨 GET /api/messages called - agent_id: {agent_id}, limit: {limit}")
+        logger.info(f"📨 GET /api/messages called - agent_id: {agent_id}, limit: {limit}, user: {user['email']}")
         
         if not is_mongodb_available():
             logger.warning("⚠️  MongoDB not available for get_all_messages")
             return {"messages": []}
         
-        message_store = MongoDBMessageStore()
+        # Get user's phone numbers for filtering
+        phone_store = MongoDBPhoneStore()
+        user_phones = await phone_store.list_phones(user_id=user["user_id"])
+        user_phone_numbers = [p["phoneNumber"] for p in user_phones]
         
-        conversations = await message_store.get_conversations(
+        logger.info(f"   User {user['email']} has {len(user_phone_numbers)} registered phone(s)")
+        
+        # If agent_id filter is provided, validate it belongs to this user
+        if agent_id:
+            if agent_id not in user_phone_numbers:
+                logger.warning(f"❌ User {user['email']} attempted to access phone {agent_id} (not owned)")
+                raise HTTPException(
+                    status_code=403,
+                    detail="Access denied: You do not own this phone number"
+                )
+        
+        # Get conversations only for user's phone numbers
+        message_store = MongoDBMessageStore()
+        conversations = await message_store.get_conversations_for_user(
+            user_phone_numbers=user_phone_numbers,
             agent_id=agent_id,
             limit=limit
         )
@@ -5485,6 +5530,9 @@ async def get_all_messages(
         
         return {"messages": conversations}
         
+    except HTTPException:
+        # Re-raise HTTPExceptions as-is (e.g., 403 Forbidden)
+        raise
     except Exception as e:
         logger.error(f"❌ Error getting messages: {e}", exc_info=True)
         import traceback
