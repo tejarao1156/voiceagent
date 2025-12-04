@@ -99,3 +99,52 @@ This file contains instructions that the AI assistant should follow for every co
 - When in doubt, ask for clarification
 - Prioritize code quality and maintainability
 
+
+## End-to-End (E2E) Testing Rules
+
+These rules define the standard operating procedure for AI agents (and human developers) when creating and executing E2E tests for the Voice Agent platform.
+
+### 1. Environment & Isolation
+*   **Fresh User Principle**: NEVER reuse a hardcoded email address. Always generate a unique email for each test run (e.g., using a timestamp: `test_user_$(date +%s)@test.com`). This prevents state pollution from previous runs.
+*   **Service Check**: Before running tests, verify that the core services are up:
+    *   FastAPI Backend (`http://localhost:4002/health` or similar)
+    *   MongoDB (Connection check)
+    *   Ngrok (if testing callbacks/webhooks)
+
+### 2. Authentication Flow
+*   **Full Flow Verification**: Do not mock authentication.
+    1.  **Register**: `POST /auth/register` with the fresh email.
+    2.  **Login**: `POST /auth/login` to retrieve the token.
+    3.  **Token Extraction**: Extract the JWT token from the JSON response.
+*   **Header Usage**: Use the extracted token in the `Cookie` header (`Cookie: auth_token=$TOKEN`) for all subsequent authenticated requests.
+
+### 3. Resource Management & Dependencies
+*   **Logical Order**: Create resources in the order of dependency.
+    *   *Example*: `Create Prompt` -> `Register Phone` -> `Create Agent (using Prompt & Phone)` -> `Schedule Call`.
+*   **ID Propagation**: Capture the ID (e.g., `prompt_id`, `agent_id`) from the creation response and use it dynamically in subsequent steps. Never hardcode IDs.
+
+### 4. Verification Standards
+*   **Step-by-Step Validation**: Verify success *immediately* after each step.
+    *   *HTTP Status*: Ensure 200/201.
+    *   *Response Body*: Check for `success: true` or valid ID fields.
+*   **Deep Verification**: Do not just check if an object was created. Verify its **content**.
+    *   *Example*: If you created a prompt with `introduction: "Hello"`, fetch the created prompt (or the agent using it) and assert that `introduction == "Hello"`.
+*   **Cross-Resource Verification**: If Resource A affects Resource B (e.g., Prompt affects Agent's greeting), verify the change in Resource B.
+
+### 5. Error Handling & Debugging
+*   **Fail Fast**: If a critical step fails (e.g., Auth fails, Resource creation fails), **EXIT IMMEDIATELY**. Do not continue.
+*   **Verbose Failure Logs**: On failure, print:
+    *   The HTTP Status Code.
+    *   The **Full Response Body** (JSON).
+    *   The Payload sent (if relevant).
+*   **Logs**: Capture server logs (`/tmp/server.log`) if a 500 error occurs.
+
+### 6. Cleanup
+*   **Success Cleanup**: If the test passes, remove all temporary files (scripts, cookie files, logs) to keep the workspace clean.
+*   **Failure Preservation**: If the test fails, **KEEP** the temporary files and logs for debugging.
+
+### 7. Scripting Best Practices
+*   **Language**: Bash scripts using `curl` and `python3` (for JSON parsing) are preferred for portability and speed.
+*   **JSON Parsing**: Use `python3 -c "import sys, json; ..."` to robustly parse JSON responses. Do not use `grep` or `sed` for JSON.
+*   **Timeouts**: Allow sufficient wait time for async operations (e.g., server restart, webhook propagation), but set reasonable timeouts for curl commands.
+

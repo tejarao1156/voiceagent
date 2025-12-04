@@ -3154,11 +3154,12 @@ async def create_agent(request: Request, user: Dict[str, Any] = Depends(get_curr
     - `direction` (string, required): "incoming", "outgoing", or "messaging" 
     - `phoneNumber` (string, required): Phone number (e.g., "+1 555 123 4567")
     - `userId` (string, optional): User/tenant ID (for multi-tenant support)
+    - `promptId` (string, optional): ID of saved prompt to use (alternative to systemPrompt)
+    - `systemPrompt` (string, optional): System prompt for the agent (if promptId not provided)
     - `sttModel` (string): Speech-to-text model (default: "whisper-1")
     - `inferenceModel` (string): LLM model (default: "gpt-4o-mini")
     - `ttsModel` (string): Text-to-speech model (default: "tts-1")
     - `ttsVoice` (string): TTS voice (default: "alloy")
-    - `systemPrompt` (string): System prompt for the agent
     - `greeting` (string): Initial greeting message
     - `temperature` (number): LLM temperature (0-2, default: 0.7)
     - `maxTokens` (number): Max response tokens (default: 500)
@@ -3213,6 +3214,38 @@ async def create_agent(request: Request, user: Dict[str, Any] = Depends(get_curr
         if not is_mongodb_available():
             logger.error("MongoDB is not available for agent storage")
             raise HTTPException(status_code=503, detail="MongoDB is not available. Please check MongoDB connection.")
+
+        # Handle prompt: if promptId is provided, fetch the prompt content
+        prompt_id = agent_data.get("promptId")
+        if prompt_id:
+            logger.info(f"Agent creation using promptId: {prompt_id}")
+            from databases.mongodb_prompt_store import MongoDBPromptStore
+            prompt_store = MongoDBPromptStore()
+            
+            # Fetch the prompt
+            prompt = await prompt_store.get_prompt(prompt_id)
+            if not prompt:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Prompt with ID '{prompt_id}' not found"
+                )
+            
+            # Verify the prompt belongs to this user
+            if prompt.get("userId") != user["user_id"]:
+                raise HTTPException(
+                    status_code=403,
+                    detail="You do not have access to this prompt"
+                )
+            
+            # Set systemPrompt from the fetched prompt
+            agent_data["systemPrompt"] = prompt.get("content", "You are a helpful assistant")
+            if prompt.get("introduction"):
+                agent_data["greeting"] = prompt.get("introduction")
+            logger.info(f"✅ Using prompt '{prompt.get('name')}' for agent")
+        elif not agent_data.get("systemPrompt"):
+            # If neither promptId nor systemPrompt provided, use default
+            agent_data["systemPrompt"] = "You are a helpful assistant"
+            logger.info("ℹ️ Using default system prompt for agent")
 
         agent_store = MongoDBAgentStore()
         
@@ -3804,9 +3837,9 @@ async def register_phone(request: Request, user: Dict[str, Any] = Depends(get_cu
     description="Alias for /api/phones/register - Register a new phone number with Twilio credentials",
     tags=["Phone Registration"]
 )
-async def register_phone_alias(request: Request):
+async def register_phone_alias(request: Request, user: Dict[str, Any] = Depends(get_current_active_user)):
     """Alias endpoint that calls the main register_phone function"""
-    return await register_phone(request)
+    return await register_phone(request, user)
 @app.get(
     "/api/phones",
     summary="List Registered Phone Numbers",
@@ -4165,7 +4198,8 @@ async def create_prompt(request: Request, user: Dict[str, Any] = Depends(get_cur
     **Request Body Fields:**
     - `name` (string, required): Prompt name
     - `content` (string, required): Prompt content/text
-    - `phoneNumberId` (string, required): Phone number ID this prompt is linked to
+    - `introduction` (string, optional): Agent introduction/greeting
+    - `phoneNumberId` (string, optional): Phone number ID (optional, for specific phone association)
     - `description` (string, optional): Prompt description
     - `category` (string, optional): Category (e.g., "sales", "support", "reminder")
     
@@ -4434,6 +4468,39 @@ async def create_scheduled_call(request: Request, user: Dict[str, Any] = Depends
         
         if not registered_phone or registered_phone.get("isActive") == False or registered_phone.get("isDeleted") == True:
             raise HTTPException(status_code=400, detail=f"Phone number is not registered or inactive. Please register the phone number first.")
+        
+        # Handle prompt: if promptId is provided, fetch the prompt content
+        prompt_id = call_data.get("promptId")
+        if prompt_id:
+            logger.info(f"Scheduled call using promptId: {prompt_id}")
+            from databases.mongodb_prompt_store import MongoDBPromptStore
+            prompt_store = MongoDBPromptStore()
+            
+            # Fetch the prompt
+            prompt = await prompt_store.get_prompt(prompt_id)
+            if not prompt:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Prompt with ID '{prompt_id}' not found"
+                )
+            
+            # Verify the prompt belongs to this user
+            if prompt.get("userId") != user["user_id"]:
+                raise HTTPException(
+                    status_code=403,
+                    detail="You do not have access to this prompt"
+                )
+            
+            # Store the prompt content in the scheduled call for execution
+            call_data["prompt"] = prompt.get("content", "You are a helpful AI assistant")
+            call_data["promptName"] = prompt.get("name", "")
+            if prompt.get("introduction"):
+                call_data["introduction"] = prompt.get("introduction")
+            logger.info(f"✅ Using prompt '{prompt.get('name')}' for scheduled call")
+        elif call_data.get("callType") == "ai" and not call_data.get("prompt"):
+            # If AI call but no prompt provided, use default
+            call_data["prompt"] = "You are a helpful AI assistant"
+            logger.info("ℹ️ Using default prompt for AI scheduled call")
         
         scheduled_call_store = MongoDBScheduledCallStore()
         call_id = await scheduled_call_store.create_scheduled_call(call_data, user["user_id"])
