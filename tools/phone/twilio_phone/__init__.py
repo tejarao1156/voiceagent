@@ -187,6 +187,22 @@ class TwilioPhoneTool:
             # Try to find active agent with this phone number
             agents = await agent_store.list_agents(active_only=True)
             
+            # First pass: Exact match on E.164 normalized number
+            from databases.mongodb_phone_store import normalize_phone_number
+            target_phone = normalize_phone_number(phone_number)
+            
+            for agent in agents:
+                if direction and agent.get("direction") != direction:
+                    continue
+                
+                if agent.get("phoneNumber") == target_phone:
+                    logger.info(f"Found active agent for {phone_number} (exact match): {agent.get('name')}")
+                    return agent
+
+            # Second pass: Legacy fuzzy match (fallback)
+            # Normalize phone number (remove +1, spaces, dashes, etc.)
+            normalized_phone = phone_number.replace("+1", "").replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
+            
             for agent in agents:
                 # Filter by direction if specified
                 if direction and agent.get("direction") != direction:
@@ -194,7 +210,7 @@ class TwilioPhoneTool:
                 
                 agent_phone = agent.get("phoneNumber", "").replace("+1", "").replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
                 if agent_phone == normalized_phone:
-                    logger.info(f"Found active agent for {phone_number} (direction: {direction or 'any'}): {agent.get('name')}")
+                    logger.info(f"Found active agent for {phone_number} (fuzzy match): {agent.get('name')}")
                     return agent
             
             logger.warning(f"No active agent found for phone number {phone_number} (direction: {direction or 'any'})")

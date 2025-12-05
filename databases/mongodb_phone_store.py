@@ -344,7 +344,7 @@ class MongoDBPhoneStore:
                     phone_dict["twilioAuthToken"] = "***hidden***"
                 phones.append(phone_dict)
             
-            logger.info(f"📞 Found {len(phones)} phone(s) in collection '{self.collection_name}' (total scanned: {total_count})")
+            logger.debug(f"📞 Found {len(phones)} phone(s) in collection '{self.collection_name}' (total scanned: {total_count})")
             if phones:
                 for phone in phones:
                     logger.debug(f"   - {phone.get('phoneNumber', 'N/A')} (isActive: {phone.get('isActive', 'not set')}, type: {phone.get('type', 'N/A')})")

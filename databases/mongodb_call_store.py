@@ -391,7 +391,7 @@ class MongoDBCallStore:
                     "is_scheduled": doc.get("is_scheduled", False)
                 })
             
-            logger.info(f"✅ Retrieved {len(calls)} call(s) for user (filtered by {len(user_phone_numbers)} phone(s))")
+            logger.debug(f"✅ Retrieved {len(calls)} call(s) for user (filtered by {len(user_phone_numbers)} phone(s))")
             return calls
             
         except Exception as e:
