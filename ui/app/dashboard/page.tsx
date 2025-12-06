@@ -209,19 +209,42 @@ const LogsView = () => {
   const [selectedCall, setSelectedCall] = useState<any | null>(null)
   const [loading, setLoading] = useState(false)
   const [filter, setFilter] = useState<'all' | 'ongoing' | 'finished'>('all')
+  const transcriptRef = useRef<HTMLDivElement>(null)
+  const lastCallsHashRef = useRef<string>('')
 
-  // Load calls
+  // Auto-scroll transcript to bottom when new messages arrive
+  useEffect(() => {
+    if (transcriptRef.current && selectedCall?.conversation?.length) {
+      transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight
+    }
+  }, [selectedCall?.conversation?.length])
+
+  // Load calls with smart update (only update if data changed)
   const loadCalls = async () => {
     try {
       const response = await fetch('/api/calls')
       if (response.ok) {
         const result = await response.json()
         if (result.calls) {
-          setCalls(result.calls)
-          // Update selected call if it exists (for live updates)
-          if (selectedCall) {
-            const updatedCall = result.calls.find((c: any) => c.call_sid === selectedCall.call_sid)
-            if (updatedCall) setSelectedCall(updatedCall)
+          // Create a hash of the calls to detect changes
+          const newHash = JSON.stringify(result.calls.map((c: any) => ({
+            sid: c.call_sid,
+            status: c.status,
+            msgCount: c.conversation?.length || 0
+          })))
+          
+          // Only update state if data has actually changed
+          if (newHash !== lastCallsHashRef.current) {
+            lastCallsHashRef.current = newHash
+            setCalls(result.calls)
+            
+            // Update selected call if it exists (for live updates)
+            if (selectedCall) {
+              const updatedCall = result.calls.find((c: any) => c.call_sid === selectedCall.call_sid)
+              if (updatedCall && JSON.stringify(updatedCall) !== JSON.stringify(selectedCall)) {
+                setSelectedCall(updatedCall)
+              }
+            }
           }
         }
       }
@@ -235,7 +258,7 @@ const LogsView = () => {
     loadCalls()
     const interval = setInterval(loadCalls, 3000) // Poll every 3 seconds
     return () => clearInterval(interval)
-  }, [selectedCall]) // Re-bind if selectedCall changes to keep it updated
+  }, []) // Remove selectedCall dependency to prevent re-binding
 
   const filteredCalls = calls.filter(call => {
     if (filter === 'all') return true
@@ -352,7 +375,7 @@ const LogsView = () => {
             </div>
 
             {/* Transcript */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-slate-50/30">
+            <div ref={transcriptRef} className="flex-1 overflow-y-auto p-6 space-y-4 bg-slate-50/30">
               {selectedCall.conversation && selectedCall.conversation.length > 0 ? (
                 selectedCall.conversation.map((msg: any, idx: number) => (
                   <div
@@ -404,10 +427,13 @@ const MessagingAgentsView = () => {
   const [expandedSections, setExpandedSections] = useState({ basic: true, aiModels: false, behavior: false, advanced: false })
   const [registerPhoneModalOpen, setRegisterPhoneModalOpen] = useState(false)
   const [registrationSuccess, setRegistrationSuccess] = useState<any>(null)
+  const [prompts, setPrompts] = useState<any[]>([])
+  const [usePromptSelection, setUsePromptSelection] = useState(false)
 
   const [agentForm, setAgentForm] = useState({
     name: '',
     phoneNumber: '',
+    promptId: '',
     systemPrompt: '',
     greeting: '',
     inferenceModel: 'gpt-4o-mini',
@@ -459,9 +485,25 @@ const MessagingAgentsView = () => {
     }
   }
 
+  // Load prompts for dropdown selection
+  const loadPrompts = async () => {
+    try {
+      const response = await fetch('/api/prompts')
+      if (response.ok) {
+        const result = await response.json()
+        if (result.success && Array.isArray(result.prompts)) {
+          setPrompts(result.prompts)
+        }
+      }
+    } catch (error) {
+      console.error('Error loading prompts:', error)
+    }
+  }
+
   useEffect(() => {
     loadAgents()
     loadRegisteredPhones()
+    loadPrompts()
   }, [])
 
   // Handle create/update agent
@@ -1857,6 +1899,8 @@ const IncomingAgentView = () => {
   const [registerPhoneModalOpen, setRegisterPhoneModalOpen] = useState(false)
   const [registrationSuccess, setRegistrationSuccess] = useState<any>(null)
   const [editAgent, setEditAgent] = useState<any | null>(null)
+  const [prompts, setPrompts] = useState<any[]>([])
+  const [usePromptSelection, setUsePromptSelection] = useState(false)
 
   // Form states for Create Agent Modal
   const [agentForm, setAgentForm] = useState({
@@ -1866,6 +1910,7 @@ const IncomingAgentView = () => {
     inferenceModel: 'gpt-4o-mini',
     ttsModel: 'tts-1',
     ttsVoice: 'alloy',
+    promptId: '',
     systemPrompt: '',
     greeting: '',
     temperature: 0.7,
@@ -1927,9 +1972,25 @@ const IncomingAgentView = () => {
     }
   }
 
+  // Load prompts for dropdown selection
+  const loadPrompts = async () => {
+    try {
+      const response = await fetch('/api/prompts')
+      if (response.ok) {
+        const result = await response.json()
+        if (result.success && Array.isArray(result.prompts)) {
+          setPrompts(result.prompts)
+        }
+      }
+    } catch (error) {
+      console.error('Error loading prompts:', error)
+    }
+  }
+
   useEffect(() => {
     loadAgents()
     loadRegisteredPhones()
+    loadPrompts()
   }, [])
 
   // Handle create/update agent
@@ -1954,6 +2015,7 @@ const IncomingAgentView = () => {
           inferenceModel: 'gpt-4o-mini',
           ttsModel: 'tts-1',
           ttsVoice: 'alloy',
+          promptId: '',
           systemPrompt: '',
           greeting: '',
           temperature: 0.7,
@@ -2212,12 +2274,14 @@ const IncomingAgentView = () => {
                               inferenceModel: agent.inferenceModel || 'gpt-4o-mini',
                               ttsModel: agent.ttsModel || 'tts-1',
                               ttsVoice: agent.ttsVoice || 'alloy',
+                              promptId: agent.promptId || '',
                               systemPrompt: agent.systemPrompt || '',
                               greeting: agent.greeting || '',
                               temperature: agent.temperature || 0.7,
                               maxTokens: agent.maxTokens || 500,
                               active: agent.active !== false,
                             })
+                            setUsePromptSelection(!!agent.promptId)
                             setCreateModalOpen(true)
                           }}
                           className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
@@ -2421,14 +2485,64 @@ const IncomingAgentView = () => {
                 {expandedSections.behavior && (
                   <div className="p-4 space-y-4">
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">System Prompt *</label>
-                      <textarea
-                        value={agentForm.systemPrompt}
-                        onChange={(e) => setAgentForm({ ...agentForm, systemPrompt: e.target.value })}
-                        placeholder="You are a helpful customer support agent..."
-                        rows={4}
-                        className="w-full rounded-xl border-none bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                      />
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="block text-sm font-medium text-slate-700">System Prompt *</label>
+                        <div className="flex items-center space-x-2">
+                          <span className="text-xs text-slate-500">Use Saved Prompt</span>
+                          <label className="relative inline-flex items-center cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={usePromptSelection}
+                              onChange={(e) => {
+                                setUsePromptSelection(e.target.checked)
+                                if (e.target.checked) {
+                                  setAgentForm({ ...agentForm, promptId: '', systemPrompt: '' })
+                                } else {
+                                  setAgentForm({ ...agentForm, promptId: '' })
+                                }
+                              }}
+                              className="sr-only peer"
+                            />
+                            <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
+                          </label>
+                        </div>
+                      </div>
+                      
+                      {usePromptSelection ? (
+                        <select
+                          value={agentForm.promptId}
+                          onChange={(e) => {
+                            const selectedPrompt = prompts.find(p => p.id === e.target.value)
+                            setAgentForm({ 
+                              ...agentForm, 
+                              promptId: e.target.value,
+                              systemPrompt: selectedPrompt ? selectedPrompt.content : '' 
+                            })
+                          }}
+                          className="w-full rounded-xl border-none bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                        >
+                          <option value="">Select a prompt...</option>
+                          {prompts.map((prompt) => (
+                            <option key={prompt.id} value={prompt.id}>
+                              {prompt.name}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <textarea
+                          value={agentForm.systemPrompt}
+                          onChange={(e) => setAgentForm({ ...agentForm, systemPrompt: e.target.value })}
+                          placeholder="You are a helpful customer support agent..."
+                          rows={4}
+                          className="w-full rounded-xl border-none bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                        />
+                      )}
+                      {usePromptSelection && agentForm.systemPrompt && (
+                        <div className="mt-2 p-3 bg-slate-50 rounded-lg border border-slate-100">
+                          <p className="text-xs font-bold text-slate-500 mb-1">Preview:</p>
+                          <p className="text-xs text-slate-600 line-clamp-3">{agentForm.systemPrompt}</p>
+                        </div>
+                      )}
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-slate-700 mb-2">Greeting Message</label>
@@ -2702,6 +2816,7 @@ const PromptsView = () => {
   const [promptForm, setPromptForm] = useState({
     name: '',
     content: '',
+    introduction: '',
     phoneNumberId: '',
     description: '',
     category: 'general',
@@ -2749,8 +2864,8 @@ const PromptsView = () => {
   const [promptError, setPromptError] = useState<string>('')
   const handleSavePrompt = async () => {
     // Basic client‑side validation
-    if (!promptForm.name.trim() || !promptForm.content.trim() || !promptForm.phoneNumberId) {
-      setPromptError('Name, content, and phone number are required.')
+    if (!promptForm.name.trim() || !promptForm.content.trim()) {
+      setPromptError('Name and content are required.')
       return
     }
     setPromptError('')
@@ -2770,6 +2885,7 @@ const PromptsView = () => {
         setPromptForm({
           name: '',
           content: '',
+          introduction: '',
           phoneNumberId: '',
           description: '',
           category: 'general',
@@ -2813,6 +2929,7 @@ const PromptsView = () => {
             setPromptForm({
               name: '',
               content: '',
+              introduction: '',
               phoneNumberId: '',
               description: '',
               category: 'general',
@@ -2848,6 +2965,7 @@ const PromptsView = () => {
                       setPromptForm({
                         name: prompt.name,
                         content: prompt.content,
+                        introduction: prompt.introduction || '',
                         phoneNumberId: prompt.phoneNumberId,
                         description: prompt.description || '',
                         category: prompt.category || 'general',
@@ -2876,10 +2994,6 @@ const PromptsView = () => {
               </div>
 
               <div className="flex items-center justify-between text-xs text-slate-500">
-                <div className="flex items-center space-x-1">
-                  <Phone className="h-3 w-3" />
-                  <span className="font-mono">{linkedPhone?.phoneNumber || 'N/A'}</span>
-                </div>
                 <span>{prompt.created_at ? new Date(prompt.created_at).toLocaleDateString() : 'N/A'}</span>
               </div>
             </LightGlassCard>
@@ -2924,19 +3038,6 @@ const PromptsView = () => {
                 />
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-2">Phone Number *</label>
-                <select
-                  value={promptForm.phoneNumberId}
-                  onChange={(e) => setPromptForm({ ...promptForm, phoneNumberId: e.target.value })}
-                  className="w-full rounded-xl border-none bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                >
-                  <option value="">Select a phone number</option>
-                  {registeredPhones.map(phone => (
-                    <option key={phone.id} value={phone.id}>{phone.phoneNumber}</option>
-                  ))}
-                </select>
-              </div>
 
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-2">Category</label>
@@ -2962,6 +3063,18 @@ const PromptsView = () => {
                   placeholder="Brief description of this prompt"
                   className="w-full rounded-xl border-none bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
                 />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Agent Introduction</label>
+                <textarea
+                  value={promptForm.introduction}
+                  onChange={(e) => setPromptForm({ ...promptForm, introduction: e.target.value })}
+                  placeholder="Hello! I'm your AI assistant. How can I help you today?"
+                  rows={2}
+                  className="w-full rounded-xl border-none bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                />
+                <p className="text-xs text-slate-500 mt-1">This message will be spoken first when the call starts.</p>
               </div>
 
               <div>

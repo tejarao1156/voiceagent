@@ -1836,6 +1836,12 @@ async def twilio_incoming_call(request: Request):
             stream.parameter(name="To", value=call_data.get("To"))
             stream.parameter(name="AgentPhoneNumber", value=agent_phone_number)
             stream.parameter(name="IsOutbound", value="true" if is_outbound_call else "false")
+            
+            # Pass ScheduledCallId if available
+            if scheduled_call_id:
+                stream.parameter(name="ScheduledCallId", value=scheduled_call_id)
+                logger.info(f"🗓️ Passed ScheduledCallId to stream: {scheduled_call_id}")
+
             # Pass custom context via stream parameter if available
             if custom_context and is_outbound_call:
                 # Encode context to avoid issues with special characters
@@ -2565,19 +2571,6 @@ async def twilio_recording_handler(request: Request):
                                 response.say(response_text, voice="alice")
                                 logger.info(f"[RECORDING] Successfully queued response via Say command")
                                 
-                                # Add interrupt handling: Gather to detect if user starts speaking
-                                # This allows the user to interrupt the AI response
-                                logger.info(f"[RECORDING] Setting up interrupt detection during response")
-                                from config import TWILIO_WEBHOOK_BASE_URL as WEBHOOK_BASE_INTERRUPT
-                                response.gather(
-                                    action=f"{WEBHOOK_BASE_INTERRUPT}/webhooks/twilio/recording?CallSid={call_sid}",
-                                    method="POST",
-                                    num_digits=0,  # No digits needed, just voice
-                                    timeout=0.5,   # Very short timeout to detect interrupts
-                                    speech_timeout="auto"  # Auto-detect when user speaks
-                                )
-                                logger.info(f"[RECORDING] Interrupt detection added - ready to listen")
-                                
                             except Exception as e:
                                 logger.error(f"[RECORDING] Error with say command: {str(e)}", exc_info=True)
                                 response.say("I have a response for you.", voice="alice")
@@ -2729,274 +2722,6 @@ async def compatibility_voice_agent_socket(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
-
-
-# ============================================================================
-# TWILIO PHONE INTEGRATION (BATCH PROCESSING)
-# ============================================================================
-
-@app.post(
-    "/webhooks/twilio/recording",
-    summary="Twilio Recording Handler",
-    description="Handles recorded audio from caller",
-    tags=["Twilio Phone Integration"],
-    response_class=HTMLResponse
-)
-async def twilio_recording_handler(request: Request):
-    """
-    Handle recorded audio from the caller.
-    Process the recording: STT -> Conversation -> TTS -> Play back
-    """
-    try:
-        from twilio.twiml.voice_response import VoiceResponse
-        import urllib.request
-        
-        logger.info(f"[RECORDING] Handler called - START")
-        
-        form_data = await request.form()
-        call_sid = form_data.get("CallSid")
-        recording_url = form_data.get("RecordingUrl")
-        
-        logger.info(f"[RECORDING] Received recording for call {call_sid}")
-        logger.info(f"[RECORDING] Recording URL: {recording_url}")
-        logger.info(f"[RECORDING] Form data keys: {list(form_data.keys())}")
-        
-        response = VoiceResponse()
-        
-        if recording_url:
-            # Download and process the recording
-            try:
-                # Minimal wait for Twilio to process the recording
-                # Reduced from 1s to 500ms for faster latency
-                logger.info(f"[RECORDING] Waiting 500ms for Twilio to process recording...")
-                await asyncio.sleep(0.5)
-                
-                logger.info(f"[RECORDING] Downloading recording from {recording_url}")
-                
-                # Download the recording with Twilio authentication
-                import base64
-                from utils.twilio_credentials import get_twilio_credentials
-                
-                # Get credentials from registered phone (or fallback to global config)
-                to_number = form_data.get("To")
-                twilio_creds = await get_twilio_credentials(phone_number=to_number, call_sid=call_sid)
-                
-                if not twilio_creds or not twilio_creds.get("account_sid") or not twilio_creds.get("auth_token"):
-                    logger.error(f"[RECORDING] No Twilio credentials found for phone {to_number}. Please register the phone number through the app.")
-                    response.say("I'm sorry, there was an issue with authentication.", voice="alice")
-                    return make_twiml_response(response)
-                
-                # Try downloading with .wav extension first
-                recording_url_wav = recording_url + ".wav"
-                
-                # Create basic auth header
-                auth_string = f"{twilio_creds['account_sid']}:{twilio_creds['auth_token']}"
-                auth_bytes = auth_string.encode("utf-8")
-                auth_b64 = base64.b64encode(auth_bytes).decode("utf-8")
-                
-                # Try downloading
-                audio_data = None
-                for url_to_try in [recording_url_wav, recording_url]:
-                    try:
-                        logger.info(f"[RECORDING] Attempting to download from: {url_to_try}")
-                        req = urllib.request.Request(url_to_try)
-                        req.add_header("Authorization", f"Basic {auth_b64}")
-                        
-                        http_response = urllib.request.urlopen(req)
-                        audio_data = http_response.read()
-                        logger.info(f"[RECORDING] Successfully downloaded {len(audio_data)} bytes from {url_to_try}")
-                        break
-                    except Exception as e:
-                        logger.warning(f"[RECORDING] Failed to download from {url_to_try}: {str(e)}")
-                        continue
-                
-                if not audio_data:
-                    logger.error(f"[RECORDING] Could not download recording from any URL")
-                    response.say("I'm sorry, there was an issue retrieving your recording.", voice="alice")
-                    return make_twiml_response(response)
-                
-                # Use audio directly without conversion - Twilio sends WAV, Whisper accepts WAV
-                # Skip format conversion to reduce latency
-                logger.info(f"[RECORDING] Skipping format conversion - using WAV directly from Twilio")
-                
-                # Get agent config for this call (to use agent-specific STT model)
-                agent_config = twilio_phone_tool.call_agent_configs.get(call_sid)
-                stt_model = agent_config.get("sttModel") if agent_config else None
-                
-                stt_result = await speech_tool.transcribe(audio_data, "wav", model=stt_model)
-                
-                if stt_result.get("success"):
-                    user_text = stt_result.get("text", "").strip()
-                    logger.info(f"[RECORDING] STT Result: {user_text}")
-                    
-                    # Check if this is an interrupt (user spoke during gather phase)
-                    call_status = form_data.get("CallStatus", "")
-                    if call_status == "in-progress":
-                        # Check if we received audio during gather (potential interrupt)
-                        recording_duration = form_data.get("RecordingDuration", "0")
-                        if recording_duration and int(recording_duration) > 0:
-                            logger.info(f"[RECORDING] INTERRUPT DETECTED: User spoke during AI response (duration: {recording_duration}s)")
-                            logger.info(f"[RECORDING] Stopping AI response and processing new input: {user_text}")
-                    
-                    if user_text:
-                        # Get agent config for this call (to use agent-specific models)
-                        agent_config = twilio_phone_tool.call_agent_configs.get(call_sid)
-                        
-                        # Get AI response with agent config
-                        session_id = twilio_phone_tool.active_calls.get(call_sid)
-                        if session_id:
-                            session_data = twilio_phone_tool.session_data.get(session_id, {})
-                            
-                            # Use agent config for LLM if available
-                            llm_model = agent_config.get("inferenceModel") if agent_config else None
-                            temperature = agent_config.get("temperature") if agent_config else None
-                            max_tokens = agent_config.get("maxTokens") if agent_config else None
-                            
-                            ai_response = await conversation_tool.generate_response(
-                                session_data, user_text, None,
-                                model=llm_model,
-                                temperature=temperature,
-                                max_tokens=max_tokens
-                            )
-                            response_text = ai_response.get("response", "I'm sorry, I didn't understand that.")
-                        else:
-                            response_text = "I'm sorry, I couldn't process your request."
-                        
-                        logger.info(f"[RECORDING] AI Response: {response_text}")
-                        
-                        # Store transcripts in MongoDB
-                        try:
-                            from databases.mongodb_call_store import MongoDBCallStore
-                            call_store = MongoDBCallStore()
-                            await call_store.update_call_transcript(
-                                call_sid=call_sid,
-                                role="user",
-                                text=user_text
-                            )
-                            await call_store.update_call_transcript(
-                                call_sid=call_sid,
-                                role="assistant",
-                                text=response_text
-                            )
-                        except Exception as e:
-                            logger.warning(f"Could not store transcripts: {e}")
-                        
-                        # Convert response to speech with agent config
-                        tts_voice = agent_config.get("ttsVoice", "alloy") if agent_config else "alloy"
-                        tts_model = agent_config.get("ttsModel") if agent_config else None
-                        tts_result = await tts_tool.synthesize(
-                            response_text, 
-                            voice=tts_voice, 
-                            parallel=False,
-                            model=tts_model
-                        )
-                        
-                        if tts_result.get("success"):
-                            # Use Say command for reliable audio playback on Twilio
-                            # Twilio's native Say is more reliable than Play with data URLs
-                            logger.info(f"[RECORDING] TTS succeeded, using Say for playback")
-                            logger.info(f"[RECORDING] Response text: {response_text[:100]}...")
-                            
-                            # Use Twilio's Say command for better reliability
-                            try:
-                                response.say(response_text, voice="alice")
-                                logger.info(f"[RECORDING] Successfully queued response via Say command")
-                                
-                                # Add interrupt handling: Gather to detect if user starts speaking
-                                # This allows the user to interrupt the AI response
-                                logger.info(f"[RECORDING] Setting up interrupt detection during response")
-                                from config import TWILIO_WEBHOOK_BASE_URL as WEBHOOK_BASE_INTERRUPT
-                                response.gather(
-                                    action=f"{WEBHOOK_BASE_INTERRUPT}/webhooks/twilio/recording?CallSid={call_sid}",
-                                    method="POST",
-                                    num_digits=0,  # No digits needed, just voice
-                                    timeout=0.5,   # Very short timeout to detect interrupts
-                                    speech_timeout="auto"  # Auto-detect when user speaks
-                                )
-                                logger.info(f"[RECORDING] Interrupt detection added - ready to listen")
-                                
-                            except Exception as e:
-                                logger.error(f"[RECORDING] Error with say command: {str(e)}", exc_info=True)
-                                response.say("I have a response for you.", voice="alice")
-                        else:
-                            logger.error(f"[RECORDING] TTS failed: {tts_result.get('error')}")
-                            response.say("I'm sorry, I had trouble generating a response.", voice="alice")
-                    else:
-                        response.say("I didn't hear any speech. Please try again.", voice="alice")
-                else:
-                    response.say("I couldn't understand the recording. Please try again.", voice="alice")
-                
-                # Set up continuous recording loop for next turn
-                # After AI response plays, immediately record user's next message
-                from config import TWILIO_WEBHOOK_BASE_URL as WEBHOOK_BASE
-                record_url = f"{WEBHOOK_BASE}/webhooks/twilio/recording?CallSid={call_sid}"
-                logger.info(f"[RECORDING] Setting up CONTINUOUS recording loop with URL: {record_url}")
-                
-                # Record next user message - this creates the conversation loop
-                response.record(
-                    action=record_url,  # Callback to this same handler
-                    method="POST",
-                    max_speech_time=30,  # Allow up to 30 seconds for response
-                    speech_timeout="auto",  # Auto-detect end of speech
-                    play_beep=False  # No beep to keep conversation natural
-                )
-                logger.info(f"[RECORDING] Added continuous record() to response for conversation loop")
-                
-            except Exception as e:
-                logger.error(f"[RECORDING] Error processing recording: {str(e)}", exc_info=True)
-                logger.error(f"[RECORDING] Error type: {type(e).__name__}")
-                response.say("I'm sorry, there was an error processing your message.", voice="alice")
-                
-                # IMPORTANT: Keep conversation loop active even on error
-                # User should be able to continue the conversation
-                from config import TWILIO_WEBHOOK_BASE_URL as WEBHOOK_BASE
-                record_url = f"{WEBHOOK_BASE}/webhooks/twilio/recording?CallSid={call_sid}"
-                response.record(
-                    action=record_url,
-                    method="POST",
-                    max_speech_time=30,
-                    speech_timeout="auto",
-                    play_beep=False
-                )
-                logger.info(f"[RECORDING] Error recovery: Added record() to continue conversation")
-        else:
-            logger.warning(f"[RECORDING] No recording URL provided")
-            response.say("No recording found. Please try again.", voice="alice")
-            
-            # Even with no recording, keep recording loop active
-            from config import TWILIO_WEBHOOK_BASE_URL as WEBHOOK_BASE
-            record_url = f"{WEBHOOK_BASE}/webhooks/twilio/recording?CallSid={call_sid}"
-            response.record(
-                action=record_url,
-                method="POST",
-                max_speech_time=30,
-                speech_timeout="auto",
-                play_beep=False
-            )
-        
-        logger.info(f"[RECORDING] Creating TwiML response: {str(response)[:200]}...")
-        twiml_body = str(response)
-        logger.info(f"[RECORDING] TwiML Response length: {len(twiml_body)} bytes")
-        logger.info(f"[RECORDING] Returning response to Twilio - END (conversation continues)")
-        return make_twiml_response(twiml_body)
-        
-    except Exception as e:
-        logger.error(f"[RECORDING] CRITICAL ERROR in recording handler: {str(e)}", exc_info=True)
-        import traceback
-        logger.error(f"[RECORDING] Full traceback:\n{traceback.format_exc()}")
-        try:
-            from twilio.twiml.voice_response import VoiceResponse
-            error_response = VoiceResponse()
-            error_response.say("Sorry, an error occurred. Goodbye.")
-            error_response.hangup()
-            logger.info(f"[RECORDING] Returning error TwiML response")
-            return make_twiml_response(str(error_response))
-        except Exception as inner_e:
-            logger.error(f"[RECORDING] Error creating error response: {str(inner_e)}")
-            # Fallback response
-            return make_twiml_response(
-                '<?xml version="1.0" encoding="UTF-8"?><Response><Say>An error occurred.</Say><Hangup/></Response>'
-            )
 
 
 # Next.js UI proxy configuration
@@ -3154,11 +2879,12 @@ async def create_agent(request: Request, user: Dict[str, Any] = Depends(get_curr
     - `direction` (string, required): "incoming", "outgoing", or "messaging" 
     - `phoneNumber` (string, required): Phone number (e.g., "+1 555 123 4567")
     - `userId` (string, optional): User/tenant ID (for multi-tenant support)
+    - `promptId` (string, optional): ID of saved prompt to use (alternative to systemPrompt)
+    - `systemPrompt` (string, optional): System prompt for the agent (if promptId not provided)
     - `sttModel` (string): Speech-to-text model (default: "whisper-1")
     - `inferenceModel` (string): LLM model (default: "gpt-4o-mini")
     - `ttsModel` (string): Text-to-speech model (default: "tts-1")
     - `ttsVoice` (string): TTS voice (default: "alloy")
-    - `systemPrompt` (string): System prompt for the agent
     - `greeting` (string): Initial greeting message
     - `temperature` (number): LLM temperature (0-2, default: 0.7)
     - `maxTokens` (number): Max response tokens (default: 500)
@@ -3213,6 +2939,38 @@ async def create_agent(request: Request, user: Dict[str, Any] = Depends(get_curr
         if not is_mongodb_available():
             logger.error("MongoDB is not available for agent storage")
             raise HTTPException(status_code=503, detail="MongoDB is not available. Please check MongoDB connection.")
+
+        # Handle prompt: if promptId is provided, fetch the prompt content
+        prompt_id = agent_data.get("promptId")
+        if prompt_id:
+            logger.info(f"Agent creation using promptId: {prompt_id}")
+            from databases.mongodb_prompt_store import MongoDBPromptStore
+            prompt_store = MongoDBPromptStore()
+            
+            # Fetch the prompt
+            prompt = await prompt_store.get_prompt(prompt_id)
+            if not prompt:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Prompt with ID '{prompt_id}' not found"
+                )
+            
+            # Verify the prompt belongs to this user
+            if prompt.get("userId") != user["user_id"]:
+                raise HTTPException(
+                    status_code=403,
+                    detail="You do not have access to this prompt"
+                )
+            
+            # Set systemPrompt from the fetched prompt
+            agent_data["systemPrompt"] = prompt.get("content", "You are a helpful assistant")
+            if prompt.get("introduction"):
+                agent_data["greeting"] = prompt.get("introduction")
+            logger.info(f"✅ Using prompt '{prompt.get('name')}' for agent")
+        elif not agent_data.get("systemPrompt"):
+            # If neither promptId nor systemPrompt provided, use default
+            agent_data["systemPrompt"] = "You are a helpful assistant"
+            logger.info("ℹ️ Using default system prompt for agent")
 
         agent_store = MongoDBAgentStore()
         
@@ -3804,9 +3562,9 @@ async def register_phone(request: Request, user: Dict[str, Any] = Depends(get_cu
     description="Alias for /api/phones/register - Register a new phone number with Twilio credentials",
     tags=["Phone Registration"]
 )
-async def register_phone_alias(request: Request):
+async def register_phone_alias(request: Request, user: Dict[str, Any] = Depends(get_current_active_user)):
     """Alias endpoint that calls the main register_phone function"""
-    return await register_phone(request)
+    return await register_phone(request, user)
 @app.get(
     "/api/phones",
     summary="List Registered Phone Numbers",
@@ -4165,7 +3923,8 @@ async def create_prompt(request: Request, user: Dict[str, Any] = Depends(get_cur
     **Request Body Fields:**
     - `name` (string, required): Prompt name
     - `content` (string, required): Prompt content/text
-    - `phoneNumberId` (string, required): Phone number ID this prompt is linked to
+    - `introduction` (string, optional): Agent introduction/greeting
+    - `phoneNumberId` (string, optional): Phone number ID (optional, for specific phone association)
     - `description` (string, optional): Prompt description
     - `category` (string, optional): Category (e.g., "sales", "support", "reminder")
     
@@ -4434,6 +4193,39 @@ async def create_scheduled_call(request: Request, user: Dict[str, Any] = Depends
         
         if not registered_phone or registered_phone.get("isActive") == False or registered_phone.get("isDeleted") == True:
             raise HTTPException(status_code=400, detail=f"Phone number is not registered or inactive. Please register the phone number first.")
+        
+        # Handle prompt: if promptId is provided, fetch the prompt content
+        prompt_id = call_data.get("promptId")
+        if prompt_id:
+            logger.info(f"Scheduled call using promptId: {prompt_id}")
+            from databases.mongodb_prompt_store import MongoDBPromptStore
+            prompt_store = MongoDBPromptStore()
+            
+            # Fetch the prompt
+            prompt = await prompt_store.get_prompt(prompt_id)
+            if not prompt:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Prompt with ID '{prompt_id}' not found"
+                )
+            
+            # Verify the prompt belongs to this user
+            if prompt.get("userId") != user["user_id"]:
+                raise HTTPException(
+                    status_code=403,
+                    detail="You do not have access to this prompt"
+                )
+            
+            # Store the prompt content in the scheduled call for execution
+            call_data["prompt"] = prompt.get("content", "You are a helpful AI assistant")
+            call_data["promptName"] = prompt.get("name", "")
+            if prompt.get("introduction"):
+                call_data["introduction"] = prompt.get("introduction")
+            logger.info(f"✅ Using prompt '{prompt.get('name')}' for scheduled call")
+        elif call_data.get("callType") == "ai" and not call_data.get("prompt"):
+            # If AI call but no prompt provided, use default
+            call_data["prompt"] = "You are a helpful AI assistant"
+            logger.info("ℹ️ Using default prompt for AI scheduled call")
         
         scheduled_call_store = MongoDBScheduledCallStore()
         call_id = await scheduled_call_store.create_scheduled_call(call_data, user["user_id"])
@@ -5300,11 +5092,32 @@ async def get_recent_calls(
 async def get_all_calls(
     agent_id: Optional[str] = Query(None, description="Filter by agent/phone number"),
     status: Optional[str] = Query(None, description="Filter by status: 'active' or 'completed'"),
-    limit: int = Query(100, description="Maximum number of calls to return", ge=1, le=1000)
+    limit: int = Query(100, description="Maximum number of calls to return", ge=1, le=1000),
+    user: Dict[str, Any] = Depends(get_current_active_user)
 ):
-    """Get all calls with transcripts"""
+    """Get all calls with transcripts (user-filtered)"""
     try:
         from databases.mongodb_call_store import MongoDBCallStore
+        from databases.mongodb_phone_store import MongoDBPhoneStore
+        
+        logger.debug(f"📞 GET /api/calls called - agent_id: {agent_id}, status: {status}, user: {user['email']}")
+        
+        # Get user's phone numbers for filtering
+        phone_store = MongoDBPhoneStore()
+        user_phones = await phone_store.list_phones(user_id=user["user_id"])
+        user_phone_numbers = [p["phoneNumber"] for p in user_phones]
+        
+        logger.debug(f"   User {user['email']} has {len(user_phone_numbers)} registered phone(s)")
+        
+        # If agent_id filter is provided, validate it belongs to this user
+        if agent_id:
+            if agent_id not in user_phone_numbers:
+                logger.warning(f"❌ User {user['email']} attempted to access phone {agent_id} (not owned)")
+                raise HTTPException(
+                    status_code=403,
+                    detail="Access denied: You do not own this phone number"
+                )
+        
         call_store = MongoDBCallStore()
         
         # Map UI status to DB status
@@ -5316,7 +5129,9 @@ async def get_all_calls(
         elif status:
             db_status = status
         
-        calls = await call_store.get_all_calls(
+        # Get calls only for user's phone numbers
+        calls = await call_store.get_calls_for_user(
+            user_phone_numbers=user_phone_numbers,
             agent_id=agent_id,
             status=db_status,
             limit=limit
@@ -5324,6 +5139,9 @@ async def get_all_calls(
         
         return {"calls": calls}
         
+    except HTTPException:
+        # Re-raise HTTPExceptions as-is (e.g., 403 Forbidden)
+        raise
     except Exception as e:
         logger.error(f"Error getting calls: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -5453,22 +5271,41 @@ async def debug_messages():
 )
 async def get_all_messages(
     agent_id: Optional[str] = Query(None, description="Filter by agent/phone number"),
-    limit: int = Query(100, description="Maximum number of conversations to return", ge=1, le=1000)
+    limit: int = Query(100, description="Maximum number of conversations to return", ge=1, le=1000),
+    user: Dict[str, Any] = Depends(get_current_active_user)
 ):
-    """Get all message conversations grouped by conversation_id"""
+    """Get all message conversations grouped by conversation_id (user-filtered)"""
     try:
         from databases.mongodb_message_store import MongoDBMessageStore
+        from databases.mongodb_phone_store import MongoDBPhoneStore
         from databases.mongodb_db import is_mongodb_available
         
-        logger.info(f"📨 GET /api/messages called - agent_id: {agent_id}, limit: {limit}")
+        logger.info(f"📨 GET /api/messages called - agent_id: {agent_id}, limit: {limit}, user: {user['email']}")
         
         if not is_mongodb_available():
             logger.warning("⚠️  MongoDB not available for get_all_messages")
             return {"messages": []}
         
-        message_store = MongoDBMessageStore()
+        # Get user's phone numbers for filtering
+        phone_store = MongoDBPhoneStore()
+        user_phones = await phone_store.list_phones(user_id=user["user_id"])
+        user_phone_numbers = [p["phoneNumber"] for p in user_phones]
         
-        conversations = await message_store.get_conversations(
+        logger.info(f"   User {user['email']} has {len(user_phone_numbers)} registered phone(s)")
+        
+        # If agent_id filter is provided, validate it belongs to this user
+        if agent_id:
+            if agent_id not in user_phone_numbers:
+                logger.warning(f"❌ User {user['email']} attempted to access phone {agent_id} (not owned)")
+                raise HTTPException(
+                    status_code=403,
+                    detail="Access denied: You do not own this phone number"
+                )
+        
+        # Get conversations only for user's phone numbers
+        message_store = MongoDBMessageStore()
+        conversations = await message_store.get_conversations_for_user(
+            user_phone_numbers=user_phone_numbers,
             agent_id=agent_id,
             limit=limit
         )
@@ -5485,6 +5322,9 @@ async def get_all_messages(
         
         return {"messages": conversations}
         
+    except HTTPException:
+        # Re-raise HTTPExceptions as-is (e.g., 403 Forbidden)
+        raise
     except Exception as e:
         logger.error(f"❌ Error getting messages: {e}", exc_info=True)
         import traceback

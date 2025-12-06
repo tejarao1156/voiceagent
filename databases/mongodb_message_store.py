@@ -610,4 +610,127 @@ class MongoDBMessageStore:
             import traceback
             logger.error(f"Full traceback:\n{traceback.format_exc()}")
             return []
+    
+    async def get_conversations_for_user(
+        self, 
+        user_phone_numbers: List[str],
+        agent_id: Optional[str] = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Get conversations filtered by user's phone numbers for multi-tenancy
+        
+        Args:
+            user_phone_numbers: List of phone numbers owned by the user
+            agent_id: Optional filter for specific phone number (must be in user_phone_numbers)
+            limit: Max conversations to return
+        
+        Returns:
+            List of conversations belonging to the user
+        """
+        if not is_mongodb_available():
+            return []
+        
+        try:
+            collection = self._get_collection()
+            if collection is None:
+                return []
+            
+            # Normalize all user phone numbers
+            normalized_numbers = [normalize_phone_number(pn) for pn in user_phone_numbers]
+            
+            # Build query - filter by user's phone numbers
+            if agent_id:
+                # Single phone number filter (already validated as belonging to user)
+                query = {"agent_id": normalize_phone_number(agent_id)}
+            else:
+                # Filter by all user's phone numbers
+                query = {"agent_id": {"$in": normalized_numbers}}
+            
+            # Get all documents matching the query
+            cursor = collection.find(query)
+            all_conversations = {}
+            
+            async for doc in cursor:
+                agent_id_doc = doc.get("agent_id")
+                user_number_doc = doc.get("user_number")
+                
+                if not agent_id_doc or not user_number_doc:
+                    continue
+                
+                messages_array = doc.get("messages", [])
+                if not messages_array:
+                    continue
+                
+                # Sort messages by timestamp
+                messages_array.sort(key=lambda x: x.get("timestamp", ""))
+                
+                # Get conversation_id from most recent message
+                conversation_id = None
+                for msg in reversed(messages_array):
+                    if msg.get("conversation_id"):
+                        conversation_id = msg.get("conversation_id")
+                        break
+                
+                if not conversation_id:
+                    conversation_id = str(uuid.uuid4())
+                
+                # Get latest message info
+                latest_message_obj = messages_array[-1] if messages_array else None
+                latest_timestamp = latest_message_obj.get("timestamp", "") if latest_message_obj else ""
+                latest_message = latest_message_obj.get("body", "") if latest_message_obj else ""
+                
+                # Build conversation array for UI
+                conversation_messages = []
+                for msg in messages_array:
+                    # Get or infer direction field
+                    direction = msg.get("direction")
+                    if not direction:
+                        role = msg.get("role")
+                        if role == "user" or role == "customer":
+                            direction = "inbound"
+                        else:
+                            direction = "outbound"
+                    
+                    # Determine role (with direction fallback)
+                    role = msg.get("role") or ("user" if direction == "inbound" else "assistant")
+                    
+                    conversation_messages.append({
+                        "role": role,
+                        "direction": direction,
+                        "text": msg.get("body", ""),
+                        "timestamp": msg.get("timestamp")
+                    })
+                
+                # Store conversation
+                unique_id = f"{agent_id_doc}_{user_number_doc}"
+                
+                if unique_id not in all_conversations:
+                    all_conversations[unique_id] = {
+                        "id": unique_id,
+                        "conversation_id": conversation_id,
+                        "phoneNumberId": agent_id_doc,
+                        "callerNumber": user_number_doc,
+                        "agentNumber": agent_id_doc,
+                        "status": "active",
+                        "timestamp": latest_timestamp,
+                        "latest_message": latest_message,
+                        "message_count": len(messages_array),
+                        "conversation": conversation_messages
+                    }
+            
+            # Convert to list and sort by latest timestamp
+            conversations = list(all_conversations.values())
+            conversations.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+            
+            # Apply limit
+            conversations = conversations[:limit]
+            
+            logger.info(f"✅ Retrieved {len(conversations)} conversation(s) for user (filtered by {len(normalized_numbers)} phone(s))")
+            return conversations
+            
+        except Exception as e:
+            logger.error(f"❌ Error getting conversations for user: {e}", exc_info=True)
+            import traceback
+            logger.error(f"Full traceback:\n{traceback.format_exc()}")
+            return []
 

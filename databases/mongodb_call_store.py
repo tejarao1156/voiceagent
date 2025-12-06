@@ -319,4 +319,82 @@ class MongoDBCallStore:
         except Exception as e:
             logger.error(f"Error getting call by sid: {e}")
             return None
+    
+    async def get_calls_for_user(
+        self,
+        user_phone_numbers: List[str],
+        agent_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Get calls filtered by user's phone numbers for multi-tenancy
+        
+        Args:
+            user_phone_numbers: List of phone numbers owned by the user
+            agent_id: Optional filter for specific phone number (must be in user_phone_numbers)
+            status: Optional status filter
+            limit: Max calls to return
+        
+        Returns:
+            List of calls belonging to the user
+        """
+        if not is_mongodb_available():
+            return []
+        
+        try:
+            collection = self._get_collection()
+            if collection is None:
+                return []
+            
+            # Build query - filter by user's phone numbers
+            if agent_id:
+                # Single phone number filter (already validated as belonging to user)
+                query = {"agent_id": agent_id}
+            else:
+                # Filter by all user's phone numbers
+                query = {"agent_id": {"$in": user_phone_numbers}}
+            
+            if status:
+                query["status"] = status
+            
+            cursor = collection.find(query).sort("created_at", -1).limit(limit)
+            calls = []
+            
+            async for doc in cursor:
+                if "_id" in doc:
+                    del doc["_id"]
+                
+                # Convert transcript to conversation format for UI
+                transcript = doc.get("transcript", [])
+                conversation = [
+                    {
+                        "role": msg.get("role"),
+                        "text": msg.get("text"),
+                        "timestamp": msg.get("timestamp")
+                    }
+                    for msg in transcript
+                ]
+                
+                calls.append({
+                    "id": doc.get("call_sid"),
+                    "call_sid": doc.get("call_sid"),
+                    "from_number": doc.get("from_number"),
+                    "to_number": doc.get("to_number"),
+                    "agent_id": doc.get("agent_id"),
+                    "session_id": doc.get("session_id"),
+                    "status": "ongoing" if doc.get("status") == "active" else "finished",
+                    "timestamp": doc.get("start_time"),
+                    "duration": doc.get("duration_seconds"),
+                    "conversation": conversation,
+                    "callerNumber": doc.get("from_number"),
+                    "scheduled_call_id": doc.get("scheduled_call_id"),
+                    "is_scheduled": doc.get("is_scheduled", False)
+                })
+            
+            logger.debug(f"✅ Retrieved {len(calls)} call(s) for user (filtered by {len(user_phone_numbers)} phone(s))")
+            return calls
+            
+        except Exception as e:
+            logger.error(f"Error getting calls for user: {e}")
+            return []
 

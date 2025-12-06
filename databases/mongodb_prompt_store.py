@@ -31,7 +31,8 @@ class MongoDBPromptStore:
             prompt_data: Dictionary containing:
                 - name: Prompt name (required)
                 - content: Prompt content/text (required)
-                - phoneNumberId: Phone number ID this prompt is linked to (required)
+                - introduction: Agent introduction/greeting (optional)
+                - phoneNumberId: Phone number ID this prompt is linked to (optional)
                 - description: Optional description
                 - category: Optional category (e.g., "sales", "support", "reminder")
             user_id: User ID for multi-tenancy
@@ -54,8 +55,7 @@ class MongoDBPromptStore:
                 raise ValueError("Prompt name is required")
             if not prompt_data.get("content"):
                 raise ValueError("Prompt content is required")
-            if not prompt_data.get("phoneNumberId"):
-                raise ValueError("Phone number ID is required")
+            # phoneNumberId is now optional for general prompts
             
             # Add timestamps, metadata, and user ID
             prompt_data["created_at"] = datetime.utcnow().isoformat()
