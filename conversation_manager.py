@@ -53,7 +53,13 @@ CRITICAL INSTRUCTIONS:
 - Always respond to the MOST RECENT user query.
 - If the user says something unclear or if you hear silence/noise, DO NOT say "Bye". Instead, ask "I'm sorry, I didn't catch that. Could you please repeat?" or "Are you still there?"
 - Only say "Bye" or end the conversation if the user explicitly says "Bye", "Goodbye", or indicates they want to end the call.
-- Never assume the conversation is over based on a short input."""
+- Never assume the conversation is over based on a short input.
+
+CONVERSATION CLOSURE BEHAVIOR:
+- After helping the user with their request, always ask: "Is there anything else I can help you with today?"
+- If the user says "no", "no thanks", "that's all", "I'm good", or similar, respond with: "Thank you for calling! Have a great day. Goodbye!"
+- When you say "Goodbye" at the end, the system will automatically end the call.
+- Be proactive in checking if the user needs more help after each completed request."""
     
     def create_session(self, customer_id: Optional[str] = None) -> Dict[str, Any]:
         """Create a new conversation session"""
@@ -197,25 +203,45 @@ Current conversation history: {len(session_data.get('conversation_history', []))
                 {"role": "system", "content": system_prompt + "\n\nContext:\n" + context}
             ]
             
-            # CRITICAL: Add ALL conversation history to maintain complete context
-            # This ensures the AI has access to all previous questions and answers
-            # Each interaction has user_input and agent_response
+            # CRITICAL: Prioritize last 4 messages for context while summarizing older ones
+            # This prevents token overflow while maintaining relevant context
             logger.info(f"📚 Building messages array with {len(conversation_history)} previous interactions")
-            for idx, interaction in enumerate(conversation_history):
+            
+            # If more than 4 interactions, summarize older ones and include last 4 in full
+            if len(conversation_history) > 4:
+                # Summarize older interactions (before last 4)
+                older_interactions = conversation_history[:-4]
+                summary_parts = []
+                for interaction in older_interactions:
+                    user_input_summary = interaction.get("user_input", "")[:100]
+                    agent_response_summary = interaction.get("agent_response", "")[:100]
+                    summary_parts.append(f"User: {user_input_summary}... AI: {agent_response_summary}...")
+                
+                summary_text = "[Earlier conversation summary: " + " | ".join(summary_parts) + "]"
+                messages.append({"role": "system", "content": summary_text})
+                logger.info(f"   Added summary of {len(older_interactions)} older interactions")
+                
+                # Add last 4 interactions in full
+                recent_interactions = conversation_history[-4:]
+            else:
+                recent_interactions = conversation_history
+            
+            # Add recent interactions in full detail (last 4 or all if fewer)
+            for idx, interaction in enumerate(recent_interactions):
                 # Add user message
                 if interaction.get("user_input"):
                     messages.append({
                         "role": "user",
                         "content": interaction["user_input"]
                     })
-                    logger.debug(f"   Added history[{idx}] user: '{interaction['user_input'][:50]}...'")
+                    logger.debug(f"   Added recent[{idx}] user: '{interaction['user_input'][:50]}...'")
                 # Add assistant response
                 if interaction.get("agent_response"):
                     messages.append({
                         "role": "assistant",
                         "content": interaction["agent_response"]
                     })
-                    logger.debug(f"   Added history[{idx}] assistant: '{interaction['agent_response'][:50]}...'")
+                    logger.debug(f"   Added recent[{idx}] assistant: '{interaction['agent_response'][:50]}...'")
             
             # Add current user input (this is the question we're answering now)
             messages.append({"role": "user", "content": user_input})

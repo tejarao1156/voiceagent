@@ -46,12 +46,15 @@ class TwilioStreamHandler:
         self.silence_frames_count = 0
         self.speech_frames_count = 0
         self.interrupt_speech_frames = 0  # Track how many frames of speech during interrupt (to validate real interrupt)
-        self.SILENCE_THRESHOLD_FRAMES = 100  # 100 frames * 20ms/frame = 2000ms (2s) of silence to trigger processing
-        self.INTERRUPT_GRACE_PERIOD_MS = 500  # Wait 500ms after AI starts speaking before allowing interrupts (prevents feedback loop)
-        self.MIN_INTERRUPT_FRAMES = 5  # Require at least 5 frames (100ms) of sustained speech for valid interrupt
+        self.SILENCE_THRESHOLD_FRAMES = 50  # 50 frames * 20ms/frame = 1000ms (1s) of silence to trigger processing
+        self.INTERRUPT_GRACE_PERIOD_MS = 1500  # Wait 1500ms after AI starts speaking before allowing interrupts (prevents echo/feedback)
+        self.MIN_INTERRUPT_FRAMES = 15  # Require at least 15 frames (300ms) of sustained speech for valid interrupt
         self.speech_processing_lock = asyncio.Lock()  # Prevent concurrent speech processing
         self.speech_processing_task = None  # Track active speech processing task for cancellation
         self.query_sequence = 0  # Track query sequence to ensure we process the most recent
+        self.interaction_count = 0  # Track number of user interactions
+        self.user_done_phrases = ["no", "no thanks", "nope", "that's all", "that's it", "nothing else", "i'm good", "im good", "bye", "goodbye", "thank you bye", "thanks bye"]
+        self.asked_if_done = False  # Track if we've asked if user needs anything else
 
     async def handle_stream(self):
         """Main loop to receive and process audio from the Twilio media stream."""
@@ -571,6 +574,27 @@ class TwilioStreamHandler:
                     await self.tts_streaming_task
                 except asyncio.CancelledError:
                     logger.info("🛑 TTS task was cancelled (interrupt handled).")
+                
+                # Track interaction count
+                self.interaction_count += 1
+                
+                # Check for conversation closure
+                # If AI said goodbye, hang up the call
+                response_lower = response_text.lower()
+                if any(phrase in response_lower for phrase in ["goodbye!", "goodbye.", "have a great day", "thank you for calling"]):
+                    if any(phrase in response_lower for phrase in ["goodbye", "bye"]):
+                        logger.info("👋 AI said goodbye - ending call")
+                        await asyncio.sleep(1)  # Give time for TTS to finish
+                        await self.hangup_call("Conversation completed - AI said goodbye")
+                        return
+                
+                # Check if user indicated they're done
+                user_lower = user_text.lower().strip()
+                if user_lower in self.user_done_phrases or any(phrase in user_lower for phrase in self.user_done_phrases):
+                    if not self.asked_if_done:
+                        logger.info("🔄 User may be done - AI should ask for confirmation")
+                        # The system prompt already instructs AI to ask if user needs anything else
+                
             except asyncio.CancelledError:
                 logger.info(f"🛑 Speech processing task #{current_query_id} was cancelled.")
                 raise
@@ -709,6 +733,11 @@ class TwilioStreamHandler:
 
             # Only send end mark if we weren't interrupted
             if not self.interrupt_detected:
+                # CRITICAL: Reset grace period timer when TTS FINISHES (not when it starts)
+                # This prevents echo from being detected as an interrupt
+                self.ai_speech_start_time = time.time()
+                logger.info("🔇 TTS finished, starting grace period for echo protection")
+                
                 # Send mark to signal end of speech (will trigger ai_is_speaking = False in mark handler)
                 await self.websocket.send_json({
                     "event": "mark",
