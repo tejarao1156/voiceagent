@@ -209,19 +209,42 @@ const LogsView = () => {
   const [selectedCall, setSelectedCall] = useState<any | null>(null)
   const [loading, setLoading] = useState(false)
   const [filter, setFilter] = useState<'all' | 'ongoing' | 'finished'>('all')
+  const transcriptRef = useRef<HTMLDivElement>(null)
+  const lastCallsHashRef = useRef<string>('')
 
-  // Load calls
+  // Auto-scroll transcript to bottom when new messages arrive
+  useEffect(() => {
+    if (transcriptRef.current && selectedCall?.conversation?.length) {
+      transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight
+    }
+  }, [selectedCall?.conversation?.length])
+
+  // Load calls with smart update (only update if data changed)
   const loadCalls = async () => {
     try {
       const response = await fetch('/api/calls')
       if (response.ok) {
         const result = await response.json()
         if (result.calls) {
-          setCalls(result.calls)
-          // Update selected call if it exists (for live updates)
-          if (selectedCall) {
-            const updatedCall = result.calls.find((c: any) => c.call_sid === selectedCall.call_sid)
-            if (updatedCall) setSelectedCall(updatedCall)
+          // Create a hash of the calls to detect changes
+          const newHash = JSON.stringify(result.calls.map((c: any) => ({
+            sid: c.call_sid,
+            status: c.status,
+            msgCount: c.conversation?.length || 0
+          })))
+          
+          // Only update state if data has actually changed
+          if (newHash !== lastCallsHashRef.current) {
+            lastCallsHashRef.current = newHash
+            setCalls(result.calls)
+            
+            // Update selected call if it exists (for live updates)
+            if (selectedCall) {
+              const updatedCall = result.calls.find((c: any) => c.call_sid === selectedCall.call_sid)
+              if (updatedCall && JSON.stringify(updatedCall) !== JSON.stringify(selectedCall)) {
+                setSelectedCall(updatedCall)
+              }
+            }
           }
         }
       }
@@ -235,7 +258,7 @@ const LogsView = () => {
     loadCalls()
     const interval = setInterval(loadCalls, 3000) // Poll every 3 seconds
     return () => clearInterval(interval)
-  }, [selectedCall]) // Re-bind if selectedCall changes to keep it updated
+  }, []) // Remove selectedCall dependency to prevent re-binding
 
   const filteredCalls = calls.filter(call => {
     if (filter === 'all') return true
@@ -352,7 +375,7 @@ const LogsView = () => {
             </div>
 
             {/* Transcript */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-slate-50/30">
+            <div ref={transcriptRef} className="flex-1 overflow-y-auto p-6 space-y-4 bg-slate-50/30">
               {selectedCall.conversation && selectedCall.conversation.length > 0 ? (
                 selectedCall.conversation.map((msg: any, idx: number) => (
                   <div
