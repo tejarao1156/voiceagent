@@ -3,8 +3,9 @@ import json
 import base64
 import logging
 import time
+import audioop
 from fastapi import WebSocket
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 import webrtcvad
 
@@ -19,6 +20,18 @@ VAD_AGGRESSIVENESS = 3
 VAD_SAMPLE_RATE = 8000  # Twilio media stream is 8kHz mu-law
 VAD_FRAME_DURATION_MS = 20
 VAD_FRAME_BYTES = (VAD_SAMPLE_RATE * VAD_FRAME_DURATION_MS // 1000)
+
+# Audio quality thresholds for human-like conversation
+MIN_RMS_THRESHOLD = 500  # Minimum audio energy (RMS) to consider as real speech (filters background noise)
+MIN_SPEECH_DURATION_FRAMES = 15  # 15 frames * 20ms = 300ms minimum speech before processing
+
+# Noise phrase filtering - common STT artifacts that should be ignored
+NOISE_PHRASES = {
+    "you", "uh", "um", "hmm", "ah", "oh", "huh", "eh", "mm", "mhm",
+    ".", "..", "...", " ", "", "the", "a", "i", "it", "is", "to"
+}
+# Single character patterns are also noise
+MIN_TRANSCRIPT_LENGTH = 3  # Minimum characters for valid transcript
 
 class TwilioStreamHandler:
     """Handles the real-time Twilio media stream for a single phone call."""
@@ -46,9 +59,19 @@ class TwilioStreamHandler:
         self.silence_frames_count = 0
         self.speech_frames_count = 0
         self.interrupt_speech_frames = 0  # Track how many frames of speech during interrupt (to validate real interrupt)
-        self.SILENCE_THRESHOLD_FRAMES = 25  # 25 frames * 20ms/frame = 500ms of silence to trigger processing
-        self.INTERRUPT_GRACE_PERIOD_MS = 1200  # Wait 1200ms after AI starts speaking before allowing interrupts (prevents feedback loop)
-        self.MIN_INTERRUPT_FRAMES = 10  # Require at least 10 frames (200ms) of sustained speech for valid interrupt
+        
+        # Human-like conversation tuning parameters
+        self.SILENCE_THRESHOLD_FRAMES = 50  # 50 frames * 20ms/frame = 1000ms of silence to trigger processing (let users pause naturally)
+        self.INTERRUPT_GRACE_PERIOD_MS = 1500  # Wait 1500ms after AI starts speaking before allowing interrupts (prevents echo)
+        self.MIN_INTERRUPT_FRAMES = 20  # Require at least 20 frames (400ms) of sustained speech for valid interrupt
+        
+        # New: Audio quality validation
+        self.rms_buffer: List[int] = []  # Track RMS values for average calculation
+        self.greeting_complete = False  # Block speech processing until greeting finishes
+        self.call_settling_complete = False  # Block speech until call has settled
+        self.last_interrupt_time = 0.0  # Track last interrupt time for debouncing
+        self.INTERRUPT_DEBOUNCE_MS = 2000  # Minimum 2 seconds between interrupts
+        
         self.speech_processing_lock = asyncio.Lock()  # Prevent concurrent speech processing
         self.speech_processing_task = None  # Track active speech processing task for cancellation
         self.query_sequence = 0  # Track query sequence to ensure we process the most recent
@@ -276,16 +299,78 @@ class TwilioStreamHandler:
         except Exception as e:
             logger.warning(f"Could not register stream handler in global registry: {e}")
 
+    def _calculate_rms(self, audio_bytes: bytes) -> int:
+        """Calculate RMS (Root Mean Square) energy of audio chunk.
+        Higher RMS = louder audio. Used to filter out background noise."""
+        try:
+            # For mu-law encoded audio at 8kHz, each sample is 1 byte
+            # Convert to linear PCM first for accurate RMS
+            linear_pcm = audioop.ulaw2lin(audio_bytes, 2)  # 2 bytes per sample output
+            return audioop.rms(linear_pcm, 2)
+        except Exception as e:
+            logger.warning(f"RMS calculation error: {e}")
+            return 0
+    
+    def _get_average_rms(self) -> float:
+        """Get average RMS from the buffer."""
+        if not self.rms_buffer:
+            return 0.0
+        return sum(self.rms_buffer) / len(self.rms_buffer)
+    
+    def _is_valid_transcript(self, text: str) -> bool:
+        """Validate that transcript is meaningful speech, not noise.
+        Returns False for single chars, noise words, and very short text."""
+        if not text:
+            return False
+        
+        text_clean = text.strip().lower()
+        
+        # Too short
+        if len(text_clean) < MIN_TRANSCRIPT_LENGTH:
+            logger.info(f"🔇 Rejecting short transcript: '{text}' ({len(text_clean)} chars < {MIN_TRANSCRIPT_LENGTH})")
+            return False
+        
+        # Known noise phrases
+        if text_clean in NOISE_PHRASES:
+            logger.info(f"🔇 Rejecting noise phrase: '{text}'")
+            return False
+        
+        # Single words that are likely noise
+        words = text_clean.split()
+        if len(words) == 1 and text_clean in NOISE_PHRASES:
+            logger.info(f"🔇 Rejecting single noise word: '{text}'")
+            return False
+        
+        return True
+    
     def _process_media_event(self, media_data: Dict):
-        """Processes incoming 'media' events using VAD. Supports interrupt detection."""
+        """Processes incoming 'media' events using VAD. Supports interrupt detection.
+        Includes audio energy validation and greeting lock for human-like conversation."""
         payload = base64.b64decode(media_data['payload'])
         
         # VAD expects 160-byte chunks for 8kHz, 20ms frames
         if len(payload) != VAD_FRAME_BYTES:
             logger.warning(f"Received unexpected payload size: {len(payload)}. Expected {VAD_FRAME_BYTES}")
             return
-
-        is_speech = self.vad.is_speech(payload, VAD_SAMPLE_RATE)
+        
+        # PHASE 1: Call settling check - ignore all audio until call has settled
+        if not self.call_settling_complete:
+            return
+        
+        # PHASE 2: Greeting lock - block all speech processing until greeting completes
+        if not self.greeting_complete:
+            return
+        
+        # PHASE 3: Calculate audio energy (RMS) to filter out low-volume noise
+        rms = self._calculate_rms(payload)
+        
+        # Only consider as potential speech if RMS exceeds threshold
+        is_speech_by_vad = self.vad.is_speech(payload, VAD_SAMPLE_RATE)
+        is_speech = is_speech_by_vad and rms >= MIN_RMS_THRESHOLD
+        
+        # Log when VAD detects speech but RMS is too low (filtered noise)
+        if is_speech_by_vad and not is_speech:
+            logger.debug(f"🔇 VAD detected speech but RMS too low ({rms} < {MIN_RMS_THRESHOLD}), filtering as noise")
         
         # CRITICAL: If AI is speaking, block ALL audio processing to prevent feedback loop
         # Exception: If interrupt is detected, allow capturing interrupt speech (but don't process until TTS stops)
@@ -299,17 +384,24 @@ class TwilioStreamHandler:
                         # Still in grace period - completely ignore (definitely AI feedback)
                         return
                 
+                # Check interrupt debounce - prevent rapid false triggers
+                time_since_last_interrupt = (time.time() - self.last_interrupt_time) * 1000
+                if time_since_last_interrupt < self.INTERRUPT_DEBOUNCE_MS:
+                    # Too soon after last interrupt - ignore
+                    return
+                
                 # Grace period passed - potential interrupt, start tracking
                 if self.interrupt_speech_frames == 0:
-                    logger.info("🔍 Potential interrupt detected, validating...")
+                    logger.info(f"🔍 Potential interrupt detected (RMS: {rms}), validating...")
                 
                 self.interrupt_speech_frames += 1
                 
                 # Only treat as real interrupt if speech is sustained (filters out brief AI feedback)
                 if self.interrupt_speech_frames >= self.MIN_INTERRUPT_FRAMES:
                     # Validated interrupt - user is really speaking!
-                    logger.info(f"🚨 INTERRUPT VALIDATED: {self.interrupt_speech_frames} frames of sustained speech!")
+                    logger.info(f"🚨 INTERRUPT VALIDATED: {self.interrupt_speech_frames} frames of sustained speech (RMS avg: {rms})!")
                     self.interrupt_detected = True
+                    self.last_interrupt_time = time.time()  # Record for debouncing
                     
                     # CRITICAL: Send Twilio "clear" command to INSTANTLY stop audio playback
                     # This stops the audio on Twilio's side immediately
@@ -363,11 +455,12 @@ class TwilioStreamHandler:
             self.speech_buffer.extend(payload)
             self.speech_frames_count += 1
             self.silence_frames_count = 0
+            self.rms_buffer.append(rms)  # Track RMS for quality validation
             if not self.is_speaking:
                 if self.interrupt_detected:
-                    logger.info("🎤 Capturing interrupt speech (AI stopping)...")
+                    logger.info(f"🎤 Capturing interrupt speech (AI stopping), RMS: {rms}...")
                 else:
-                    logger.info("Speech detected.")
+                    logger.info(f"Speech detected (RMS: {rms}).")
                 self.is_speaking = True
         elif self.is_speaking:  # Silence after speech
             self.silence_frames_count += 1
@@ -378,7 +471,31 @@ class TwilioStreamHandler:
                     logger.info("⏳ Interrupt speech captured, waiting for AI to stop...")
                     return
                 
-                logger.info("Silence threshold reached after speech, processing utterance.")
+                # PHASE 4: Minimum speech duration check
+                if self.speech_frames_count < MIN_SPEECH_DURATION_FRAMES:
+                    avg_rms = self._get_average_rms()
+                    logger.info(f"🔇 Speech too short ({self.speech_frames_count} frames < {MIN_SPEECH_DURATION_FRAMES}), avg RMS: {avg_rms:.0f}. Ignoring as noise.")
+                    self.is_speaking = False
+                    self.silence_frames_count = 0
+                    self.speech_buffer = bytearray()
+                    self.speech_frames_count = 0
+                    self.rms_buffer = []
+                    self.interrupt_detected = False
+                    return
+                
+                # PHASE 5: Average RMS validation - ensure audio had enough energy
+                avg_rms = self._get_average_rms()
+                if avg_rms < MIN_RMS_THRESHOLD:
+                    logger.info(f"🔇 Average RMS too low ({avg_rms:.0f} < {MIN_RMS_THRESHOLD}), likely noise. Ignoring.")
+                    self.is_speaking = False
+                    self.silence_frames_count = 0
+                    self.speech_buffer = bytearray()
+                    self.speech_frames_count = 0
+                    self.rms_buffer = []
+                    self.interrupt_detected = False
+                    return
+                
+                logger.info(f"Silence threshold reached ({self.speech_frames_count} frames, avg RMS: {avg_rms:.0f}), processing utterance.")
                 self.is_speaking = False
                 self.silence_frames_count = 0
                 # Reset interrupt flag after processing
@@ -393,6 +510,9 @@ class TwilioStreamHandler:
                     self.speech_processing_task.cancel()
                     # Note: We can't await here since _process_media_event is not async
                     # The cancelled task will be cleaned up when _process_user_speech checks query_sequence
+                
+                # Clear RMS buffer after validation (data is no longer needed)
+                self.rms_buffer = []
                 
                 # Increment query sequence AFTER cancelling previous task
                 self.query_sequence += 1
@@ -444,6 +564,7 @@ class TwilioStreamHandler:
             audio_to_process = self.speech_buffer.copy()
             self.speech_buffer = bytearray()
             self.speech_frames_count = 0
+            self.rms_buffer = []  # Clear RMS buffer after capturing audio
             
             if was_interrupt:
                 logger.info(f"🔄 Processing INTERRUPT (Query #{current_query_id}): {len(audio_to_process)} bytes captured")
@@ -469,6 +590,11 @@ class TwilioStreamHandler:
 
                 if not user_text:
                     logger.info("STT result is empty, skipping AI response.")
+                    return
+                
+                # PHASE 5: Post-STT validation - filter out noise transcriptions
+                if not self._is_valid_transcript(user_text):
+                    logger.info(f"🔇 Invalid transcript filtered: '{user_text}' - skipping AI response")
                     return
                 
                 # CRITICAL: Verify this is still the current query before proceeding
@@ -586,16 +712,19 @@ class TwilioStreamHandler:
                 logger.error(f"Error processing user speech (Query #{current_query_id}): {e}", exc_info=True)
 
     async def _send_greeting(self):
-        """Generates and streams a greeting message to the caller. For outbound calls, AI drives the conversation."""
+        """Generates and streams a greeting message to the caller. For outbound calls, AI drives the conversation.
+        Implements call settling and greeting lock for human-like conversation flow."""
         try:
-            # For outbound calls, send greeting immediately (AI drives the conversation)
-            # For inbound calls, wait a brief moment for call to fully connect
-            if not self.is_outbound_call:
-                await asyncio.sleep(0.5)  # Small delay for inbound calls
+            # PHASE 1: Call settling period - let the call fully connect before any audio processing
+            logger.info(f"⏳ Call settling period starting for call {self.call_sid}...")
+            await asyncio.sleep(0.5)  # 500ms settling period for all calls
+            self.call_settling_complete = True
+            logger.info(f"✅ Call settled, ready to send greeting for call {self.call_sid}")
             
             # Check if agent_config is available
             if not self.agent_config:
                 logger.error(f"❌ Cannot send greeting: agent_config is None for call {self.call_sid}")
+                self.greeting_complete = True  # Allow listening even if greeting fails
                 return
             
             # For outbound calls, AI should drive the conversation
@@ -628,8 +757,15 @@ class TwilioStreamHandler:
             self.tts_streaming_task = asyncio.create_task(self._synthesize_and_stream_tts(greeting_text))
             await self.tts_streaming_task
             logger.info(f"✅ Greeting TTS completed for call {self.call_sid}")
+            
+            # PHASE 2: Greeting complete - now enable speech detection
+            self.greeting_complete = True
+            logger.info(f"🎤 Greeting complete, now listening for user speech (call {self.call_sid})")
         except Exception as e:
             logger.error(f"❌ Error sending greeting for call {self.call_sid}: {e}", exc_info=True)
+            # Enable listening even if greeting fails
+            self.greeting_complete = True
+            self.call_settling_complete = True
 
     async def _synthesize_and_stream_tts(self, text: str):
         """Synthesizes text to speech and streams it back to Twilio using fast PCM conversion.
