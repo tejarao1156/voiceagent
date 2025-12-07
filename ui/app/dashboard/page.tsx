@@ -3189,6 +3189,10 @@ const OutgoingAgentView = () => {
     loadScheduledCalls()
     loadPrompts()
     loadRegisteredPhones()
+
+    // Auto-refresh scheduled calls every 5 seconds
+    const interval = setInterval(loadScheduledCalls, 5000)
+    return () => clearInterval(interval)
   }, [])
 
   // Handle schedule call

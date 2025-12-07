@@ -231,12 +231,13 @@ class ScheduledCallWorker:
             call_store = MongoDBCallStore()
             
             # Create call log entry using the correct MongoDB interface
-            # The create_call method expects: call_sid, from_number, to_number as positional args
-            # and scheduled_call_id, is_scheduled as optional kwargs
+            # For outgoing calls, agent_id should be from_number (user's registered phone)
+            # so the call appears in the user's call logs
             await call_store.create_call(
                 call_sid=call_sid,
                 from_number=from_number,
                 to_number=to_number,
+                agent_id=from_number,  # Use from_number for outgoing calls
                 scheduled_call_id=scheduled_call_id,
                 is_scheduled=True
             )
