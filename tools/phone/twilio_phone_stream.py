@@ -283,8 +283,9 @@ class TwilioStreamHandler:
             persona=None
         )
         # Set system prompt in session data if agent config has one
+        # CRITICAL: Use snake_case "system_prompt" to match what conversation_manager.py expects
         if self.agent_config and self.agent_config.get("systemPrompt"):
-            session_info["systemPrompt"] = self.agent_config.get("systemPrompt")
+            session_info["system_prompt"] = self.agent_config.get("systemPrompt")
         
         self.session_id = session_info.get("session_id")
         self.session_data = session_info
