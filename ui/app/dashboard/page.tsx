@@ -232,12 +232,12 @@ const LogsView = () => {
             status: c.status,
             msgCount: c.conversation?.length || 0
           })))
-          
+
           // Only update state if data has actually changed
           if (newHash !== lastCallsHashRef.current) {
             lastCallsHashRef.current = newHash
             setCalls(result.calls)
-            
+
             // Update selected call if it exists (for live updates)
             if (selectedCall) {
               const updatedCall = result.calls.find((c: any) => c.call_sid === selectedCall.call_sid)
@@ -1261,7 +1261,7 @@ const MessagesView = () => {
       })
 
       const data = await response.json()
-      
+
       if (response.ok && data.success) {
         setMessageText('')
         // Refresh conversations to show the new message
@@ -1286,7 +1286,7 @@ const MessagesView = () => {
     }
   }
 
-  const selectedConversation = conversations.find(c => 
+  const selectedConversation = conversations.find(c =>
     c.conversation_id === selectedId || c.id === selectedId
   )
 
@@ -1321,26 +1321,26 @@ const MessagesView = () => {
           {conversations.map((conv) => {
             const convId = conv.conversation_id || conv.id;
             return (
-            <div
-              key={convId}
-              onClick={() => setSelectedId(convId)}
-              className={`p-4 border-b border-slate-50 cursor-pointer hover:bg-white/80 transition-colors ${selectedId === convId ? 'bg-blue-50/50 border-l-4 border-l-blue-500' : 'border-l-4 border-l-transparent'}`}
-            >
-              <div className="flex justify-between items-start mb-2">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded uppercase tracking-wider">Customer</span>
-                    <span className="text-xs text-slate-400">{conv.timestamp ? new Date(conv.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</span>
-                  </div>
-                  <span className="font-bold text-slate-800 text-sm">{conv.callerNumber || 'Unknown'}</span>
-                  <div className="flex items-center gap-1 mt-1">
-                    <span className="text-[10px] text-slate-400 font-medium">Agent:</span>
-                    <span className="text-[10px] text-slate-500 font-mono">{conv.agentNumber || 'Unknown'}</span>
+              <div
+                key={convId}
+                onClick={() => setSelectedId(convId)}
+                className={`p-4 border-b border-slate-50 cursor-pointer hover:bg-white/80 transition-colors ${selectedId === convId ? 'bg-blue-50/50 border-l-4 border-l-blue-500' : 'border-l-4 border-l-transparent'}`}
+              >
+                <div className="flex justify-between items-start mb-2">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded uppercase tracking-wider">Customer</span>
+                      <span className="text-xs text-slate-400">{conv.timestamp ? new Date(conv.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</span>
+                    </div>
+                    <span className="font-bold text-slate-800 text-sm">{conv.callerNumber || 'Unknown'}</span>
+                    <div className="flex items-center gap-1 mt-1">
+                      <span className="text-[10px] text-slate-400 font-medium">Agent:</span>
+                      <span className="text-[10px] text-slate-500 font-mono">{conv.agentNumber || 'Unknown'}</span>
+                    </div>
                   </div>
                 </div>
+                <p className="text-sm text-slate-500 truncate italic">"{conv.latest_message || 'No messages'}"</p>
               </div>
-              <p className="text-sm text-slate-500 truncate italic">"{conv.latest_message || 'No messages'}"</p>
-            </div>
             );
           })}
         </div>
@@ -1370,50 +1370,49 @@ const MessagesView = () => {
             <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/30">
               {selectedConversation.conversation && selectedConversation.conversation.length > 0 ? (
                 selectedConversation.conversation.map((msg: any, idx: number) => {
-                // Determine if this is a customer message or agent message
-                // Priority order for maximum compatibility:
-                // 1. role field: "user" or "customer" = customer message, "assistant" = agent message
-                // 2. direction field: "inbound" = customer message, "outbound" = agent message
-                // 3. sender field: "customer" = customer message
-                const role = msg.role?.toLowerCase() || '';
-                const direction = msg.direction?.toLowerCase() || '';
-                const sender = msg.sender?.toLowerCase() || '';
-                
-                // Determine message source based on priority:
-                // 1. Check role first (most reliable)
-                // 2. Then check direction
-                // 3. Then check sender
-                // Default to agent if unclear (for backward compatibility)
-                let messageFromCustomer = false;
-                
-                if (role === 'user' || role === 'customer') {
-                  messageFromCustomer = true;
-                } else if (role === 'assistant' || role === 'agent') {
-                  messageFromCustomer = false;
-                } else if (direction === 'inbound') {
-                  messageFromCustomer = true;
-                } else if (direction === 'outbound') {
-                  messageFromCustomer = false;
-                } else if (sender === 'customer') {
-                  messageFromCustomer = true;
-                }
-                // If none of the above match, default to agent (false)
-                
-                return (
-                  <div key={idx} className={`flex ${messageFromCustomer ? 'justify-start' : 'justify-end'}`}>
-                    <div className={`max-w-[75%] rounded-2xl px-4 py-3 ${
-                      messageFromCustomer
+                  // Determine if this is a customer message or agent message
+                  // Priority order for maximum compatibility:
+                  // 1. role field: "user" or "customer" = customer message, "assistant" = agent message
+                  // 2. direction field: "inbound" = customer message, "outbound" = agent message
+                  // 3. sender field: "customer" = customer message
+                  const role = msg.role?.toLowerCase() || '';
+                  const direction = msg.direction?.toLowerCase() || '';
+                  const sender = msg.sender?.toLowerCase() || '';
+
+                  // Determine message source based on priority:
+                  // 1. Check role first (most reliable)
+                  // 2. Then check direction
+                  // 3. Then check sender
+                  // Default to agent if unclear (for backward compatibility)
+                  let messageFromCustomer = false;
+
+                  if (role === 'user' || role === 'customer') {
+                    messageFromCustomer = true;
+                  } else if (role === 'assistant' || role === 'agent') {
+                    messageFromCustomer = false;
+                  } else if (direction === 'inbound') {
+                    messageFromCustomer = true;
+                  } else if (direction === 'outbound') {
+                    messageFromCustomer = false;
+                  } else if (sender === 'customer') {
+                    messageFromCustomer = true;
+                  }
+                  // If none of the above match, default to agent (false)
+
+                  return (
+                    <div key={idx} className={`flex ${messageFromCustomer ? 'justify-start' : 'justify-end'}`}>
+                      <div className={`max-w-[75%] rounded-2xl px-4 py-3 ${messageFromCustomer
                         ? 'bg-slate-200/80 text-slate-900 rounded-tl-none shadow-sm border border-slate-300/50'
                         : 'bg-gradient-to-br from-blue-600 to-blue-700 text-white rounded-tr-none shadow-md shadow-blue-500/30'
-                    }`}>
-                      <p className="text-sm leading-relaxed">{msg.text || msg.body || ''}</p>
-                      <p className={`text-[10px] mt-1.5 ${messageFromCustomer ? 'text-slate-500' : 'text-blue-100'}`}>
-                        {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}
-                      </p>
+                        }`}>
+                        <p className="text-sm leading-relaxed">{msg.text || msg.body || ''}</p>
+                        <p className={`text-[10px] mt-1.5 ${messageFromCustomer ? 'text-slate-500' : 'text-blue-100'}`}>
+                          {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                );
-              })
+                  );
+                })
               ) : (
                 <div className="h-full flex flex-col items-center justify-center text-slate-400">
                   <MessageSquare className="h-12 w-12 mb-3 opacity-20" />
@@ -1432,7 +1431,7 @@ const MessagesView = () => {
                   disabled={sending}
                   className="w-full pl-4 pr-12 py-3 rounded-xl border border-slate-200 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-white/80 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 />
-                <button 
+                <button
                   onClick={handleSendMessage}
                   disabled={!messageText.trim() || sending}
                   className="absolute right-2 top-2 p-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-md shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -2507,16 +2506,16 @@ const IncomingAgentView = () => {
                           </label>
                         </div>
                       </div>
-                      
+
                       {usePromptSelection ? (
                         <select
                           value={agentForm.promptId}
                           onChange={(e) => {
                             const selectedPrompt = prompts.find(p => p.id === e.target.value)
-                            setAgentForm({ 
-                              ...agentForm, 
+                            setAgentForm({
+                              ...agentForm,
                               promptId: e.target.value,
-                              systemPrompt: selectedPrompt ? selectedPrompt.content : '' 
+                              systemPrompt: selectedPrompt ? selectedPrompt.content : ''
                             })
                           }}
                           className="w-full rounded-xl border-none bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
@@ -3131,6 +3130,11 @@ const OutgoingAgentView = () => {
     toPhoneNumbers: [''],
     scheduledDateTime: '',
     promptId: '',
+    // AI Model Configuration
+    sttModel: 'whisper-1',
+    inferenceModel: 'gpt-4o-mini',
+    ttsModel: 'tts-1',
+    ttsVoice: 'alloy',
   })
 
   // Load scheduled calls
@@ -3226,6 +3230,10 @@ const OutgoingAgentView = () => {
           toPhoneNumbers: [''],
           scheduledDateTime: '',
           promptId: '',
+          sttModel: 'whisper-1',
+          inferenceModel: 'gpt-4o-mini',
+          ttsModel: 'tts-1',
+          ttsVoice: 'alloy',
         })
         loadScheduledCalls()
       } else {
@@ -3283,6 +3291,10 @@ const OutgoingAgentView = () => {
               toPhoneNumbers: [''],
               scheduledDateTime: '',
               promptId: '',
+              sttModel: 'whisper-1',
+              inferenceModel: 'gpt-4o-mini',
+              ttsModel: 'tts-1',
+              ttsVoice: 'alloy',
             })
             setScheduleModalOpen(true)
           }}
@@ -3429,10 +3441,71 @@ const OutgoingAgentView = () => {
                     className="w-full rounded-xl border-none bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
                   >
                     <option value="">Select a prompt</option>
-                    {prompts.filter(p => p.phoneNumberId === callForm.fromPhoneNumberId).map(prompt => (
+                    {/* Show all prompts - no longer filtering by phoneNumberId */}
+                    {prompts.map(prompt => (
                       <option key={prompt.id} value={prompt.id}>{prompt.name}</option>
                     ))}
                   </select>
+                </div>
+              )}
+
+              {/* AI Model Configuration */}
+              {callForm.callType === 'ai' && (
+                <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/50">
+                  <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2">
+                    <Settings className="h-4 w-4 text-blue-600" />
+                    AI Model Configuration
+                  </h4>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 mb-1">STT Model *</label>
+                      <select
+                        value={callForm.sttModel}
+                        onChange={(e) => setCallForm({ ...callForm, sttModel: e.target.value })}
+                        className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                      >
+                        <option value="whisper-1">whisper-1</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 mb-1">Inference Model *</label>
+                      <select
+                        value={callForm.inferenceModel}
+                        onChange={(e) => setCallForm({ ...callForm, inferenceModel: e.target.value })}
+                        className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                      >
+                        <option value="gpt-4o-mini">gpt-4o-mini (Fast, Cost-effective)</option>
+                        <option value="gpt-4o">gpt-4o (More Capable)</option>
+                        <option value="gpt-4o-realtime-preview-2024-12-17">gpt-4o-realtime-preview (Realtime)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 mb-1">TTS Model *</label>
+                      <select
+                        value={callForm.ttsModel}
+                        onChange={(e) => setCallForm({ ...callForm, ttsModel: e.target.value })}
+                        className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                      >
+                        <option value="tts-1">tts-1 (Faster, Lower Latency)</option>
+                        <option value="tts-1-hd">tts-1-hd (Higher Quality)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 mb-1">TTS Voice *</label>
+                      <select
+                        value={callForm.ttsVoice}
+                        onChange={(e) => setCallForm({ ...callForm, ttsVoice: e.target.value })}
+                        className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                      >
+                        <option value="alloy">alloy</option>
+                        <option value="echo">echo</option>
+                        <option value="fable">fable</option>
+                        <option value="onyx">onyx</option>
+                        <option value="nova">nova</option>
+                        <option value="shimmer">shimmer</option>
+                      </select>
+                    </div>
+                  </div>
                 </div>
               )}
 

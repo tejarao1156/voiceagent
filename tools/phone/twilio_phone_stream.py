@@ -142,6 +142,22 @@ class TwilioStreamHandler:
         if is_outbound:
             logger.info(f"📤 Detected OUTBOUND call in stream handler - AI will drive the conversation")
         
+        # =====================================================================
+        # CODE REUSE: Use agent_config from webhook (same flow for incoming/outgoing)
+        # =====================================================================
+        # PRIORITY 0: Check if agent_config was passed from webhook
+        # This reuses the already-loaded config, avoiding double-loading and normalization issues
+        agent_config_param = custom_params.get('AgentConfig')
+        if not self.agent_config and agent_config_param:
+            try:
+                import json
+                decoded_config = base64.b64decode(agent_config_param.encode('utf-8')).decode('utf-8')
+                self.agent_config = json.loads(decoded_config)
+                logger.info(f"✅ Using agent_config from webhook (reused code path): {self.agent_config.get('name')}")
+                logger.info(f"   Greeting: '{self.agent_config.get('greeting', 'No greeting')[:50]}...'")
+            except Exception as e:
+                logger.warning(f"Could not decode agent_config from webhook: {e}")
+        
         # Check for Scheduled Call ID (Priority 1)
         scheduled_call_id = custom_params.get('ScheduledCallId')
         if not self.agent_config and scheduled_call_id:
@@ -152,19 +168,23 @@ class TwilioStreamHandler:
                 scheduled_call = await scheduled_store.get_scheduled_call(scheduled_call_id)
                 
                 if scheduled_call:
-                    # Construct virtual agent config
+                    # Construct virtual agent config with all AI model defaults
                     self.agent_config = {
                         "name": "Scheduled Call Agent",
                         "phoneNumber": from_number,
                         "systemPrompt": scheduled_call.get("prompt") or "You are a helpful AI assistant.",
                         "greeting": scheduled_call.get("introduction") or "Hello! I am calling regarding your scheduled appointment.",
+                        # Default AI model configuration (will be overridden by ai_config if present)
+                        "sttModel": "whisper-1",
                         "inferenceModel": "gpt-4o-mini",
+                        "ttsModel": "tts-1",
                         "ttsVoice": "alloy",
                         "active": True
                     }
-                    # Merge specific AI config if present
+                    # Merge specific AI config if present (overrides defaults)
                     if scheduled_call.get("ai_config"):
                         self.agent_config.update(scheduled_call.get("ai_config"))
+                        logger.info(f"   AI Config: STT={self.agent_config.get('sttModel')}, LLM={self.agent_config.get('inferenceModel')}, TTS={self.agent_config.get('ttsModel')}, Voice={self.agent_config.get('ttsVoice')}")
                         
                     logger.info(f"✅ Loaded virtual agent config from Schedule {scheduled_call_id}")
                     logger.info(f"   Greeting: '{self.agent_config.get('greeting')}'")
