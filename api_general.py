@@ -5909,6 +5909,211 @@ async def live_transcript_websocket(websocket: WebSocket, call_sid: str):
             pass
 
 # ============================================================================
+# PHONE CONFIGURATION MANAGEMENT ENDPOINTS (Admin)
+# ============================================================================
+
+@app.post(
+    "/admin/phone-config",
+    summary="Create or Update Phone Configuration",
+    description="Create or update AI configuration for a specific Twilio phone number",
+    tags=["Phone Configuration"]
+)
+async def create_phone_config(config_data: Dict[str, Any]):
+    """
+    Create or update configuration for a phone number.
+    
+    Example request body:
+    ```json
+    {
+        "phone_number": "+18668134984",
+        "display_name": "Sales Line",
+        "stt_model": "whisper-1",
+        "tts_model": "tts-1",
+        "tts_voice": "nova",
+        "inference_model": "gpt-4o-mini",
+        "temperature": 0.7,
+        "max_tokens": 500,
+        "system_prompt": "You are a sales representative...",
+        "greeting": "Welcome to our sales team!",
+        "enable_interrupts": true,
+        "interrupt_timeout": 0.5,
+        "enable_recording": true,
+        "max_call_duration": 3600,
+        "is_active": true
+    }
+    ```
+    """
+    try:
+        from config_manager import config_manager
+        from databases.mongodb_phone_config_models import PhoneNumberConfig
+        
+        # Validate required fields
+        phone_number = config_data.get("phone_number")
+        if not phone_number:
+            raise HTTPException(status_code=400, detail="phone_number is required")
+        
+        # Validate using Pydantic model (will raise ValidationError if invalid)
+        try:
+            validated_config = PhoneNumberConfig(**config_data)
+            config_dict = validated_config.model_dump(exclude_none=True)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid configuration: {str(e)}")
+        
+        # Save to MongoDB
+        success = await config_manager.save_phone_config(config_dict)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to save configuration")
+        
+        # Invalidate cache for this number
+        config_manager.invalidate_cache(phone_number)
+        
+        logger.info(f"✅ Phone config saved: {phone_number}")
+        
+        return {
+            "success": True,
+            "message": f"Configuration saved for {phone_number}",
+            "config": config_dict
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error saving phone config: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/admin/phone-config/{phone_number:path}",
+    summary="Get Phone Configuration",
+    description="Retrieve AI configuration for a specific phone number",
+    tags=["Phone Configuration"]
+)
+async def get_phone_config(phone_number: str):
+    """Get configuration for a specific phone number"""
+    try:
+        from config_manager import config_manager
+        
+        # Normalize and query
+        config = await config_manager._get_phone_config_from_db(phone_number)
+        if not config:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Configuration not found for {phone_number}. Use POST /admin/phone-config to create one."
+            )
+        
+        return {
+            "success": True,
+            "config": config
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching phone config: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/admin/phone-configs",
+    summary="List All Phone Configurations",
+    description="List all active phone number configurations",
+    tags=["Phone Configuration"]
+)
+async def list_phone_configs(include_inactive: bool = Query(False, description="Include inactive configs")):
+    """List all phone configurations"""
+    try:
+        from config_manager import config_manager
+        
+        configs = await config_manager.list_phone_configs(include_inactive=include_inactive)
+        
+        return {
+            "success": True,
+            "total": len(configs),
+            "configs": configs
+        }
+    except Exception as e:
+        logger.error(f"Error listing phone configs: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put(
+    "/admin/phone-config/{phone_number:path}",
+    summary="Update Phone Configuration",
+    description="Update existing configuration for a phone number (partial update supported)",
+    tags=["Phone Configuration"]
+)
+async def update_phone_config(phone_number: str, config_updates: Dict[str, Any]):
+    """Update configuration for a phone number (partial updates allowed)"""
+    try:
+        from config_manager import config_manager
+        
+        # Get existing config
+        existing = await config_manager._get_phone_config_from_db(phone_number)
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"Configuration not found for {phone_number}")
+        
+        # Merge updates
+        updated_config = {**existing, **config_updates}
+        updated_config["phone_number"] = phone_number  # Ensure phone_number doesn't change
+        
+        # Validate
+        from databases.mongodb_phone_config_models import PhoneNumberConfig
+        try:
+            validated_config = PhoneNumberConfig(**updated_config)
+            config_dict = validated_config.model_dump(exclude_none=True)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid configuration: {str(e)}")
+        
+        # Save
+        success = await config_manager.save_phone_config(config_dict)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to update configuration")
+        
+        # Invalidate cache
+        config_manager.invalidate_cache(phone_number)
+        
+        logger.info(f"✅ Phone config updated: {phone_number}")
+        
+        return {
+            "success": True,
+            "message": f"Configuration updated for {phone_number}",
+            "config": config_dict
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating phone config: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete(
+    "/admin/phone-config/{phone_number:path}",
+    summary="Delete Phone Configuration",
+    description="Delete (deactivate) configuration for a phone number",
+    tags=["Phone Configuration"]
+)
+async def delete_phone_config(
+    phone_number: str,
+    hard_delete: bool = Query(False, description="Permanently delete instead of soft delete")
+):
+    """Delete configuration for a phone number"""
+    try:
+        from config_manager import config_manager
+        
+        success = await config_manager.delete_phone_config(phone_number, hard_delete=hard_delete)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Configuration not found for {phone_number}")
+        
+        # Invalidate cache
+        config_manager.invalidate_cache(phone_number)
+        
+        logger.info(f"✅ Phone config deleted: {phone_number} (hard_delete={hard_delete})")
+        
+        return {
+            "success": True,
+            "message": f"Configuration {'permanently deleted' if hard_delete else 'deactivated'} for {phone_number}"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting phone config: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
 # CALL FLOW TESTING ENDPOINTS
 # ============================================================================
 

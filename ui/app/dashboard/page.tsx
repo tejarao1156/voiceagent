@@ -211,6 +211,12 @@ const LogsView = () => {
   const [filter, setFilter] = useState<'all' | 'ongoing' | 'finished'>('all')
   const transcriptRef = useRef<HTMLDivElement>(null)
   const lastCallsHashRef = useRef<string>('')
+  const selectedCallRef = useRef<any>(null) // Ref to avoid stale closure in polling
+
+  // Keep ref in sync with state
+  useEffect(() => {
+    selectedCallRef.current = selectedCall
+  }, [selectedCall])
 
   // Auto-scroll transcript to bottom when new messages arrive
   useEffect(() => {
@@ -239,9 +245,10 @@ const LogsView = () => {
             setCalls(result.calls)
 
             // Update selected call if it exists (for live updates)
-            if (selectedCall) {
-              const updatedCall = result.calls.find((c: any) => c.call_sid === selectedCall.call_sid)
-              if (updatedCall && JSON.stringify(updatedCall) !== JSON.stringify(selectedCall)) {
+            // Use ref to get current value (avoids stale closure)
+            if (selectedCallRef.current) {
+              const updatedCall = result.calls.find((c: any) => c.call_sid === selectedCallRef.current.call_sid)
+              if (updatedCall) {
                 setSelectedCall(updatedCall)
               }
             }
@@ -256,9 +263,9 @@ const LogsView = () => {
   // Initial load and polling
   useEffect(() => {
     loadCalls()
-    const interval = setInterval(loadCalls, 3000) // Poll every 3 seconds
+    const interval = setInterval(loadCalls, 2000) // Poll every 2 seconds for real-time feel
     return () => clearInterval(interval)
-  }, []) // Remove selectedCall dependency to prevent re-binding
+  }, [])
 
   const filteredCalls = calls.filter(call => {
     if (filter === 'all') return true

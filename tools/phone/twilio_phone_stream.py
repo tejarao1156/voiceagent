@@ -22,7 +22,7 @@ VAD_FRAME_DURATION_MS = 20
 VAD_FRAME_BYTES = (VAD_SAMPLE_RATE * VAD_FRAME_DURATION_MS // 1000)
 
 # Audio quality thresholds for human-like conversation
-MIN_RMS_THRESHOLD = 500  # Minimum audio energy (RMS) to consider as real speech (filters background noise)
+MIN_RMS_THRESHOLD = 300  # Minimum audio energy (RMS) to consider as real speech (filters background noise)
 MIN_SPEECH_DURATION_FRAMES = 15  # 15 frames * 20ms = 300ms minimum speech before processing
 
 # Noise phrase filtering - common STT artifacts that should be ignored
@@ -62,19 +62,35 @@ class TwilioStreamHandler:
         
         # Human-like conversation tuning parameters
         self.SILENCE_THRESHOLD_FRAMES = 50  # 50 frames * 20ms/frame = 1000ms of silence to trigger processing (let users pause naturally)
-        self.INTERRUPT_GRACE_PERIOD_MS = 1500  # Wait 1500ms after AI starts speaking before allowing interrupts (prevents echo)
-        self.MIN_INTERRUPT_FRAMES = 20  # Require at least 20 frames (400ms) of sustained speech for valid interrupt
+        self.INTERRUPT_GRACE_PERIOD_MS = 500  # Wait 500ms after AI starts speaking before allowing interrupts (prevents echo)
+        self.MIN_INTERRUPT_FRAMES = 5  # Require at least 5 frames (100ms) of sustained speech for valid interrupt
         
         # New: Audio quality validation
         self.rms_buffer: List[int] = []  # Track RMS values for average calculation
         self.greeting_complete = False  # Block speech processing until greeting finishes
         self.call_settling_complete = False  # Block speech until call has settled
         self.last_interrupt_time = 0.0  # Track last interrupt time for debouncing
-        self.INTERRUPT_DEBOUNCE_MS = 2000  # Minimum 2 seconds between interrupts
+        self.INTERRUPT_DEBOUNCE_MS = 1000  # Minimum 1 second between interrupts
         
         self.speech_processing_lock = asyncio.Lock()  # Prevent concurrent speech processing
         self.speech_processing_task = None  # Track active speech processing task for cancellation
         self.query_sequence = 0  # Track query sequence to ensure we process the most recent
+        
+        # Stop words that trigger auto-hangup after AI speaks them
+        self.CALL_END_PHRASES = [
+            "goodbye", "bye-bye", "bye bye", "good bye", "bye.",
+            "take care", "have a great day", "have a good day",
+            "talk to you later", "speak to you later", "have a nice day",
+            "thanks for calling", "thank you for calling"
+        ]
+    
+    def _should_end_call(self, text: str) -> bool:
+        """Check if text contains farewell phrases indicating call should end."""
+        text_lower = text.lower()
+        for phrase in self.CALL_END_PHRASES:
+            if phrase in text_lower:
+                return True
+        return False
 
     async def handle_stream(self):
         """Main loop to receive and process audio from the Twilio media stream."""
@@ -724,6 +740,14 @@ class TwilioStreamHandler:
                 self.tts_streaming_task = asyncio.create_task(self._synthesize_and_stream_tts(response_text))
                 try:
                     await self.tts_streaming_task
+                    
+                    # Check for call-ending phrases in AI response
+                    if self._should_end_call(response_text):
+                        logger.info(f"👋 Detected call-ending phrase in AI response, auto-hanging up call {self.call_sid}...")
+                        await asyncio.sleep(1.0)  # Brief pause to let audio finish
+                        await self.hangup_call("Conversation concluded normally")
+                        return
+                        
                 except asyncio.CancelledError:
                     logger.info("🛑 TTS task was cancelled (interrupt handled).")
             except asyncio.CancelledError:
