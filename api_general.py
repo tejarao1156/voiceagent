@@ -1842,6 +1842,18 @@ async def twilio_incoming_call(request: Request):
                 stream.parameter(name="ScheduledCallId", value=scheduled_call_id)
                 logger.info(f"🗓️ Passed ScheduledCallId to stream: {scheduled_call_id}")
 
+            # =====================================================================
+            # CODE REUSE: Pass agent_config to stream handler (same for incoming/outgoing)
+            # =====================================================================
+            # This avoids double-loading and normalization issues in stream handler
+            if agent_config:
+                import base64
+                import json
+                encoded_config = base64.b64encode(json.dumps(agent_config).encode('utf-8')).decode('utf-8')
+                stream.parameter(name="AgentConfig", value=encoded_config)
+                logger.info(f"📤 Passing agent_config to stream handler (reused code path): {agent_config.get('name')}")
+
+
             # Pass custom context via stream parameter if available
             if custom_context and is_outbound_call:
                 # Encode context to avoid issues with special characters
@@ -4191,8 +4203,8 @@ async def create_scheduled_call(request: Request, user: Dict[str, Any] = Depends
             except Exception as e:
                 logger.warning(f"Failed to lookup phone by number: {e}")
         
-        if not registered_phone or registered_phone.get("isActive") == False or registered_phone.get("isDeleted") == True:
-            raise HTTPException(status_code=400, detail=f"Phone number is not registered or inactive. Please register the phone number first.")
+        if not registered_phone or registered_phone.get("isDeleted") == True:
+            raise HTTPException(status_code=400, detail=f"Phone number is not registered. Please register the phone number first.")
         
         # Handle prompt: if promptId is provided, fetch the prompt content
         prompt_id = call_data.get("promptId")
@@ -4226,6 +4238,17 @@ async def create_scheduled_call(request: Request, user: Dict[str, Any] = Depends
             # If AI call but no prompt provided, use default
             call_data["prompt"] = "You are a helpful AI assistant"
             logger.info("ℹ️ Using default prompt for AI scheduled call")
+        
+        # Store AI model configuration for AI calls
+        if call_data.get("callType") == "ai":
+            ai_config = {
+                "sttModel": call_data.get("sttModel", "whisper-1"),
+                "inferenceModel": call_data.get("inferenceModel", "gpt-4o-mini"),
+                "ttsModel": call_data.get("ttsModel", "tts-1"),
+                "ttsVoice": call_data.get("ttsVoice", "alloy"),
+            }
+            call_data["ai_config"] = ai_config
+            logger.info(f"✅ AI model config: STT={ai_config['sttModel']}, LLM={ai_config['inferenceModel']}, TTS={ai_config['ttsModel']}, Voice={ai_config['ttsVoice']}")
         
         scheduled_call_store = MongoDBScheduledCallStore()
         call_id = await scheduled_call_store.create_scheduled_call(call_data, user["user_id"])
@@ -4590,7 +4613,7 @@ async def hangup_twilio_call(call_sid: str, reason: str = Query("Call ended by s
         }
     }
 )
-async def make_outbound_call(request: Request):
+async def make_outbound_call(request: Request, user: Dict[str, Any] = Depends(get_current_active_user)):
     """
     Make an outbound phone call.
     
@@ -4604,12 +4627,13 @@ async def make_outbound_call(request: Request):
     ```
     
     **Validation:**
-    - The from phone number MUST be registered and active in MongoDB
+    - The from phone number MUST belong to the logged-in user
+    - The from phone number MUST NOT be deleted
     - The to phone number must be in valid E.164 format
     - Custom context is optional - if not provided, uses default agent system prompt
     
     **Flow:**
-    1. Validates from number is registered and active
+    1. Validates from number belongs to logged-in user and is not deleted
     2. Gets Twilio credentials for the from number
     3. Initiates call via Twilio REST API
     4. When call connects, webhook uses from number to identify agent
@@ -4644,10 +4668,19 @@ async def make_outbound_call(request: Request):
         normalized_to = normalize_phone_number(to_number)
         
         logger.info(f"📞 Initiating outbound call: {normalized_from} -> {normalized_to}")
+        logger.info(f"   User: {user['email']} (ID: {user['user_id']})")
         if custom_context:
             logger.info(f"   Custom context provided: {custom_context[:100]}...")
         
-        # VALIDATION: Check if 'from' phone number is registered and active
+        # =====================================================================
+        # VALIDATION: Check if 'from' phone belongs to logged-in user
+        # =====================================================================
+        # Requirements (from implementation plan):
+        #   1. Phone must be registered
+        #   2. Must belong to this user (filter by user_id)
+        #   3. Must not be deleted (check isDeleted)
+        #   4. Do NOT check isActive
+        
         if not is_mongodb_available():
             raise HTTPException(
                 status_code=503,
@@ -4655,30 +4688,33 @@ async def make_outbound_call(request: Request):
             )
         
         phone_store = MongoDBPhoneStore()
-        registered_phone = await phone_store.get_phone_by_number(normalized_from, type_filter="calls")
+        
+        # Get user's registered phones (filtered by user_id from login session)
+        user_phones = await phone_store.list_phones(user_id=user["user_id"])
+        
+        # Find matching phone in user's registered phones
+        registered_phone = None
+        for phone in user_phones:
+            if normalize_phone_number(phone.get("phoneNumber", "")) == normalized_from:
+                registered_phone = phone
+                break
         
         if not registered_phone:
-            logger.warning(f"❌ Phone number '{normalized_from}' is NOT registered in MongoDB")
+            logger.warning(f"❌ Phone '{normalized_from}' not registered to user {user['email']}")
             raise HTTPException(
-                status_code=400,
-                detail=f"Phone number {normalized_from} is not registered. Please register the phone number through the app UI first."
+                status_code=403,
+                detail=f"Phone number {normalized_from} is not registered to your account. Please register it first."
             )
         
-        if registered_phone.get("isActive") == False:
-            logger.warning(f"❌ Phone number '{normalized_from}' is registered but INACTIVE")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Phone number {normalized_from} is registered but inactive. Please activate it first."
-            )
-        
+        # Check if phone is deleted (but do NOT check isActive)
         if registered_phone.get("isDeleted") == True:
-            logger.warning(f"❌ Phone number '{normalized_from}' is DELETED")
+            logger.warning(f"❌ Phone '{normalized_from}' has been deleted")
             raise HTTPException(
                 status_code=400,
                 detail=f"Phone number {normalized_from} has been deleted. Please register it again."
             )
         
-        logger.info(f"✅ Phone number '{normalized_from}' is registered and active")
+        logger.info(f"✅ Phone '{normalized_from}' validated for user {user['email']}")
         logger.info(f"   Registered phone ID: {registered_phone.get('id')}")
         
         # Get Twilio credentials for the 'from' number
@@ -5871,6 +5907,211 @@ async def live_transcript_websocket(websocket: WebSocket, call_sid: str):
             await websocket.close()
         except:
             pass
+
+# ============================================================================
+# PHONE CONFIGURATION MANAGEMENT ENDPOINTS (Admin)
+# ============================================================================
+
+@app.post(
+    "/admin/phone-config",
+    summary="Create or Update Phone Configuration",
+    description="Create or update AI configuration for a specific Twilio phone number",
+    tags=["Phone Configuration"]
+)
+async def create_phone_config(config_data: Dict[str, Any]):
+    """
+    Create or update configuration for a phone number.
+    
+    Example request body:
+    ```json
+    {
+        "phone_number": "+18668134984",
+        "display_name": "Sales Line",
+        "stt_model": "whisper-1",
+        "tts_model": "tts-1",
+        "tts_voice": "nova",
+        "inference_model": "gpt-4o-mini",
+        "temperature": 0.7,
+        "max_tokens": 500,
+        "system_prompt": "You are a sales representative...",
+        "greeting": "Welcome to our sales team!",
+        "enable_interrupts": true,
+        "interrupt_timeout": 0.5,
+        "enable_recording": true,
+        "max_call_duration": 3600,
+        "is_active": true
+    }
+    ```
+    """
+    try:
+        from config_manager import config_manager
+        from databases.mongodb_phone_config_models import PhoneNumberConfig
+        
+        # Validate required fields
+        phone_number = config_data.get("phone_number")
+        if not phone_number:
+            raise HTTPException(status_code=400, detail="phone_number is required")
+        
+        # Validate using Pydantic model (will raise ValidationError if invalid)
+        try:
+            validated_config = PhoneNumberConfig(**config_data)
+            config_dict = validated_config.model_dump(exclude_none=True)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid configuration: {str(e)}")
+        
+        # Save to MongoDB
+        success = await config_manager.save_phone_config(config_dict)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to save configuration")
+        
+        # Invalidate cache for this number
+        config_manager.invalidate_cache(phone_number)
+        
+        logger.info(f"✅ Phone config saved: {phone_number}")
+        
+        return {
+            "success": True,
+            "message": f"Configuration saved for {phone_number}",
+            "config": config_dict
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error saving phone config: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/admin/phone-config/{phone_number:path}",
+    summary="Get Phone Configuration",
+    description="Retrieve AI configuration for a specific phone number",
+    tags=["Phone Configuration"]
+)
+async def get_phone_config(phone_number: str):
+    """Get configuration for a specific phone number"""
+    try:
+        from config_manager import config_manager
+        
+        # Normalize and query
+        config = await config_manager._get_phone_config_from_db(phone_number)
+        if not config:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Configuration not found for {phone_number}. Use POST /admin/phone-config to create one."
+            )
+        
+        return {
+            "success": True,
+            "config": config
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching phone config: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/admin/phone-configs",
+    summary="List All Phone Configurations",
+    description="List all active phone number configurations",
+    tags=["Phone Configuration"]
+)
+async def list_phone_configs(include_inactive: bool = Query(False, description="Include inactive configs")):
+    """List all phone configurations"""
+    try:
+        from config_manager import config_manager
+        
+        configs = await config_manager.list_phone_configs(include_inactive=include_inactive)
+        
+        return {
+            "success": True,
+            "total": len(configs),
+            "configs": configs
+        }
+    except Exception as e:
+        logger.error(f"Error listing phone configs: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put(
+    "/admin/phone-config/{phone_number:path}",
+    summary="Update Phone Configuration",
+    description="Update existing configuration for a phone number (partial update supported)",
+    tags=["Phone Configuration"]
+)
+async def update_phone_config(phone_number: str, config_updates: Dict[str, Any]):
+    """Update configuration for a phone number (partial updates allowed)"""
+    try:
+        from config_manager import config_manager
+        
+        # Get existing config
+        existing = await config_manager._get_phone_config_from_db(phone_number)
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"Configuration not found for {phone_number}")
+        
+        # Merge updates
+        updated_config = {**existing, **config_updates}
+        updated_config["phone_number"] = phone_number  # Ensure phone_number doesn't change
+        
+        # Validate
+        from databases.mongodb_phone_config_models import PhoneNumberConfig
+        try:
+            validated_config = PhoneNumberConfig(**updated_config)
+            config_dict = validated_config.model_dump(exclude_none=True)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid configuration: {str(e)}")
+        
+        # Save
+        success = await config_manager.save_phone_config(config_dict)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to update configuration")
+        
+        # Invalidate cache
+        config_manager.invalidate_cache(phone_number)
+        
+        logger.info(f"✅ Phone config updated: {phone_number}")
+        
+        return {
+            "success": True,
+            "message": f"Configuration updated for {phone_number}",
+            "config": config_dict
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating phone config: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete(
+    "/admin/phone-config/{phone_number:path}",
+    summary="Delete Phone Configuration",
+    description="Delete (deactivate) configuration for a phone number",
+    tags=["Phone Configuration"]
+)
+async def delete_phone_config(
+    phone_number: str,
+    hard_delete: bool = Query(False, description="Permanently delete instead of soft delete")
+):
+    """Delete configuration for a phone number"""
+    try:
+        from config_manager import config_manager
+        
+        success = await config_manager.delete_phone_config(phone_number, hard_delete=hard_delete)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Configuration not found for {phone_number}")
+        
+        # Invalidate cache
+        config_manager.invalidate_cache(phone_number)
+        
+        logger.info(f"✅ Phone config deleted: {phone_number} (hard_delete={hard_delete})")
+        
+        return {
+            "success": True,
+            "message": f"Configuration {'permanently deleted' if hard_delete else 'deactivated'} for {phone_number}"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting phone config: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
 # CALL FLOW TESTING ENDPOINTS

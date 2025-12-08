@@ -22,7 +22,7 @@ VAD_FRAME_DURATION_MS = 20
 VAD_FRAME_BYTES = (VAD_SAMPLE_RATE * VAD_FRAME_DURATION_MS // 1000)
 
 # Audio quality thresholds for human-like conversation
-MIN_RMS_THRESHOLD = 500  # Minimum audio energy (RMS) to consider as real speech (filters background noise)
+MIN_RMS_THRESHOLD = 300  # Minimum audio energy (RMS) to consider as real speech (filters background noise)
 MIN_SPEECH_DURATION_FRAMES = 15  # 15 frames * 20ms = 300ms minimum speech before processing
 
 # Noise phrase filtering - common STT artifacts that should be ignored
@@ -62,19 +62,35 @@ class TwilioStreamHandler:
         
         # Human-like conversation tuning parameters
         self.SILENCE_THRESHOLD_FRAMES = 50  # 50 frames * 20ms/frame = 1000ms of silence to trigger processing (let users pause naturally)
-        self.INTERRUPT_GRACE_PERIOD_MS = 1500  # Wait 1500ms after AI starts speaking before allowing interrupts (prevents echo)
-        self.MIN_INTERRUPT_FRAMES = 20  # Require at least 20 frames (400ms) of sustained speech for valid interrupt
+        self.INTERRUPT_GRACE_PERIOD_MS = 500  # Wait 500ms after AI starts speaking before allowing interrupts (prevents echo)
+        self.MIN_INTERRUPT_FRAMES = 5  # Require at least 5 frames (100ms) of sustained speech for valid interrupt
         
         # New: Audio quality validation
         self.rms_buffer: List[int] = []  # Track RMS values for average calculation
         self.greeting_complete = False  # Block speech processing until greeting finishes
         self.call_settling_complete = False  # Block speech until call has settled
         self.last_interrupt_time = 0.0  # Track last interrupt time for debouncing
-        self.INTERRUPT_DEBOUNCE_MS = 2000  # Minimum 2 seconds between interrupts
+        self.INTERRUPT_DEBOUNCE_MS = 1000  # Minimum 1 second between interrupts
         
         self.speech_processing_lock = asyncio.Lock()  # Prevent concurrent speech processing
         self.speech_processing_task = None  # Track active speech processing task for cancellation
         self.query_sequence = 0  # Track query sequence to ensure we process the most recent
+        
+        # Stop words that trigger auto-hangup after AI speaks them
+        self.CALL_END_PHRASES = [
+            "goodbye", "bye-bye", "bye bye", "good bye", "bye.",
+            "take care", "have a great day", "have a good day",
+            "talk to you later", "speak to you later", "have a nice day",
+            "thanks for calling", "thank you for calling"
+        ]
+    
+    def _should_end_call(self, text: str) -> bool:
+        """Check if text contains farewell phrases indicating call should end."""
+        text_lower = text.lower()
+        for phrase in self.CALL_END_PHRASES:
+            if phrase in text_lower:
+                return True
+        return False
 
     async def handle_stream(self):
         """Main loop to receive and process audio from the Twilio media stream."""
@@ -142,6 +158,22 @@ class TwilioStreamHandler:
         if is_outbound:
             logger.info(f"📤 Detected OUTBOUND call in stream handler - AI will drive the conversation")
         
+        # =====================================================================
+        # CODE REUSE: Use agent_config from webhook (same flow for incoming/outgoing)
+        # =====================================================================
+        # PRIORITY 0: Check if agent_config was passed from webhook
+        # This reuses the already-loaded config, avoiding double-loading and normalization issues
+        agent_config_param = custom_params.get('AgentConfig')
+        if not self.agent_config and agent_config_param:
+            try:
+                import json
+                decoded_config = base64.b64decode(agent_config_param.encode('utf-8')).decode('utf-8')
+                self.agent_config = json.loads(decoded_config)
+                logger.info(f"✅ Using agent_config from webhook (reused code path): {self.agent_config.get('name')}")
+                logger.info(f"   Greeting: '{self.agent_config.get('greeting', 'No greeting')[:50]}...'")
+            except Exception as e:
+                logger.warning(f"Could not decode agent_config from webhook: {e}")
+        
         # Check for Scheduled Call ID (Priority 1)
         scheduled_call_id = custom_params.get('ScheduledCallId')
         if not self.agent_config and scheduled_call_id:
@@ -152,19 +184,23 @@ class TwilioStreamHandler:
                 scheduled_call = await scheduled_store.get_scheduled_call(scheduled_call_id)
                 
                 if scheduled_call:
-                    # Construct virtual agent config
+                    # Construct virtual agent config with all AI model defaults
                     self.agent_config = {
                         "name": "Scheduled Call Agent",
                         "phoneNumber": from_number,
                         "systemPrompt": scheduled_call.get("prompt") or "You are a helpful AI assistant.",
                         "greeting": scheduled_call.get("introduction") or "Hello! I am calling regarding your scheduled appointment.",
+                        # Default AI model configuration (will be overridden by ai_config if present)
+                        "sttModel": "whisper-1",
                         "inferenceModel": "gpt-4o-mini",
+                        "ttsModel": "tts-1",
                         "ttsVoice": "alloy",
                         "active": True
                     }
-                    # Merge specific AI config if present
+                    # Merge specific AI config if present (overrides defaults)
                     if scheduled_call.get("ai_config"):
                         self.agent_config.update(scheduled_call.get("ai_config"))
+                        logger.info(f"   AI Config: STT={self.agent_config.get('sttModel')}, LLM={self.agent_config.get('inferenceModel')}, TTS={self.agent_config.get('ttsModel')}, Voice={self.agent_config.get('ttsVoice')}")
                         
                     logger.info(f"✅ Loaded virtual agent config from Schedule {scheduled_call_id}")
                     logger.info(f"   Greeting: '{self.agent_config.get('greeting')}'")
@@ -283,8 +319,9 @@ class TwilioStreamHandler:
             persona=None
         )
         # Set system prompt in session data if agent config has one
+        # CRITICAL: Use snake_case "system_prompt" to match what conversation_manager.py expects
         if self.agent_config and self.agent_config.get("systemPrompt"):
-            session_info["systemPrompt"] = self.agent_config.get("systemPrompt")
+            session_info["system_prompt"] = self.agent_config.get("systemPrompt")
         
         self.session_id = session_info.get("session_id")
         self.session_data = session_info
@@ -703,6 +740,14 @@ class TwilioStreamHandler:
                 self.tts_streaming_task = asyncio.create_task(self._synthesize_and_stream_tts(response_text))
                 try:
                     await self.tts_streaming_task
+                    
+                    # Check for call-ending phrases in AI response
+                    if self._should_end_call(response_text):
+                        logger.info(f"👋 Detected call-ending phrase in AI response, auto-hanging up call {self.call_sid}...")
+                        await asyncio.sleep(1.0)  # Brief pause to let audio finish
+                        await self.hangup_call("Conversation concluded normally")
+                        return
+                        
                 except asyncio.CancelledError:
                     logger.info("🛑 TTS task was cancelled (interrupt handled).")
             except asyncio.CancelledError:
