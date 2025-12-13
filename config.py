@@ -35,6 +35,13 @@ TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")  # Use tts-1 for faster response (lo
 INFERENCE_MODEL = os.getenv("INFERENCE_MODEL", "gpt-4o-mini")
 
 # ============================================================================
+# GEMINI CONFIGURATION (Alternative to OpenAI for STT/TTS)
+# ============================================================================
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_STT_MODEL = os.getenv("GEMINI_STT_MODEL", "gemini-2.0-flash")
+GEMINI_TTS_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
+
+# ============================================================================
 # API CONFIGURATION
 # ============================================================================
 API_HOST = os.getenv("API_HOST", "0.0.0.0")

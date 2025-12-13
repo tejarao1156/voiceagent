@@ -1912,6 +1912,7 @@ const IncomingAgentView = () => {
   const [agentForm, setAgentForm] = useState({
     name: '',
     phoneNumber: '',
+    provider: 'openai' as 'openai' | 'gemini',  // Provider selection
     sttModel: 'whisper-1',
     inferenceModel: 'gpt-4o-mini',
     ttsModel: 'tts-1',
@@ -1923,6 +1924,54 @@ const IncomingAgentView = () => {
     maxTokens: 500,
     active: true,
   })
+
+  // Model options by provider
+  const providerModels = {
+    openai: {
+      stt: [{ value: 'whisper-1', label: 'whisper-1' }],
+      tts: [
+        { value: 'tts-1', label: 'tts-1 (Faster, Lower Latency)' },
+        { value: 'tts-1-hd', label: 'tts-1-hd (Higher Quality)' },
+      ],
+      voices: [
+        { value: 'alloy', label: 'alloy' },
+        { value: 'echo', label: 'echo' },
+        { value: 'fable', label: 'fable' },
+        { value: 'onyx', label: 'onyx' },
+        { value: 'nova', label: 'nova' },
+        { value: 'shimmer', label: 'shimmer' },
+      ],
+    },
+    gemini: {
+      stt: [
+        { value: 'gemini-2.0-flash', label: 'gemini-2.0-flash' },
+        { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash' },
+      ],
+      tts: [{ value: 'gemini-2.5-flash-preview-tts', label: 'gemini-tts' }],
+      voices: [
+        { value: 'Kore', label: 'Kore' },
+        { value: 'Puck', label: 'Puck' },
+        { value: 'Charon', label: 'Charon' },
+        { value: 'Fenrir', label: 'Fenrir' },
+        { value: 'Aoede', label: 'Aoede' },
+        { value: 'Leda', label: 'Leda' },
+        { value: 'Orus', label: 'Orus' },
+        { value: 'Zephyr', label: 'Zephyr' },
+      ],
+    },
+  }
+
+  // Handle provider change - reset models to provider defaults
+  const handleProviderChange = (newProvider: 'openai' | 'gemini') => {
+    const defaults = providerModels[newProvider]
+    setAgentForm({
+      ...agentForm,
+      provider: newProvider,
+      sttModel: defaults.stt[0].value,
+      ttsModel: defaults.tts[0].value,
+      ttsVoice: defaults.voices[0].value,
+    })
+  }
 
   // Form states for Register Phone Modal
   const [phoneForm, setPhoneForm] = useState({
@@ -2017,6 +2066,7 @@ const IncomingAgentView = () => {
         setAgentForm({
           name: '',
           phoneNumber: '',
+          provider: 'openai',
           sttModel: 'whisper-1',
           inferenceModel: 'gpt-4o-mini',
           ttsModel: 'tts-1',
@@ -2276,6 +2326,7 @@ const IncomingAgentView = () => {
                             setAgentForm({
                               name: agent.name,
                               phoneNumber: agent.phoneNumber,
+                              provider: agent.provider || 'openai',
                               sttModel: agent.sttModel || 'whisper-1',
                               inferenceModel: agent.inferenceModel || 'gpt-4o-mini',
                               ttsModel: agent.ttsModel || 'tts-1',
@@ -2422,6 +2473,38 @@ const IncomingAgentView = () => {
                 </button>
                 {expandedSections.aiModels && (
                   <div className="p-4 space-y-4">
+                    {/* Provider Selection */}
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">Provider *</label>
+                      <div className="flex gap-3">
+                        <button
+                          type="button"
+                          onClick={() => handleProviderChange('openai')}
+                          className={`flex-1 px-4 py-3 rounded-xl text-sm font-bold transition-all ${agentForm.provider === 'openai'
+                            ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
+                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                            }`}
+                        >
+                          OpenAI
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleProviderChange('gemini')}
+                          className={`flex-1 px-4 py-3 rounded-xl text-sm font-bold transition-all ${agentForm.provider === 'gemini'
+                            ? 'bg-purple-600 text-white shadow-lg shadow-purple-500/30'
+                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                            }`}
+                        >
+                          Gemini
+                        </button>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-2">
+                        {agentForm.provider === 'openai'
+                          ? 'Using OpenAI Whisper for STT and OpenAI TTS for voice synthesis'
+                          : 'Using Google Gemini for STT and TTS (requires GEMINI_API_KEY)'}
+                      </p>
+                    </div>
+
                     <div className="grid grid-cols-2 gap-4">
                       <div>
                         <label className="block text-sm font-medium text-slate-700 mb-2">STT Model *</label>
@@ -2430,7 +2513,9 @@ const IncomingAgentView = () => {
                           onChange={(e) => setAgentForm({ ...agentForm, sttModel: e.target.value })}
                           className="w-full rounded-xl border-none bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
                         >
-                          <option value="whisper-1">whisper-1</option>
+                          {providerModels[agentForm.provider].stt.map(model => (
+                            <option key={model.value} value={model.value}>{model.label}</option>
+                          ))}
                         </select>
                       </div>
                       <div>
@@ -2452,8 +2537,9 @@ const IncomingAgentView = () => {
                           onChange={(e) => setAgentForm({ ...agentForm, ttsModel: e.target.value })}
                           className="w-full rounded-xl border-none bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
                         >
-                          <option value="tts-1">tts-1 (Faster, Lower Latency)</option>
-                          <option value="tts-1-hd">tts-1-hd (Higher Quality)</option>
+                          {providerModels[agentForm.provider].tts.map(model => (
+                            <option key={model.value} value={model.value}>{model.label}</option>
+                          ))}
                         </select>
                       </div>
                       <div>
@@ -2463,12 +2549,9 @@ const IncomingAgentView = () => {
                           onChange={(e) => setAgentForm({ ...agentForm, ttsVoice: e.target.value })}
                           className="w-full rounded-xl border-none bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
                         >
-                          <option value="alloy">alloy</option>
-                          <option value="echo">echo</option>
-                          <option value="fable">fable</option>
-                          <option value="onyx">onyx</option>
-                          <option value="nova">nova</option>
-                          <option value="shimmer">shimmer</option>
+                          {providerModels[agentForm.provider].voices.map(voice => (
+                            <option key={voice.value} value={voice.value}>{voice.label}</option>
+                          ))}
                         </select>
                       </div>
                     </div>
@@ -3138,11 +3221,63 @@ const OutgoingAgentView = () => {
     scheduledDateTime: '',
     promptId: '',
     // AI Model Configuration
+    provider: 'openai' as 'openai' | 'gemini',
     sttModel: 'whisper-1',
     inferenceModel: 'gpt-4o-mini',
     ttsModel: 'tts-1',
     ttsVoice: 'alloy',
   })
+
+  // Handle provider change for call form
+  const handleCallProviderChange = (newProvider: 'openai' | 'gemini') => {
+    const defaults = {
+      openai: { stt: 'whisper-1', tts: 'tts-1', voice: 'alloy' },
+      gemini: { stt: 'gemini-2.0-flash', tts: 'gemini-2.5-flash-preview-tts', voice: 'Kore' },
+    }
+    setCallForm({
+      ...callForm,
+      provider: newProvider,
+      sttModel: defaults[newProvider].stt,
+      ttsModel: defaults[newProvider].tts,
+      ttsVoice: defaults[newProvider].voice,
+    })
+  }
+
+  // Call provider models (reuse from agent form)
+  const callProviderModels = {
+    openai: {
+      stt: [{ value: 'whisper-1', label: 'whisper-1' }],
+      tts: [
+        { value: 'tts-1', label: 'tts-1 (Faster)' },
+        { value: 'tts-1-hd', label: 'tts-1-hd (HD)' },
+      ],
+      voices: [
+        { value: 'alloy', label: 'alloy' },
+        { value: 'echo', label: 'echo' },
+        { value: 'fable', label: 'fable' },
+        { value: 'onyx', label: 'onyx' },
+        { value: 'nova', label: 'nova' },
+        { value: 'shimmer', label: 'shimmer' },
+      ],
+    },
+    gemini: {
+      stt: [
+        { value: 'gemini-2.0-flash', label: 'gemini-2.0-flash' },
+        { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash' },
+      ],
+      tts: [{ value: 'gemini-2.5-flash-preview-tts', label: 'gemini-tts' }],
+      voices: [
+        { value: 'Kore', label: 'Kore' },
+        { value: 'Puck', label: 'Puck' },
+        { value: 'Charon', label: 'Charon' },
+        { value: 'Fenrir', label: 'Fenrir' },
+        { value: 'Aoede', label: 'Aoede' },
+        { value: 'Leda', label: 'Leda' },
+        { value: 'Orus', label: 'Orus' },
+        { value: 'Zephyr', label: 'Zephyr' },
+      ],
+    },
+  }
 
   // Load scheduled calls
   const loadScheduledCalls = async () => {
@@ -3241,6 +3376,7 @@ const OutgoingAgentView = () => {
           toPhoneNumbers: [''],
           scheduledDateTime: '',
           promptId: '',
+          provider: 'openai',
           sttModel: 'whisper-1',
           inferenceModel: 'gpt-4o-mini',
           ttsModel: 'tts-1',
@@ -3302,6 +3438,7 @@ const OutgoingAgentView = () => {
               toPhoneNumbers: [''],
               scheduledDateTime: '',
               promptId: '',
+              provider: 'openai',
               sttModel: 'whisper-1',
               inferenceModel: 'gpt-4o-mini',
               ttsModel: 'tts-1',
@@ -3467,6 +3604,34 @@ const OutgoingAgentView = () => {
                     <Settings className="h-4 w-4 text-blue-600" />
                     AI Model Configuration
                   </h4>
+
+                  {/* Provider Selection */}
+                  <div className="mb-4">
+                    <label className="block text-xs font-medium text-slate-600 mb-2">Provider *</label>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleCallProviderChange('openai')}
+                        className={`flex-1 px-3 py-2 rounded-lg text-sm font-bold transition-all ${callForm.provider === 'openai'
+                          ? 'bg-blue-600 text-white shadow-md'
+                          : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50'
+                          }`}
+                      >
+                        OpenAI
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleCallProviderChange('gemini')}
+                        className={`flex-1 px-3 py-2 rounded-lg text-sm font-bold transition-all ${callForm.provider === 'gemini'
+                          ? 'bg-purple-600 text-white shadow-md'
+                          : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50'
+                          }`}
+                      >
+                        Gemini
+                      </button>
+                    </div>
+                  </div>
+
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs font-medium text-slate-600 mb-1">STT Model *</label>
@@ -3475,7 +3640,9 @@ const OutgoingAgentView = () => {
                         onChange={(e) => setCallForm({ ...callForm, sttModel: e.target.value })}
                         className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
                       >
-                        <option value="whisper-1">whisper-1</option>
+                        {callProviderModels[callForm.provider].stt.map(model => (
+                          <option key={model.value} value={model.value}>{model.label}</option>
+                        ))}
                       </select>
                     </div>
                     <div>
@@ -3497,8 +3664,9 @@ const OutgoingAgentView = () => {
                         onChange={(e) => setCallForm({ ...callForm, ttsModel: e.target.value })}
                         className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
                       >
-                        <option value="tts-1">tts-1 (Faster, Lower Latency)</option>
-                        <option value="tts-1-hd">tts-1-hd (Higher Quality)</option>
+                        {callProviderModels[callForm.provider].tts.map(model => (
+                          <option key={model.value} value={model.value}>{model.label}</option>
+                        ))}
                       </select>
                     </div>
                     <div>
@@ -3508,12 +3676,9 @@ const OutgoingAgentView = () => {
                         onChange={(e) => setCallForm({ ...callForm, ttsVoice: e.target.value })}
                         className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
                       >
-                        <option value="alloy">alloy</option>
-                        <option value="echo">echo</option>
-                        <option value="fable">fable</option>
-                        <option value="onyx">onyx</option>
-                        <option value="nova">nova</option>
-                        <option value="shimmer">shimmer</option>
+                        {callProviderModels[callForm.provider].voices.map(voice => (
+                          <option key={voice.value} value={voice.value}>{voice.label}</option>
+                        ))}
                       </select>
                     </div>
                   </div>

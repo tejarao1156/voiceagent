@@ -28,3 +28,4 @@ PyJWT>=2.8.0
 
 # Voice Agent specific dependencies
 webrtcvad-wheels
+google-genai>=1.55.0

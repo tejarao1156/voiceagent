@@ -13,7 +13,34 @@ from tools import SpeechToTextTool, ConversationalResponseTool, TextToSpeechTool
 from tools.phone.audio_utils import convert_pcm_to_mulaw, convert_mulaw_to_wav_bytes
 from conversation_manager import ConversationManager
 
+# Gemini tools (optional - only loaded if needed)
+try:
+    from tools.understanding.gemini_stt import GeminiSTTTool
+    from tools.response.gemini_tts import GeminiTTSTool
+    HAS_GEMINI_TOOLS = True
+except ImportError:
+    HAS_GEMINI_TOOLS = False
+    GeminiSTTTool = None
+    GeminiTTSTool = None
+
 logger = logging.getLogger(__name__)
+
+# Provider detection helpers
+GEMINI_STT_MODELS = {"gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"}
+GEMINI_TTS_MODELS = {"gemini-2.5-flash-preview-tts", "gemini-tts"}
+
+def is_gemini_stt_model(model: str) -> bool:
+    """Check if the model is a Gemini STT model."""
+    if not model:
+        return False
+    return any(m in model.lower() for m in ["gemini"])
+
+def is_gemini_tts_model(model: str) -> bool:
+    """Check if the model is a Gemini TTS model."""
+    if not model:
+        return False
+    return any(m in model.lower() for m in ["gemini"])
+
 
 # VAD configuration
 VAD_AGGRESSIVENESS = 3
@@ -83,6 +110,11 @@ class TwilioStreamHandler:
         self.SPECULATIVE_STT_INTERVAL_MS = 750  # Send audio to STT every 750ms during speech
         self.speculative_audio_buffer = bytearray()  # Audio buffer for speculative STT
         
+        # Gemini tools (initialized lazily based on agent config)
+        self.gemini_stt_tool = None
+        self.gemini_tts_tool = None
+        self._init_gemini_tools_if_needed()
+        
         # Stop words that trigger auto-hangup after AI speaks them
         self.CALL_END_PHRASES = [
             "goodbye", "bye-bye", "bye bye", "good bye", "bye.",
@@ -90,6 +122,23 @@ class TwilioStreamHandler:
             "talk to you later", "speak to you later", "have a nice day",
             "thanks for calling", "thank you for calling"
         ]
+    
+    def _init_gemini_tools_if_needed(self):
+        """Initialize Gemini tools if the agent config uses Gemini models."""
+        if not self.agent_config:
+            return
+        
+        # Check if agent uses Gemini for STT
+        stt_model = self.agent_config.get("sttModel", "")
+        if is_gemini_stt_model(stt_model) and HAS_GEMINI_TOOLS and GeminiSTTTool:
+            self.gemini_stt_tool = GeminiSTTTool()
+            logger.info(f"🔮 Initialized Gemini STT for model: {stt_model}")
+        
+        # Check if agent uses Gemini for TTS
+        tts_model = self.agent_config.get("ttsModel", "")
+        if is_gemini_tts_model(tts_model) and HAS_GEMINI_TOOLS and GeminiTTSTool:
+            self.gemini_tts_tool = GeminiTTSTool()
+            logger.info(f"🔮 Initialized Gemini TTS for model: {tts_model}")
     
     def _should_end_call(self, text: str) -> bool:
         """Check if text contains farewell phrases indicating call should end."""
@@ -598,7 +647,14 @@ class TwilioStreamHandler:
             wav_audio = convert_mulaw_to_wav_bytes(audio_data)
             
             stt_model = self.agent_config.get("sttModel") if self.agent_config else None
-            result = await self.speech_tool.transcribe(wav_audio, "wav", model=stt_model)
+            
+            # Select STT provider based on model
+            if is_gemini_stt_model(stt_model) and self.gemini_stt_tool:
+                # Use Gemini STT
+                result = await self.gemini_stt_tool.transcribe(wav_audio, "wav", model=stt_model)
+            else:
+                # Use OpenAI STT (default)
+                result = await self.speech_tool.transcribe(wav_audio, "wav", model=stt_model)
             
             transcription = result.get("text", "").strip()
             if transcription:
@@ -721,12 +777,25 @@ class TwilioStreamHandler:
                 else:
                     # No speculative result - run STT synchronously
                     logger.info(f"Using STT model: {stt_model_to_use}")
-                    stt_result = await self.speech_tool.transcribe(
-                        wav_audio_data,
-                        "wav", # platform="twilio" is not in the original call, keep "wav"
-                        model=stt_model_to_use
-                    )
-                    user_text = stt_result.get("text", "").strip() # Keep original variable name for consistency
+                    
+                    # Select STT provider based on model
+                    if is_gemini_stt_model(stt_model_to_use) and self.gemini_stt_tool:
+                        # Use Gemini STT
+                        logger.info(f"🔮 Using Gemini STT: {stt_model_to_use}")
+                        stt_result = await self.gemini_stt_tool.transcribe(
+                            wav_audio_data,
+                            "wav",
+                            model=stt_model_to_use
+                        )
+                    else:
+                        # Use OpenAI STT (default)
+                        stt_result = await self.speech_tool.transcribe(
+                            wav_audio_data,
+                            "wav",
+                            model=stt_model_to_use
+                        )
+                    
+                    user_text = stt_result.get("text", "").strip()
                     perf_stt_end = time.perf_counter()
                     stt_duration = (perf_stt_end - perf_stt_start) * 1000
                     # Clear speculative state
@@ -1124,16 +1193,24 @@ class TwilioStreamHandler:
             tts_voice = voice or (self.agent_config.get("ttsVoice", "alloy") if self.agent_config else "alloy")
             tts_model = model or (self.agent_config.get("ttsModel") if self.agent_config else self.tts_tool.model)
             
-            response = self.tts_tool.client.audio.speech.create(
-                model=tts_model,
-                voice=tts_voice,
-                input=text,
-                response_format="pcm"  # Raw PCM - fastest, no decoding needed
-            )
-            return {
-                "success": True,
-                "audio_bytes": response.content
-            }
+            # Select TTS provider based on model
+            if is_gemini_tts_model(tts_model) and self.gemini_tts_tool:
+                # Use Gemini TTS
+                logger.info(f"🔮 Using Gemini TTS: {tts_model}, voice: {tts_voice}")
+                result = await self.gemini_tts_tool.synthesize_pcm(text, voice=tts_voice, model=tts_model)
+                return result
+            else:
+                # Use OpenAI TTS (default)
+                response = self.tts_tool.client.audio.speech.create(
+                    model=tts_model,
+                    voice=tts_voice,
+                    input=text,
+                    response_format="pcm"  # Raw PCM - fastest, no decoding needed
+                )
+                return {
+                    "success": True,
+                    "audio_bytes": response.content
+                }
         except Exception as e:
             logger.error(f"PCM TTS synthesis failed: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
