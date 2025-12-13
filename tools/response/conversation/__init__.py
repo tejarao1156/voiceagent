@@ -88,6 +88,20 @@ class ConversationalResponseTool:
         logger.info("Generated conversational response for input: %s", user_input[:80])
         return result
 
+    def add_to_conversation_history(
+        self,
+        session_data: Dict[str, Any],
+        user_input: str,
+        agent_response: str
+    ) -> Dict[str, Any]:
+        """Add an interaction to conversation history (for streaming pipeline)."""
+        return self.manager.add_to_conversation_history(session_data, user_input, agent_response)
+
+    @property
+    def conversation_manager(self):
+        """Expose underlying ConversationManager for streaming access."""
+        return self.manager
+
     def summarize_session(self, session_data: Dict[str, Any]) -> Dict[str, Any]:
         """Return a lightweight summary of the current session."""
         summary = self.manager.get_session_summary(session_data)
