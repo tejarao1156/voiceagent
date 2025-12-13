@@ -283,6 +283,127 @@ Current conversation history: {len(session_data.get('conversation_history', []))
                 "actions": []
             }
     
+    def _split_into_complete_sentences(self, text: str) -> List[str]:
+        """Split text into sentences, keeping incomplete fragments.
+        
+        Returns:
+            List of sentences. Last item may be incomplete fragment.
+        """
+        import re
+        # Split on sentence endings followed by space or end of string
+        # Keep the punctuation with the sentence
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        return [s for s in sentences if s.strip()]
+    
+    async def _generate_response_streaming(
+        self,
+        context: str,
+        user_input: str,
+        conversation_history: List[Dict[str, Any]],
+        persona_config: Optional[Dict[str, Any]] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        custom_system_prompt: Optional[str] = None
+    ):
+        """Generate response using OpenAI streaming, yielding complete sentences.
+        
+        This is an async generator that yields sentences as they're generated,
+        enabling real-time TTS while LLM is still generating the full response.
+        
+        Yields:
+            str: Complete sentences as they become available
+        """
+        try:
+            # Use custom system prompt if provided
+            if custom_system_prompt:
+                system_prompt = custom_system_prompt
+            elif persona_config and persona_config.get("conversation_prompt"):
+                system_prompt = (
+                    self.system_prompt
+                    + "\n\nPersona Style Instructions:\n"
+                    + persona_config["conversation_prompt"]
+                )
+            else:
+                system_prompt = self.system_prompt
+
+            # Build messages array with conversation history
+            messages = [
+                {"role": "system", "content": system_prompt + "\n\nContext:\n" + context}
+            ]
+            
+            # Add conversation history (limit to last 4 to keep context tight)
+            if len(conversation_history) > 4:
+                recent_interactions = conversation_history[-4:]
+            else:
+                recent_interactions = conversation_history
+            
+            for interaction in recent_interactions:
+                if interaction.get("user_input"):
+                    messages.append({"role": "user", "content": interaction["user_input"]})
+                if interaction.get("agent_response"):
+                    messages.append({"role": "assistant", "content": interaction["agent_response"]})
+            
+            # Add current user input
+            messages.append({"role": "user", "content": user_input})
+            
+            # Use provided model/temperature/maxTokens or fall back to defaults
+            inference_model = model or INFERENCE_MODEL
+            temp = temperature if temperature is not None else 0.7
+            max_toks = max_tokens if max_tokens is not None else 200  # Reduced default
+            
+            logger.info(f"🚀 Starting streaming LLM response (model={inference_model}, max_tokens={max_toks})")
+            
+            # Create streaming response
+            stream = self.client.chat.completions.create(
+                model=inference_model,
+                messages=messages,
+                temperature=temp,
+                max_tokens=max_toks,
+                stream=True
+            )
+            
+            # Buffer to accumulate text until we have a complete sentence
+            buffer = ""
+            sentence_count = 0
+            
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    buffer += chunk.choices[0].delta.content
+                    
+                    # Check for sentence boundaries (. ! ?)
+                    # Yield complete sentences as they become available
+                    while True:
+                        # Find the first sentence boundary
+                        match = None
+                        for i, char in enumerate(buffer):
+                            if char in '.!?' and i < len(buffer) - 1 and buffer[i + 1] in ' \n':
+                                match = i + 1
+                                break
+                        
+                        if match:
+                            sentence = buffer[:match].strip()
+                            buffer = buffer[match:].strip()
+                            if sentence:
+                                sentence_count += 1
+                                logger.info(f"📝 Yielding sentence #{sentence_count}: '{sentence[:50]}...'")
+                                yield sentence
+                        else:
+                            break
+            
+            # Yield any remaining text in buffer (incomplete sentence at end)
+            if buffer.strip():
+                sentence_count += 1
+                logger.info(f"📝 Yielding final fragment #{sentence_count}: '{buffer.strip()[:50]}...'")
+                yield buffer.strip()
+            
+            logger.info(f"✅ Streaming complete: {sentence_count} sentences yielded")
+            
+        except Exception as e:
+            logger.error(f"Error in streaming response: {str(e)}")
+            yield "I'm sorry, I'm having trouble understanding. Could you please repeat that?"
+
+    
     def _parse_ai_response(self, response_text: str) -> Dict[str, Any]:
         """Parse AI response to extract state changes and actions"""
         # This is a simplified parser - in production, you might want more sophisticated parsing

@@ -592,6 +592,10 @@ class TwilioStreamHandler:
                 logger.info(f"⏭️ Query #{current_query_id} is outdated (current: #{self.query_sequence}), skipping immediately")
                 return
             
+            # Performance Timing - Start
+            perf_start_time = time.perf_counter()
+            logger.info(f"⏱️ [PERF] Processing started for Query #{current_query_id}")
+            
             # Get audio buffer snapshot (might be empty if already processed)
             if not self.speech_buffer or self.speech_frames_count < 5: # Ignore very short utterances
                 if self.is_speaking: logger.info("Ignoring short utterance.")
@@ -621,17 +625,27 @@ class TwilioStreamHandler:
                 wav_audio_data = convert_mulaw_to_wav_bytes(audio_to_process)
                 
                 # Use agent config for STT if available
-                stt_model = self.agent_config.get("sttModel") if self.agent_config else None
-                stt_result = await self.speech_tool.transcribe(wav_audio_data, "wav", model=stt_model)
-                user_text = stt_result.get("text", "").strip()
-
+                stt_model_to_use = self.agent_config.get("sttModel") if self.agent_config else None
+                
+                # 1. Transcribe speech
+                logger.info(f"Using STT model: {stt_model_to_use}")
+                perf_stt_start = time.perf_counter()
+                stt_result = await self.speech_tool.transcribe(
+                    wav_audio_data,
+                    "wav", # platform="twilio" is not in the original call, keep "wav"
+                    model=stt_model_to_use
+                )
+                user_text = stt_result.get("text", "").strip() # Keep original variable name for consistency
+                perf_stt_end = time.perf_counter()
+                stt_duration = (perf_stt_end - perf_stt_start) * 1000
+                
                 if not user_text:
                     logger.info("STT result is empty, skipping AI response.")
                     return
                 
                 # PHASE 5: Post-STT validation - filter out noise transcriptions
                 if not self._is_valid_transcript(user_text):
-                    logger.info(f"🔇 Invalid transcript filtered: '{user_text}' - skipping AI response")
+                    logger.info(f"🔇 Invalid transcript filtered: '{user_text}' - skipping AI response (taking {stt_duration:.0f}ms)")
                     return
                 
                 # CRITICAL: Verify this is still the current query before proceeding
@@ -641,9 +655,10 @@ class TwilioStreamHandler:
                     return
                 
                 if was_interrupt:
-                    logger.info(f"🔄 Interrupt transcription (Query #{current_query_id}): '{user_text}'")
+                    logger.info(f"🔄 Interrupt transcription (Query #{current_query_id}): '{user_text}' (STT: {stt_duration:.0f}ms)")
                 else:
-                    logger.info(f"User said (Query #{current_query_id}): '{user_text}'")
+                    logger.info(f"User said (Query #{current_query_id}): '{user_text}' (STT: {stt_duration:.0f}ms)")
+                logger.info(f"⏱️ [PERF] STT Complete: +{stt_duration:.0f}ms from start")
                 
                 # Store user transcript in MongoDB
                 try:
@@ -668,9 +683,10 @@ class TwilioStreamHandler:
                     logger.info("   No previous interactions (this is the first query)")
                 
                 # Use agent config for LLM if available
-                llm_model = self.agent_config.get("inferenceModel") if self.agent_config else None
+                llm_model_to_use = self.agent_config.get("inferenceModel") if self.agent_config else None
                 temperature = self.agent_config.get("temperature") if self.agent_config else None
-                max_tokens = self.agent_config.get("maxTokens") if self.agent_config else None
+                # OPTIMIZATION: Default to 200 max_tokens for faster, more conversational responses
+                max_tokens = self.agent_config.get("maxTokens", 200) if self.agent_config else 200
                 
                 # CRITICAL: Pass the current session_data which contains the full conversation history
                 # The conversation_tool.generate_response will use this history to provide context
@@ -680,41 +696,114 @@ class TwilioStreamHandler:
                     logger.info(f"   Question: '{user_text[:100]}...'")
                     logger.info(f"   History: {len(conversation_history)} previous interactions will be used for context")
                 
-                ai_response = await self.conversation_tool.generate_response(
-                    self.session_data, user_text, None,
-                    model=llm_model,
+                # 2. Get AI response
+                system_prompt = self.agent_config.get("systemPrompt", "You are a helpful AI assistant.")
+                
+                # Update session prompt if changed
+                if self.session_data.get("prompt") != system_prompt:
+                    self.session_data["prompt"] = system_prompt
+                
+                logger.info(f"Using LLM model: {llm_model_to_use}")
+                perf_llm_start = time.perf_counter()
+                
+                # OPTIMIZATION: Use streaming LLM → TTS pipeline for real-time response
+                # AI starts speaking within ~0.8s instead of waiting for full LLM completion (~2.5s)
+                logger.info(f"🎙️ Starting STREAMING LLM → TTS pipeline (Query #{current_query_id})")
+                
+                # Get conversation history for streaming
+                conversation_history = self.session_data.get("conversation_history", [])
+                
+                # Track full response for history
+                full_response = ""
+                sentence_count = 0
+                first_sentence_time = None
+                
+                # Stream sentences from LLM and pipe to TTS in real-time
+                # CRITICAL: Await each TTS immediately as sentence arrives (sequential audio)
+                # This gives us low TTFS while ensuring audio plays in correct order
+                async for sentence in self.conversation_tool.conversation_manager._generate_response_streaming(
+                    context="",  # Context is built internally by the streaming method
+                    user_input=user_text,
+                    conversation_history=conversation_history,
+                    persona_config=None,
+                    model=llm_model_to_use,
                     temperature=temperature,
-                    max_tokens=max_tokens
-                )
-                response_text = ai_response.get("response", "I'm sorry, I'm having trouble with that.")
+                    max_tokens=max_tokens,
+                    custom_system_prompt=system_prompt
+                ):
+                    # Check if query was cancelled during streaming
+                    if current_query_id != self.query_sequence:
+                        logger.info(f"⏭️ Query #{current_query_id} cancelled during streaming")
+                        return
+                    
+                    # CRITICAL: Check for interrupt BEFORE processing next sentence
+                    if self.interrupt_detected:
+                        logger.info(f"🛑 Interrupt detected in streaming loop, stopping pipeline immediately")
+                        # Cancel any running TTS task
+                        if self.tts_streaming_task and not self.tts_streaming_task.done():
+                            self.tts_streaming_task.cancel()
+                        return
+                    
+                    # Skip very short fragments (like "1.", "2.", etc.)
+                    if len(sentence.strip()) < 5:
+                        full_response += (" " if full_response else "") + sentence
+                        continue
+                    
+                    sentence_count += 1
+                    full_response += (" " if full_response else "") + sentence
+                    
+                    # Record time to first sentence (TTFS - Time To First Speech)
+                    if sentence_count == 1:
+                        first_sentence_time = time.perf_counter()
+                        ttfs_ms = (first_sentence_time - perf_llm_start) * 1000
+                        logger.info(f"⚡ TTFS (Time To First Speech): {ttfs_ms:.0f}ms - AI starting to speak!")
+                    
+                    # Check again right before TTS
+                    if self.interrupt_detected:
+                        logger.info(f"🛑 Interrupt detected before TTS, stopping immediately")
+                        return
+                    
+                    # IMMEDIATELY await TTS for this sentence
+                    # Handle CancelledError from interrupt detection
+                    logger.info(f"🎤 Sentence #{sentence_count} → TTS: '{sentence[:50]}...'")
+                    self.tts_streaming_task = asyncio.create_task(self._synthesize_and_stream_tts(sentence))
+                    try:
+                        await self.tts_streaming_task
+                    except asyncio.CancelledError:
+                        logger.info(f"🛑 TTS task cancelled by interrupt, stopping streaming pipeline")
+                        return
+                    
+                    # Check after TTS completes - stop if interrupted during TTS
+                    if self.interrupt_detected:
+                        logger.info(f"🛑 Interrupt detected after TTS, stopping streaming")
+                        return
+                
+                perf_llm_end = time.perf_counter()
+                llm_duration = (perf_llm_end - perf_llm_start) * 1000
+                total_duration_so_far = (perf_llm_end - perf_start_time) * 1000
+                
+                response_text = full_response.strip()
+                
+                logger.info(f"🤖 AI Response (STREAMED): {response_text[:70]}... (Total: {llm_duration:.0f}ms, {sentence_count} sentences)")
+                logger.info(f"⏱️ [PERF] LLM+TTS Complete: +{llm_duration:.0f}ms (Total: {total_duration_so_far:.0f}ms)")
                 
                 # CRITICAL: Verify this is still the current query before updating session
-                # If query_sequence changed, this query is outdated and should be skipped
                 if current_query_id != self.query_sequence:
-                    logger.info(f"⏭️ Skipping outdated query #{current_query_id} after AI response (current: #{self.query_sequence})")
+                    logger.info(f"⏭️ Skipping outdated query #{current_query_id} after streaming complete (current: #{self.query_sequence})")
                     return
                 
-                # CRITICAL: Update session_data with the latest conversation state
-                # This ensures the next query has access to the full conversation history including this interaction
-                updated_session_data = ai_response.get("session_data")
-                if updated_session_data:
-                    # Verify the conversation history was updated
-                    old_history_count = len(self.session_data.get("conversation_history", []))
-                    self.session_data = updated_session_data
-                    new_history_count = len(self.session_data.get("conversation_history", []))
-                    logger.info(f"✅ Updated session_data (Query #{current_query_id}): {old_history_count} -> {new_history_count} interactions")
-                    
-                    # Log the updated conversation history to verify it includes this interaction
-                    if new_history_count > old_history_count:
-                        logger.info(f"   ✅ New interaction added to history: User: '{user_text[:50]}...' | AI: '{response_text[:50]}...'")
-                    else:
-                        logger.warning(f"   ⚠️ Conversation history count did not increase (expected {old_history_count + 1}, got {new_history_count})")
-                else:
-                    logger.error(f"❌ No updated session_data returned from AI response (Query #{current_query_id})")
+                # Update session with full response for conversation history
+                # CRITICAL: Manually update conversation history since we used streaming
+                self.session_data = self.conversation_tool.add_to_conversation_history(
+                    self.session_data, user_text, response_text
+                )
+                
+                old_history_count = len(conversation_history)
+                new_history_count = len(self.session_data.get("conversation_history", []))
+                logger.info(f"✅ Updated session_data (Query #{current_query_id}): {old_history_count} → {new_history_count} interactions")
                 
                 if was_interrupt:
-                    logger.info(f"💬 AI responding to INTERRUPT question (Query #{current_query_id}): '{response_text[:70]}...'")
-                    logger.info(f"   ✅ Response generated using conversation history - answers NEW question, not previous story")
+                    logger.info(f"💬 AI responded to INTERRUPT (Query #{current_query_id}): '{response_text[:70]}...'")
                 else:
                     logger.info(f"AI response (Query #{current_query_id}): '{response_text[:70]}...'")
                 
@@ -730,26 +819,20 @@ class TwilioStreamHandler:
                 except Exception as e:
                     logger.warning(f"Could not store AI transcript: {e}")
                 
-                # CRITICAL: Final check before starting TTS
-                # If query_sequence changed, this query is outdated and should be skipped
-                if current_query_id != self.query_sequence:
-                    logger.info(f"⏭️ Skipping outdated query #{current_query_id} before TTS (current: #{self.query_sequence})")
-                    return
+                logger.info(f"✅ Streaming pipeline completed for Query #{current_query_id}")
                 
-                # Store TTS task so it can be cancelled if interrupted
-                self.tts_streaming_task = asyncio.create_task(self._synthesize_and_stream_tts(response_text))
-                try:
-                    await self.tts_streaming_task
-                    
-                    # Check for call-ending phrases in AI response
-                    if self._should_end_call(response_text):
-                        logger.info(f"👋 Detected call-ending phrase in AI response, auto-hanging up call {self.call_sid}...")
-                        await asyncio.sleep(1.0)  # Brief pause to let audio finish
-                        await self.hangup_call("Conversation concluded normally")
-                        return
-                        
-                except asyncio.CancelledError:
-                    logger.info("🛑 TTS task was cancelled (interrupt handled).")
+                # Check if call should end after this response (farewell phrases)
+                if self._should_end_call(response_text):
+                    logger.info(f"👋 Farewell phrase detected, scheduling call hangup for {self.call_sid}")
+                    await asyncio.sleep(1.5)  # Give time for audio to finish
+                    try:
+                        import api_general
+                        if hasattr(api_general, 'twilio_phone_tool'):
+                            await api_general.twilio_phone_tool.hangup_call(self.call_sid)
+                            logger.info(f"📱 Call {self.call_sid} ended after farewell")
+                    except Exception as e:
+                        logger.warning(f"Could not auto-hangup after farewell: {e}")
+
             except asyncio.CancelledError:
                 logger.info(f"🛑 Speech processing task #{current_query_id} was cancelled.")
                 raise
@@ -843,7 +926,11 @@ class TwilioStreamHandler:
                 
                 # Get TTS in PCM format for fast conversion (no ffmpeg needed!)
                 # Use agent config for TTS voice and model
+                perf_tts_chunk_start = time.perf_counter()
                 tts_result = await self._synthesize_pcm(sentence, voice=tts_voice, model=tts_model)
+                perf_tts_chunk_end = time.perf_counter()
+                
+                logger.info(f"⏱️ [PERF] TTS Chunk Generated: +{(perf_tts_chunk_end - perf_tts_chunk_start)*1000:.0f}ms (Sentence: '{sentence[:20]}...')")
                 
                 # Check again after TTS generation (user might have interrupted during generation)
                 if self.interrupt_detected:
