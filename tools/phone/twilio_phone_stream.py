@@ -61,9 +61,9 @@ class TwilioStreamHandler:
         self.interrupt_speech_frames = 0  # Track how many frames of speech during interrupt (to validate real interrupt)
         
         # Human-like conversation tuning parameters
-        self.SILENCE_THRESHOLD_FRAMES = 50  # 50 frames * 20ms/frame = 1000ms of silence to trigger processing (let users pause naturally)
-        self.INTERRUPT_GRACE_PERIOD_MS = 500  # Wait 500ms after AI starts speaking before allowing interrupts (prevents echo)
-        self.MIN_INTERRUPT_FRAMES = 5  # Require at least 5 frames (100ms) of sustained speech for valid interrupt
+        self.SILENCE_THRESHOLD_FRAMES = 25  # 25 frames * 20ms/frame = 500ms of silence (faster with speculative STT)
+        self.INTERRUPT_GRACE_PERIOD_MS = 200  # Wait 200ms after AI starts speaking before allowing interrupts (faster response)
+        self.MIN_INTERRUPT_FRAMES = 3  # Require at least 3 frames (60ms) of sustained speech for valid interrupt
         
         # New: Audio quality validation
         self.rms_buffer: List[int] = []  # Track RMS values for average calculation
@@ -75,6 +75,13 @@ class TwilioStreamHandler:
         self.speech_processing_lock = asyncio.Lock()  # Prevent concurrent speech processing
         self.speech_processing_task = None  # Track active speech processing task for cancellation
         self.query_sequence = 0  # Track query sequence to ensure we process the most recent
+        
+        # Speculative STT: Process audio in background while user is speaking
+        self.speculative_stt_task = None  # Background STT task
+        self.pending_transcription = ""  # Latest partial transcription result
+        self.last_stt_time = 0.0  # Last time we sent audio to STT (for debouncing)
+        self.SPECULATIVE_STT_INTERVAL_MS = 750  # Send audio to STT every 750ms during speech
+        self.speculative_audio_buffer = bytearray()  # Audio buffer for speculative STT
         
         # Stop words that trigger auto-hangup after AI speaks them
         self.CALL_END_PHRASES = [
@@ -115,7 +122,7 @@ class TwilioStreamHandler:
             elif event == 'media':
                 self._process_media_event(data['media'])
             elif event == 'stop':
-                self._handle_stop_event(data['stop'])
+                await self._handle_stop_event(data['stop'])
                 break
             elif event == 'mark':
                 mark_name = data['mark']['name']
@@ -457,6 +464,23 @@ class TwilioStreamHandler:
                     if self.tts_streaming_task and not self.tts_streaming_task.done():
                         self.tts_streaming_task.cancel()
                         logger.info("🛑 Cancelled TTS streaming task due to interrupt.")
+                    
+                    # CRITICAL: Cancel any in-flight speech processing (old questions)
+                    # This ensures we only answer the LATEST question, not old ones
+                    if self.speech_processing_task and not self.speech_processing_task.done():
+                        self.speech_processing_task.cancel()
+                        logger.info("🛑 Cancelled previous speech processing - will answer LATEST question only.")
+                    
+                    # Increment query sequence to invalidate any old queries
+                    self.query_sequence += 1
+                    logger.info(f"🔄 New interrupt detected, query sequence now: #{self.query_sequence}")
+                    
+                    # Clear speculative STT state - start fresh
+                    self.pending_transcription = ""
+                    self.speculative_audio_buffer = bytearray()
+                    if self.speculative_stt_task and not self.speculative_stt_task.done():
+                        self.speculative_stt_task.cancel()
+                    
                     # Set ai_is_speaking to False immediately so interrupt can be processed faster
                     # This allows the interrupt speech to be captured and processed right away
                     self.ai_is_speaking = False
@@ -493,6 +517,10 @@ class TwilioStreamHandler:
             self.speech_frames_count += 1
             self.silence_frames_count = 0
             self.rms_buffer.append(rms)  # Track RMS for quality validation
+            
+            # Trigger speculative STT in background (runs every 750ms during speech)
+            self._trigger_speculative_stt()
+            
             if not self.is_speaking:
                 if self.interrupt_detected:
                     logger.info(f"🎤 Capturing interrupt speech (AI stopping), RMS: {rms}...")
@@ -518,6 +546,9 @@ class TwilioStreamHandler:
                     self.speech_frames_count = 0
                     self.rms_buffer = []
                     self.interrupt_detected = False
+                    # Clear speculative STT state
+                    self.pending_transcription = ""
+                    self.speculative_audio_buffer = bytearray()
                     return
                 
                 # PHASE 5: Average RMS validation - ensure audio had enough energy
@@ -530,6 +561,9 @@ class TwilioStreamHandler:
                     self.speech_frames_count = 0
                     self.rms_buffer = []
                     self.interrupt_detected = False
+                    # Clear speculative STT state
+                    self.pending_transcription = ""
+                    self.speculative_audio_buffer = bytearray()
                     return
                 
                 logger.info(f"Silence threshold reached ({self.speech_frames_count} frames, avg RMS: {avg_rms:.0f}), processing utterance.")
@@ -555,6 +589,47 @@ class TwilioStreamHandler:
                 self.query_sequence += 1
                 logger.info(f"🆕 Starting Query #{self.query_sequence}")
                 self.speech_processing_task = asyncio.create_task(self._process_user_speech(was_interrupt=was_interrupt))
+
+    async def _run_speculative_stt(self, audio_data: bytes):
+        """Run STT in background on current audio.
+        Updates pending_transcription with the latest result."""
+        try:
+            from tools.phone.audio_utils import convert_mulaw_to_wav_bytes
+            wav_audio = convert_mulaw_to_wav_bytes(audio_data)
+            
+            stt_model = self.agent_config.get("sttModel") if self.agent_config else None
+            result = await self.speech_tool.transcribe(wav_audio, "wav", model=stt_model)
+            
+            transcription = result.get("text", "").strip()
+            if transcription:
+                self.pending_transcription = transcription
+                logger.info(f"🔮 Speculative STT: '{transcription[:50]}...' ({len(audio_data)} bytes)")
+        except asyncio.CancelledError:
+            logger.debug("Speculative STT cancelled")
+        except Exception as e:
+            logger.warning(f"Speculative STT error: {e}")
+    
+    def _trigger_speculative_stt(self):
+        """Trigger speculative STT if enough time has passed.
+        Called from _process_media_event during speech detection."""
+        current_time = time.time()
+        time_since_last = (current_time - self.last_stt_time) * 1000
+        
+        # Also add audio to speculative buffer
+        if len(self.speech_buffer) > 0:
+            self.speculative_audio_buffer = bytearray(self.speech_buffer)  # Copy current buffer
+        
+        # Check if enough time has passed since last STT
+        if time_since_last >= self.SPECULATIVE_STT_INTERVAL_MS and len(self.speculative_audio_buffer) > VAD_FRAME_BYTES * 10:
+            # Cancel any existing speculative task
+            if self.speculative_stt_task and not self.speculative_stt_task.done():
+                self.speculative_stt_task.cancel()
+            
+            self.last_stt_time = current_time
+            # Run STT on current audio buffer
+            audio_copy = bytes(self.speculative_audio_buffer)
+            self.speculative_stt_task = asyncio.create_task(self._run_speculative_stt(audio_copy))
+            logger.debug(f"🔮 Triggered speculative STT ({len(audio_copy)} bytes)")
 
     async def _process_waiting_interrupt(self):
         """Process interrupt speech that was captured while waiting for TTS to stop.
@@ -627,17 +702,36 @@ class TwilioStreamHandler:
                 # Use agent config for STT if available
                 stt_model_to_use = self.agent_config.get("sttModel") if self.agent_config else None
                 
-                # 1. Transcribe speech
-                logger.info(f"Using STT model: {stt_model_to_use}")
+                # 1. Transcribe speech - USE SPECULATIVE RESULT IF AVAILABLE
                 perf_stt_start = time.perf_counter()
-                stt_result = await self.speech_tool.transcribe(
-                    wav_audio_data,
-                    "wav", # platform="twilio" is not in the original call, keep "wav"
-                    model=stt_model_to_use
-                )
-                user_text = stt_result.get("text", "").strip() # Keep original variable name for consistency
-                perf_stt_end = time.perf_counter()
-                stt_duration = (perf_stt_end - perf_stt_start) * 1000
+                
+                # Check if we have a pending transcription from speculative STT
+                if self.pending_transcription and len(self.pending_transcription) > 3:
+                    # Use the speculative transcription (already processed in background!)
+                    user_text = self.pending_transcription
+                    perf_stt_end = time.perf_counter()
+                    stt_duration = (perf_stt_end - perf_stt_start) * 1000
+                    logger.info(f"⚡ Using SPECULATIVE transcription (0ms STT!): '{user_text[:50]}...'")
+                    # Clear pending transcription after use
+                    self.pending_transcription = ""
+                    self.speculative_audio_buffer = bytearray()
+                    # Cancel speculative task if still running
+                    if self.speculative_stt_task and not self.speculative_stt_task.done():
+                        self.speculative_stt_task.cancel()
+                else:
+                    # No speculative result - run STT synchronously
+                    logger.info(f"Using STT model: {stt_model_to_use}")
+                    stt_result = await self.speech_tool.transcribe(
+                        wav_audio_data,
+                        "wav", # platform="twilio" is not in the original call, keep "wav"
+                        model=stt_model_to_use
+                    )
+                    user_text = stt_result.get("text", "").strip() # Keep original variable name for consistency
+                    perf_stt_end = time.perf_counter()
+                    stt_duration = (perf_stt_end - perf_stt_start) * 1000
+                    # Clear speculative state
+                    self.pending_transcription = ""
+                    self.speculative_audio_buffer = bytearray()
                 
                 if not user_text:
                     logger.info("STT result is empty, skipping AI response.")
@@ -955,26 +1049,28 @@ class TwilioStreamHandler:
                     # Fast conversion: PCM -> mu-law using only Python audioop (no ffmpeg)
                     mulaw_bytes = convert_pcm_to_mulaw(pcm_bytes, input_rate=24000, input_width=2)
                     if mulaw_bytes:
-                        # CRITICAL: Check AGAIN right before sending (interrupt might have happened during conversion)
-                        # This is the LAST chance to stop before audio is sent to user
-                        if self.interrupt_detected:
-                            logger.info("🛑 Interrupt detected right before sending, aborting audio chunk - STOPPING IMMEDIATELY.")
-                            self.ai_is_speaking = False
-                            return
+                        # CHUNKED AUDIO: Split into 1.5s chunks (8kHz * 1.5s = 12000 bytes)
+                        # This allows interrupts to take effect immediately instead of waiting
+                        CHUNK_SIZE = 12000  # 1.5 seconds at 8kHz mu-law
                         
-                        payload = base64.b64encode(mulaw_bytes).decode('utf-8')
-                        # CRITICAL: Final check right before sending to websocket
-                        # If interrupt happened, don't send this chunk - user wants to ask new question
-                        if self.interrupt_detected:
-                            logger.info("🛑 Interrupt detected during payload encoding, stopping - NO MORE AUDIO.")
-                            self.ai_is_speaking = False
-                            return
-                        
-                        await self.websocket.send_json({
-                            "event": "media",
-                            "streamSid": self.stream_sid,
-                            "media": {"payload": payload}
-                        })
+                        for chunk_start in range(0, len(mulaw_bytes), CHUNK_SIZE):
+                            # Check for interrupt BEFORE each chunk
+                            if self.interrupt_detected:
+                                logger.info(f"🛑 Interrupt detected at chunk {chunk_start//CHUNK_SIZE}, stopping audio immediately.")
+                                self.ai_is_speaking = False
+                                return
+                            
+                            chunk = mulaw_bytes[chunk_start:chunk_start + CHUNK_SIZE]
+                            payload = base64.b64encode(chunk).decode('utf-8')
+                            
+                            await self.websocket.send_json({
+                                "event": "media",
+                                "streamSid": self.stream_sid,
+                                "media": {"payload": payload}
+                            })
+                            
+                            # Small yield to allow interrupt detection between chunks
+                            await asyncio.sleep(0.01)
                 else:
                     logger.error(f"TTS failed for sentence: {sentence}")
 
@@ -1098,15 +1194,19 @@ class TwilioStreamHandler:
             logger.error(f"Error hanging up call {self.call_sid}: {e}", exc_info=True)
             return False
 
-    def _handle_stop_event(self, stop_data: Dict):
+    async def _handle_stop_event(self, stop_data: Dict):
         """Handles the 'stop' event from Twilio stream."""
         logger.info(f"Stream stopped for call SID: {self.call_sid}. Cleaning up.")
         
-        # End call in MongoDB
+        # End call in MongoDB - await to ensure it completes
         try:
             from databases.mongodb_call_store import MongoDBCallStore
             call_store = MongoDBCallStore()
-            asyncio.create_task(call_store.end_call(self.call_sid))
+            result = await call_store.end_call(self.call_sid)
+            if result:
+                logger.info(f"✅ Call {self.call_sid} marked as completed in MongoDB")
+            else:
+                logger.warning(f"⚠️ Failed to mark call {self.call_sid} as completed")
         except Exception as e:
             logger.warning(f"Could not end call record: {e}")
         
