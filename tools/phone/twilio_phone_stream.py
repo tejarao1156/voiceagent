@@ -368,6 +368,9 @@ class TwilioStreamHandler:
         # Use agent config if available
         if self.agent_config:
             logger.info(f"✅ Using agent config: {self.agent_config.get('name')} (STT: {self.agent_config.get('sttModel')}, TTS: {self.agent_config.get('ttsModel')}, LLM: {self.agent_config.get('inferenceModel')})")
+            # CRITICAL: Initialize Gemini tools NOW after agent config is loaded from database
+            # This is needed because __init__ is called before agent_config is available
+            self._init_gemini_tools_if_needed()
 
         # Create a session for the call
         session_info = self.conversation_tool.create_session(
