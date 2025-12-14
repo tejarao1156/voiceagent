@@ -11,6 +11,7 @@ import webrtcvad
 
 from tools import SpeechToTextTool, ConversationalResponseTool, TextToSpeechTool
 from tools.phone.audio_utils import convert_pcm_to_mulaw, convert_mulaw_to_wav_bytes
+from tools.provider_factory import get_stt_tool, get_tts_tool, is_elevenlabs_tts
 from conversation_manager import ConversationManager
 
 logger = logging.getLogger(__name__)
@@ -697,10 +698,14 @@ class TwilioStreamHandler:
                 logger.info(f"📚 Current conversation history: {len(self.session_data.get('conversation_history', []))} interactions")
 
             try:
+                logger.info(f"═══════════════════════════════════════════════════")
+                logger.info(f"🔊 STEP 1: Audio received from Twilio ({len(audio_to_process)} bytes mu-law)")
                 wav_audio_data = convert_mulaw_to_wav_bytes(audio_to_process)
+                logger.info(f"   ✅ Converted to WAV: {len(wav_audio_data)} bytes")
                 
                 # Use agent config for STT if available
                 stt_model_to_use = self.agent_config.get("sttModel") if self.agent_config else None
+                logger.info(f"   📞 STT model to use: {stt_model_to_use or 'default (whisper-1)'}")
                 
                 # 1. Transcribe speech - USE SPECULATIVE RESULT IF AVAILABLE
                 perf_stt_start = time.perf_counter()
@@ -720,13 +725,21 @@ class TwilioStreamHandler:
                         self.speculative_stt_task.cancel()
                 else:
                     # No speculative result - run STT synchronously
-                    logger.info(f"Using STT model: {stt_model_to_use}")
-                    stt_result = await self.speech_tool.transcribe(
-                        wav_audio_data,
-                        "wav", # platform="twilio" is not in the original call, keep "wav"
-                        model=stt_model_to_use
-                    )
-                    user_text = stt_result.get("text", "").strip() # Keep original variable name for consistency
+                    # Route to correct STT provider based on model
+                    if stt_model_to_use and stt_model_to_use.startswith("elevenlabs"):
+                        # Use ElevenLabs STT (Scribe)
+                        logger.info(f"🎙️ Using ElevenLabs STT: {stt_model_to_use}")
+                        stt_tool = get_stt_tool(stt_model_to_use)
+                        stt_result = await stt_tool.transcribe(wav_audio_data, model=stt_model_to_use)
+                    else:
+                        # Use OpenAI Whisper (default)
+                        logger.info(f"🤖 Using OpenAI Whisper STT: {stt_model_to_use or 'whisper-1'}")
+                        stt_result = await self.speech_tool.transcribe(
+                            wav_audio_data,
+                            "wav",
+                            model=stt_model_to_use
+                        )
+                    user_text = stt_result.get("text", "").strip()
                     perf_stt_end = time.perf_counter()
                     stt_duration = (perf_stt_end - perf_stt_start) * 1000
                     # Clear speculative state
@@ -752,7 +765,7 @@ class TwilioStreamHandler:
                     logger.info(f"🔄 Interrupt transcription (Query #{current_query_id}): '{user_text}' (STT: {stt_duration:.0f}ms)")
                 else:
                     logger.info(f"User said (Query #{current_query_id}): '{user_text}' (STT: {stt_duration:.0f}ms)")
-                logger.info(f"⏱️ [PERF] STT Complete: +{stt_duration:.0f}ms from start")
+                logger.info(f"📝 STEP 2: STT Complete - '{user_text[:80]}...' ({stt_duration:.0f}ms)")
                 
                 # Store user transcript in MongoDB
                 try:
@@ -797,12 +810,12 @@ class TwilioStreamHandler:
                 if self.session_data.get("prompt") != system_prompt:
                     self.session_data["prompt"] = system_prompt
                 
-                logger.info(f"Using LLM model: {llm_model_to_use}")
+                logger.info(f"🧠 STEP 3: Sending to LLM ({llm_model_to_use or 'gpt-4o-mini'})")
                 perf_llm_start = time.perf_counter()
                 
                 # OPTIMIZATION: Use streaming LLM → TTS pipeline for real-time response
                 # AI starts speaking within ~0.8s instead of waiting for full LLM completion (~2.5s)
-                logger.info(f"🎙️ Starting STREAMING LLM → TTS pipeline (Query #{current_query_id})")
+                logger.info(f"   Starting STREAMING LLM → TTS pipeline (Query #{current_query_id})")
                 
                 # Get conversation history for streaming
                 conversation_history = self.session_data.get("conversation_history", [])
@@ -992,16 +1005,17 @@ class TwilioStreamHandler:
     async def _synthesize_and_stream_tts(self, text: str):
         """Synthesizes text to speech and streams it back to Twilio using fast PCM conversion.
         Supports interruption - will stop streaming if user interrupts."""
-        logger.info(f"Streaming TTS for text: '{text[:50]}...'")
+        logger.info(f"🔈 STEP 4: TTS Synthesis - '{text[:50]}...'")
         
         # Set flag to prevent processing incoming audio (feedback loop prevention)
         self.ai_is_speaking = True
         self.ai_speech_start_time = time.time()  # Record when AI started speaking (for grace period)
-        logger.info("🔇 AI started speaking, muting user audio input (grace period active).")
+        logger.info("   🔇 AI started speaking, muting user audio input")
         
         # Get agent config for TTS if available
         tts_voice = self.agent_config.get("ttsVoice", "alloy") if self.agent_config else "alloy"
         tts_model = self.agent_config.get("ttsModel") if self.agent_config else None
+        logger.info(f"   🎙️ TTS model: {tts_model or 'tts-1'}, voice: {tts_voice}")
         
         try:
             sentences = self.tts_tool._split_into_sentences(text)
@@ -1049,6 +1063,7 @@ class TwilioStreamHandler:
                     # Fast conversion: PCM -> mu-law using only Python audioop (no ffmpeg)
                     mulaw_bytes = convert_pcm_to_mulaw(pcm_bytes, input_rate=24000, input_width=2)
                     if mulaw_bytes:
+                        logger.info(f"📡 STEP 5: Sending {len(mulaw_bytes)} bytes audio to Twilio")
                         # CHUNKED AUDIO: Split into 1.5s chunks (8kHz * 1.5s = 12000 bytes)
                         # This allows interrupts to take effect immediately instead of waiting
                         CHUNK_SIZE = 12000  # 1.5 seconds at 8kHz mu-law
@@ -1082,7 +1097,7 @@ class TwilioStreamHandler:
                     "streamSid": self.stream_sid,
                     "mark": {"name": "end_of_ai_speech"}
                 })
-                logger.info("Finished streaming AI response.")
+                logger.info("✅ COMPLETE: Audio streamed to Twilio successfully")
             else:
                 # CRITICAL: If interrupted, stop immediately and process the new question
                 # Don't send end mark - we're stopping mid-response (e.g., story was interrupted)
@@ -1118,22 +1133,39 @@ class TwilioStreamHandler:
             logger.info("✅ AI speech error, re-enabling user audio.")
     
     async def _synthesize_pcm(self, text: str, voice: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:
-        """Generate TTS in PCM format for fast streaming (no conversion overhead)."""
+        """Generate TTS in PCM format for fast streaming (no conversion overhead).
+        
+        Supports both OpenAI and ElevenLabs TTS providers based on model name.
+        """
         try:
             # Use provided voice/model or fall back to agent config or defaults
             tts_voice = voice or (self.agent_config.get("ttsVoice", "alloy") if self.agent_config else "alloy")
             tts_model = model or (self.agent_config.get("ttsModel") if self.agent_config else self.tts_tool.model)
             
-            response = self.tts_tool.client.audio.speech.create(
-                model=tts_model,
-                voice=tts_voice,
-                input=text,
-                response_format="pcm"  # Raw PCM - fastest, no decoding needed
-            )
-            return {
-                "success": True,
-                "audio_bytes": response.content
-            }
+            # Check if we should use ElevenLabs TTS
+            if is_elevenlabs_tts(tts_model):
+                # Use ElevenLabs TTS
+                logger.info(f"🎙️ Using ElevenLabs TTS: model={tts_model}, voice={tts_voice}")
+                elevenlabs_tts = get_tts_tool(tts_model)
+                result = await elevenlabs_tts.synthesize_pcm(
+                    text=text,
+                    voice=tts_voice,
+                    model=tts_model
+                )
+                return result
+            else:
+                # Use OpenAI TTS (existing behavior)
+                logger.info(f"🤖 Using OpenAI TTS: model={tts_model or 'tts-1'}, voice={tts_voice}")
+                response = self.tts_tool.client.audio.speech.create(
+                    model=tts_model,
+                    voice=tts_voice,
+                    input=text,
+                    response_format="pcm"  # Raw PCM - fastest, no decoding needed
+                )
+                return {
+                    "success": True,
+                    "audio_bytes": response.content
+                }
         except Exception as e:
             logger.error(f"PCM TTS synthesis failed: {e}", exc_info=True)
             return {"success": False, "error": str(e)}

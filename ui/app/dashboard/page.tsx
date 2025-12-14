@@ -1914,6 +1914,7 @@ const IncomingAgentView = () => {
     phoneNumber: '',
     sttModel: 'whisper-1',
     inferenceModel: 'gpt-4o-mini',
+    ttsProvider: 'openai',  // NEW: 'openai' or 'elevenlabs'
     ttsModel: 'tts-1',
     ttsVoice: 'alloy',
     promptId: '',
@@ -2019,6 +2020,7 @@ const IncomingAgentView = () => {
           phoneNumber: '',
           sttModel: 'whisper-1',
           inferenceModel: 'gpt-4o-mini',
+          ttsProvider: 'openai',
           ttsModel: 'tts-1',
           ttsVoice: 'alloy',
           promptId: '',
@@ -2278,6 +2280,7 @@ const IncomingAgentView = () => {
                               phoneNumber: agent.phoneNumber,
                               sttModel: agent.sttModel || 'whisper-1',
                               inferenceModel: agent.inferenceModel || 'gpt-4o-mini',
+                              ttsProvider: agent.ttsModel?.startsWith('eleven') ? 'elevenlabs' : 'openai',
                               ttsModel: agent.ttsModel || 'tts-1',
                               ttsVoice: agent.ttsVoice || 'alloy',
                               promptId: agent.promptId || '',
@@ -2422,56 +2425,156 @@ const IncomingAgentView = () => {
                 </button>
                 {expandedSections.aiModels && (
                   <div className="p-4 space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-2">STT Model *</label>
-                        <select
-                          value={agentForm.sttModel}
-                          onChange={(e) => setAgentForm({ ...agentForm, sttModel: e.target.value })}
-                          className="w-full rounded-xl border-none bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                        >
-                          <option value="whisper-1">whisper-1</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-2">Inference Model *</label>
-                        <select
-                          value={agentForm.inferenceModel}
-                          onChange={(e) => setAgentForm({ ...agentForm, inferenceModel: e.target.value })}
-                          className="w-full rounded-xl border-none bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                        >
-                          <option value="gpt-4o-mini">gpt-4o-mini (Fast, Cost-effective)</option>
-                          <option value="gpt-4o">gpt-4o (More Capable)</option>
-                          <option value="gpt-4o-realtime-preview-2024-12-17">gpt-4o-realtime-preview (Realtime)</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-2">TTS Model *</label>
-                        <select
-                          value={agentForm.ttsModel}
-                          onChange={(e) => setAgentForm({ ...agentForm, ttsModel: e.target.value })}
-                          className="w-full rounded-xl border-none bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                        >
-                          <option value="tts-1">tts-1 (Faster, Lower Latency)</option>
-                          <option value="tts-1-hd">tts-1-hd (Higher Quality)</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-2">TTS Voice *</label>
-                        <select
-                          value={agentForm.ttsVoice}
-                          onChange={(e) => setAgentForm({ ...agentForm, ttsVoice: e.target.value })}
-                          className="w-full rounded-xl border-none bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                        >
-                          <option value="alloy">alloy</option>
-                          <option value="echo">echo</option>
-                          <option value="fable">fable</option>
-                          <option value="onyx">onyx</option>
-                          <option value="nova">nova</option>
-                          <option value="shimmer">shimmer</option>
-                        </select>
-                      </div>
+                    {/* Voice Provider Selection - Controls all STT/TTS options */}
+                    <div className="mb-4">
+                      <label className="block text-sm font-medium text-slate-700 mb-2">Voice Provider *</label>
+                      <select
+                        value={agentForm.ttsProvider}
+                        onChange={(e) => {
+                          const provider = e.target.value;
+                          // Reset all models when provider changes
+                          if (provider === 'elevenlabs') {
+                            setAgentForm({
+                              ...agentForm,
+                              ttsProvider: provider,
+                              sttModel: 'elevenlabs-scribe-v1',
+                              ttsModel: 'eleven_turbo_v2_5',
+                              ttsVoice: 'rachel'
+                            });
+                          } else {
+                            setAgentForm({
+                              ...agentForm,
+                              ttsProvider: provider,
+                              sttModel: 'whisper-1',
+                              ttsModel: 'tts-1',
+                              ttsVoice: 'alloy'
+                            });
+                          }
+                        }}
+                        className="w-full rounded-xl border-none bg-gradient-to-r from-blue-50 to-purple-50 px-4 py-3 text-sm font-bold text-slate-700 shadow-sm ring-2 ring-blue-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                      >
+                        <option value="openai">🤖 OpenAI (Whisper STT + TTS)</option>
+                        <option value="elevenlabs">🎙️ ElevenLabs (Human-like Voice)</option>
+                      </select>
+                      <p className="text-xs text-slate-500 mt-1">
+                        {agentForm.ttsProvider === 'elevenlabs'
+                          ? 'ElevenLabs provides ultra-realistic, human-like voice synthesis'
+                          : 'OpenAI provides reliable, cost-effective voice processing'}
+                      </p>
                     </div>
+
+                    {/* Inference Model - Always OpenAI GPT */}
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">Inference Model (LLM) *</label>
+                      <select
+                        value={agentForm.inferenceModel}
+                        onChange={(e) => setAgentForm({ ...agentForm, inferenceModel: e.target.value })}
+                        className="w-full rounded-xl border-none bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                      >
+                        <option value="gpt-4o-mini">gpt-4o-mini (Fast, Cost-effective)</option>
+                        <option value="gpt-4o">gpt-4o (More Capable)</option>
+                        <option value="gpt-4o-realtime-preview-2024-12-17">gpt-4o-realtime-preview (Realtime)</option>
+                      </select>
+                    </div>
+
+                    {/* Provider-specific options */}
+                    {agentForm.ttsProvider === 'elevenlabs' ? (
+                      /* ElevenLabs Options */
+                      <div className="border border-purple-200 rounded-xl p-4 bg-purple-50/30 space-y-4">
+                        <h4 className="text-sm font-bold text-purple-700 flex items-center gap-2">
+                          🎙️ ElevenLabs Configuration
+                        </h4>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-xs font-medium text-slate-600 mb-1">STT Model</label>
+                            <select
+                              value={agentForm.sttModel}
+                              onChange={(e) => setAgentForm({ ...agentForm, sttModel: e.target.value })}
+                              className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-purple-200 focus:ring-2 focus:ring-purple-500 outline-none"
+                            >
+                              <option value="elevenlabs-scribe-v1">Scribe v1 (High Accuracy)</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-slate-600 mb-1">TTS Model</label>
+                            <select
+                              value={agentForm.ttsModel}
+                              onChange={(e) => setAgentForm({ ...agentForm, ttsModel: e.target.value })}
+                              className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-purple-200 focus:ring-2 focus:ring-purple-500 outline-none"
+                            >
+                              <option value="eleven_turbo_v2_5">Turbo v2.5 (Low Latency)</option>
+                              <option value="eleven_multilingual_v2">Multilingual v2 (Best Quality)</option>
+                              <option value="eleven_flash_v2_5">Flash v2.5 (Fastest)</option>
+                            </select>
+                          </div>
+                          <div className="col-span-2">
+                            <label className="block text-xs font-medium text-slate-600 mb-1">Voice</label>
+                            <select
+                              value={agentForm.ttsVoice}
+                              onChange={(e) => setAgentForm({ ...agentForm, ttsVoice: e.target.value })}
+                              className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-purple-200 focus:ring-2 focus:ring-purple-500 outline-none"
+                            >
+                              <option value="rachel">Rachel (Young Female)</option>
+                              <option value="drew">Drew (Middle-aged Male)</option>
+                              <option value="clyde">Clyde (Deep Male)</option>
+                              <option value="paul">Paul (Authoritative Male)</option>
+                              <option value="bella">Bella (Soft Female)</option>
+                              <option value="antoni">Antoni (Young Male)</option>
+                              <option value="thomas">Thomas (Calm Male)</option>
+                              <option value="charlie">Charlie (Australian Male)</option>
+                              <option value="emily">Emily (British Female)</option>
+                              <option value="josh">Josh (Deep American Male)</option>
+                              <option value="adam">Adam (Middle-aged Male)</option>
+                            </select>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      /* OpenAI Options */
+                      <div className="border border-green-200 rounded-xl p-4 bg-green-50/30 space-y-4">
+                        <h4 className="text-sm font-bold text-green-700 flex items-center gap-2">
+                          🤖 OpenAI Configuration
+                        </h4>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-xs font-medium text-slate-600 mb-1">STT Model</label>
+                            <select
+                              value={agentForm.sttModel}
+                              onChange={(e) => setAgentForm({ ...agentForm, sttModel: e.target.value })}
+                              className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-green-200 focus:ring-2 focus:ring-green-500 outline-none"
+                            >
+                              <option value="whisper-1">whisper-1</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-slate-600 mb-1">TTS Model</label>
+                            <select
+                              value={agentForm.ttsModel}
+                              onChange={(e) => setAgentForm({ ...agentForm, ttsModel: e.target.value })}
+                              className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-green-200 focus:ring-2 focus:ring-green-500 outline-none"
+                            >
+                              <option value="tts-1">tts-1 (Lower Latency)</option>
+                              <option value="tts-1-hd">tts-1-hd (Higher Quality)</option>
+                            </select>
+                          </div>
+                          <div className="col-span-2">
+                            <label className="block text-xs font-medium text-slate-600 mb-1">Voice</label>
+                            <select
+                              value={agentForm.ttsVoice}
+                              onChange={(e) => setAgentForm({ ...agentForm, ttsVoice: e.target.value })}
+                              className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-green-200 focus:ring-2 focus:ring-green-500 outline-none"
+                            >
+                              <option value="alloy">alloy</option>
+                              <option value="echo">echo</option>
+                              <option value="fable">fable</option>
+                              <option value="onyx">onyx</option>
+                              <option value="nova">nova</option>
+                              <option value="shimmer">shimmer</option>
+                            </select>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -3140,6 +3243,7 @@ const OutgoingAgentView = () => {
     // AI Model Configuration
     sttModel: 'whisper-1',
     inferenceModel: 'gpt-4o-mini',
+    ttsProvider: 'openai',  // NEW: 'openai' or 'elevenlabs'
     ttsModel: 'tts-1',
     ttsVoice: 'alloy',
   })
@@ -3243,6 +3347,7 @@ const OutgoingAgentView = () => {
           promptId: '',
           sttModel: 'whisper-1',
           inferenceModel: 'gpt-4o-mini',
+          ttsProvider: 'openai',
           ttsModel: 'tts-1',
           ttsVoice: 'alloy',
         })
@@ -3304,6 +3409,7 @@ const OutgoingAgentView = () => {
               promptId: '',
               sttModel: 'whisper-1',
               inferenceModel: 'gpt-4o-mini',
+              ttsProvider: 'openai',
               ttsModel: 'tts-1',
               ttsVoice: 'alloy',
             })
@@ -3462,61 +3568,122 @@ const OutgoingAgentView = () => {
 
               {/* AI Model Configuration */}
               {callForm.callType === 'ai' && (
-                <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/50">
-                  <h4 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2">
+                <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/50 space-y-3">
+                  <h4 className="text-sm font-bold text-slate-700 flex items-center gap-2">
                     <Settings className="h-4 w-4 text-blue-600" />
                     AI Model Configuration
                   </h4>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-600 mb-1">STT Model *</label>
-                      <select
-                        value={callForm.sttModel}
-                        onChange={(e) => setCallForm({ ...callForm, sttModel: e.target.value })}
-                        className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                      >
-                        <option value="whisper-1">whisper-1</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-600 mb-1">Inference Model *</label>
-                      <select
-                        value={callForm.inferenceModel}
-                        onChange={(e) => setCallForm({ ...callForm, inferenceModel: e.target.value })}
-                        className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                      >
-                        <option value="gpt-4o-mini">gpt-4o-mini (Fast, Cost-effective)</option>
-                        <option value="gpt-4o">gpt-4o (More Capable)</option>
-                        <option value="gpt-4o-realtime-preview-2024-12-17">gpt-4o-realtime-preview (Realtime)</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-600 mb-1">TTS Model *</label>
-                      <select
-                        value={callForm.ttsModel}
-                        onChange={(e) => setCallForm({ ...callForm, ttsModel: e.target.value })}
-                        className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                      >
-                        <option value="tts-1">tts-1 (Faster, Lower Latency)</option>
-                        <option value="tts-1-hd">tts-1-hd (Higher Quality)</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-600 mb-1">TTS Voice *</label>
-                      <select
-                        value={callForm.ttsVoice}
-                        onChange={(e) => setCallForm({ ...callForm, ttsVoice: e.target.value })}
-                        className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                      >
-                        <option value="alloy">alloy</option>
-                        <option value="echo">echo</option>
-                        <option value="fable">fable</option>
-                        <option value="onyx">onyx</option>
-                        <option value="nova">nova</option>
-                        <option value="shimmer">shimmer</option>
-                      </select>
-                    </div>
+
+                  {/* Voice Provider Selection */}
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Voice Provider *</label>
+                    <select
+                      value={callForm.ttsProvider}
+                      onChange={(e) => {
+                        const provider = e.target.value;
+                        if (provider === 'elevenlabs') {
+                          setCallForm({
+                            ...callForm,
+                            ttsProvider: provider,
+                            sttModel: 'elevenlabs-scribe-v1',
+                            ttsModel: 'eleven_turbo_v2_5',
+                            ttsVoice: 'rachel'
+                          });
+                        } else {
+                          setCallForm({
+                            ...callForm,
+                            ttsProvider: provider,
+                            sttModel: 'whisper-1',
+                            ttsModel: 'tts-1',
+                            ttsVoice: 'alloy'
+                          });
+                        }
+                      }}
+                      className="w-full rounded-lg border-none bg-gradient-to-r from-blue-50 to-purple-50 px-3 py-2 text-sm font-bold text-slate-700 shadow-sm ring-2 ring-blue-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                    >
+                      <option value="openai">🤖 OpenAI (Whisper + TTS)</option>
+                      <option value="elevenlabs">🎙️ ElevenLabs (Human-like)</option>
+                    </select>
                   </div>
+
+                  {/* Inference Model */}
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Inference Model *</label>
+                    <select
+                      value={callForm.inferenceModel}
+                      onChange={(e) => setCallForm({ ...callForm, inferenceModel: e.target.value })}
+                      className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                    >
+                      <option value="gpt-4o-mini">gpt-4o-mini (Fast)</option>
+                      <option value="gpt-4o">gpt-4o (Capable)</option>
+                    </select>
+                  </div>
+
+                  {/* Provider-specific options */}
+                  {callForm.ttsProvider === 'elevenlabs' ? (
+                    <div className="border border-purple-200 rounded-lg p-3 bg-purple-50/30 space-y-2">
+                      <h5 className="text-xs font-bold text-purple-700">🎙️ ElevenLabs</h5>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-xs text-slate-500 mb-1">TTS Model</label>
+                          <select
+                            value={callForm.ttsModel}
+                            onChange={(e) => setCallForm({ ...callForm, ttsModel: e.target.value })}
+                            className="w-full rounded bg-white px-2 py-1.5 text-xs ring-1 ring-purple-200 focus:ring-purple-500 outline-none"
+                          >
+                            <option value="eleven_turbo_v2_5">Turbo v2.5</option>
+                            <option value="eleven_multilingual_v2">Multilingual v2</option>
+                            <option value="eleven_flash_v2_5">Flash v2.5</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-slate-500 mb-1">Voice</label>
+                          <select
+                            value={callForm.ttsVoice}
+                            onChange={(e) => setCallForm({ ...callForm, ttsVoice: e.target.value })}
+                            className="w-full rounded bg-white px-2 py-1.5 text-xs ring-1 ring-purple-200 focus:ring-purple-500 outline-none"
+                          >
+                            <option value="rachel">Rachel</option>
+                            <option value="drew">Drew</option>
+                            <option value="josh">Josh</option>
+                            <option value="emily">Emily</option>
+                            <option value="adam">Adam</option>
+                            <option value="bella">Bella</option>
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="border border-green-200 rounded-lg p-3 bg-green-50/30 space-y-2">
+                      <h5 className="text-xs font-bold text-green-700">🤖 OpenAI</h5>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-xs text-slate-500 mb-1">TTS Model</label>
+                          <select
+                            value={callForm.ttsModel}
+                            onChange={(e) => setCallForm({ ...callForm, ttsModel: e.target.value })}
+                            className="w-full rounded bg-white px-2 py-1.5 text-xs ring-1 ring-green-200 focus:ring-green-500 outline-none"
+                          >
+                            <option value="tts-1">tts-1</option>
+                            <option value="tts-1-hd">tts-1-hd</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-slate-500 mb-1">Voice</label>
+                          <select
+                            value={callForm.ttsVoice}
+                            onChange={(e) => setCallForm({ ...callForm, ttsVoice: e.target.value })}
+                            className="w-full rounded bg-white px-2 py-1.5 text-xs ring-1 ring-green-200 focus:ring-green-500 outline-none"
+                          >
+                            <option value="alloy">alloy</option>
+                            <option value="echo">echo</option>
+                            <option value="nova">nova</option>
+                            <option value="shimmer">shimmer</option>
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 

@@ -1851,7 +1851,10 @@ async def twilio_incoming_call(request: Request):
                 import json
                 encoded_config = base64.b64encode(json.dumps(agent_config).encode('utf-8')).decode('utf-8')
                 stream.parameter(name="AgentConfig", value=encoded_config)
-                logger.info(f"📤 Passing agent_config to stream handler (reused code path): {agent_config.get('name')}")
+                logger.info(f"📤 Passing agent_config to stream handler: {agent_config.get('name')}")
+                logger.info(f"   📞 STT Model: {agent_config.get('sttModel', 'NOT SET')}")
+                logger.info(f"   🎙️ TTS Model: {agent_config.get('ttsModel', 'NOT SET')}")
+                logger.info(f"   🔊 TTS Voice: {agent_config.get('ttsVoice', 'NOT SET')}")
 
 
             # Pass custom context via stream parameter if available
