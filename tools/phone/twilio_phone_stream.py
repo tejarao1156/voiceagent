@@ -10,8 +10,9 @@ from typing import Dict, Any, Optional, List
 import webrtcvad
 
 from tools import SpeechToTextTool, ConversationalResponseTool, TextToSpeechTool
-from tools.phone.audio_utils import convert_pcm_to_mulaw, convert_mulaw_to_wav_bytes
+from tools.phone.audio_utils import convert_pcm_to_mulaw, convert_mulaw_to_wav_bytes, normalize_audio, apply_noise_gate
 from tools.provider_factory import get_stt_tool, get_tts_tool, is_elevenlabs_tts
+from tools.language_config import is_language_supported, get_language_names
 from conversation_manager import ConversationManager
 
 logger = logging.getLogger(__name__)
@@ -23,8 +24,11 @@ VAD_FRAME_DURATION_MS = 20
 VAD_FRAME_BYTES = (VAD_SAMPLE_RATE * VAD_FRAME_DURATION_MS // 1000)
 
 # Audio quality thresholds for human-like conversation
-MIN_RMS_THRESHOLD = 300  # Minimum audio energy (RMS) to consider as real speech (filters background noise)
-MIN_SPEECH_DURATION_FRAMES = 15  # 15 frames * 20ms = 300ms minimum speech before processing
+# TUNED for quiet speakers per ElevenLabs VAD best practices:
+# - Lower RMS threshold = more sensitive to soft voices
+# - Fewer frames = faster speech detection
+MIN_RMS_THRESHOLD = 250  # Lower threshold for quiet speakers (was 500)
+MIN_SPEECH_DURATION_FRAMES = 6  # 6 frames * 20ms = 120ms minimum speech (was 8)
 
 # Noise phrase filtering - common STT artifacts that should be ignored
 NOISE_PHRASES = {
@@ -62,16 +66,17 @@ class TwilioStreamHandler:
         self.interrupt_speech_frames = 0  # Track how many frames of speech during interrupt (to validate real interrupt)
         
         # Human-like conversation tuning parameters
-        self.SILENCE_THRESHOLD_FRAMES = 25  # 25 frames * 20ms/frame = 500ms of silence (faster with speculative STT)
-        self.INTERRUPT_GRACE_PERIOD_MS = 200  # Wait 200ms after AI starts speaking before allowing interrupts (faster response)
-        self.MIN_INTERRUPT_FRAMES = 3  # Require at least 3 frames (60ms) of sustained speech for valid interrupt
+        # TUNED for faster barge-in and quiet speaker detection per ElevenLabs guidance
+        self.SILENCE_THRESHOLD_FRAMES = 150  # 150 frames * 20ms/frame = 3000ms (3s) - gives user time to pause mid-sentence
+        self.INTERRUPT_GRACE_PERIOD_MS = 150  # Wait 150ms after AI starts speaking before allowing interrupts (was 200ms - faster barge-in)
+        self.MIN_INTERRUPT_FRAMES = 2  # Require at least 2 frames (40ms) of sustained speech for valid interrupt (was 3)
         
-        # New: Audio quality validation
+        # Audio quality validation
         self.rms_buffer: List[int] = []  # Track RMS values for average calculation
         self.greeting_complete = False  # Block speech processing until greeting finishes
         self.call_settling_complete = False  # Block speech until call has settled
         self.last_interrupt_time = 0.0  # Track last interrupt time for debouncing
-        self.INTERRUPT_DEBOUNCE_MS = 1000  # Minimum 1 second between interrupts
+        self.INTERRUPT_DEBOUNCE_MS = 200  # 200ms between interrupts - allows quick re-interrupts (was 300ms)
         
         self.speech_processing_lock = asyncio.Lock()  # Prevent concurrent speech processing
         self.speech_processing_task = None  # Track active speech processing task for cancellation
@@ -449,14 +454,17 @@ class TwilioStreamHandler:
                     self.last_interrupt_time = time.time()  # Record for debouncing
                     
                     # CRITICAL: Send Twilio "clear" command to INSTANTLY stop audio playback
-                    # This stops the audio on Twilio's side immediately
+                    # This stops the audio on Twilio's side immediately (send 3x for reliability)
                     async def send_clear_command():
                         try:
-                            await self.websocket.send_json({
-                                "event": "clear",
-                                "streamSid": self.stream_sid
-                            })
-                            logger.info("🛑 Sent Twilio 'clear' command - AI audio stopped instantly!")
+                            # Send clear 3x with delays for maximum reliability
+                            for _ in range(3):
+                                await self.websocket.send_json({
+                                    "event": "clear",
+                                    "streamSid": self.stream_sid
+                                })
+                                await asyncio.sleep(0.01)  # 10ms between clears
+                            logger.info("🛑 Sent Twilio 'clear' command (3x) - AI audio stopped instantly!")
                         except Exception as e:
                             logger.warning(f"Could not send clear command: {e}")
                     asyncio.create_task(send_clear_command())
@@ -483,21 +491,26 @@ class TwilioStreamHandler:
                         self.speculative_stt_task.cancel()
                     
                     # Set ai_is_speaking to False immediately so interrupt can be processed faster
-                    # This allows the interrupt speech to be captured and processed right away
                     self.ai_is_speaking = False
                     self.ai_speech_start_time = None
-                    # Clear any existing speech buffer to start fresh
+                    
+                    # CRITICAL: Save the current speech buffer before clearing (for processing later)
+                    # This preserves any speech captured before interrupt was validated
+                    self.interrupt_speech_buffer = bytes(self.speech_buffer) if self.speech_buffer else b''
+                    self.interrupt_frames_captured = self.speech_frames_count
+                    logger.info(f"💾 Saved {len(self.interrupt_speech_buffer)} bytes of pre-interrupt speech")
+                    
+                    # Clear and start fresh for new interrupt speech
                     self.speech_buffer = bytearray()
                     self.speech_frames_count = 0
                     self.silence_frames_count = 0
-                    # IMPORTANT: Start capturing the interrupt speech from this point
-                    # Note: We discard the validation frames (they were just to confirm it's a real interrupt)
-                    # We'll capture the full interrupt speech from now on
+                    
+                    # Start capturing interrupt speech immediately
                     self.speech_buffer.extend(payload)
-                    self.speech_frames_count = 1  # Start fresh count from validated interrupt
+                    self.speech_frames_count = 1
                     self.is_speaking = True
-                    self.interrupt_speech_frames = 0  # Reset for next time
-                    logger.info("🎤 Started capturing interrupt speech (waiting for TTS to stop)...")
+                    self.interrupt_speech_frames = 0
+                    logger.info("🎤 Started capturing interrupt speech (TTS stopped)...")
                     return  # Don't process further in this frame, we've handled the interrupt
                 else:
                     # Not enough frames yet - keep tracking but don't process
@@ -599,9 +612,17 @@ class TwilioStreamHandler:
             wav_audio = convert_mulaw_to_wav_bytes(audio_data)
             
             stt_model = self.agent_config.get("sttModel") if self.agent_config else None
-            result = await self.speech_tool.transcribe(wav_audio, "wav", model=stt_model)
             
-            transcription = result.get("text", "").strip()
+            # Route to correct STT provider based on model
+            if stt_model and stt_model.startswith("elevenlabs"):
+                # Use ElevenLabs STT
+                stt_tool = get_stt_tool(stt_model)
+                result = await stt_tool.transcribe(wav_audio, model=stt_model)
+            else:
+                # Use OpenAI Whisper (default)
+                result = await self.speech_tool.transcribe(wav_audio, "wav", model=stt_model)
+            
+            transcription = result.get("text", "").strip() if result else ""
             if transcription:
                 self.pending_transcription = transcription
                 logger.info(f"🔮 Speculative STT: '{transcription[:50]}...' ({len(audio_data)} bytes)")
@@ -637,22 +658,32 @@ class TwilioStreamHandler:
         This is called when user interrupts the AI (e.g., stops a story to ask a new question).
         The interrupt speech contains the NEW question that should be answered, not the old response."""
         # CRITICAL: Don't wait - process immediately since TTS is already stopped
-        # The interrupt was validated and TTS was cancelled, so we can process right away
-        # This ensures the new question is answered quickly, not the old story
         logger.info("🔄 Processing interrupt - user asked a NEW question, ignoring previous response.")
         
-        if not self.speech_buffer or self.speech_frames_count < 5:
-            logger.info("⏭️ Interrupt speech too short, ignoring.")
+        # Check if we have enough speech (combine saved + current buffers)
+        total_frames = self.speech_frames_count + getattr(self, 'interrupt_frames_captured', 0)
+        
+        if total_frames < 2:
+            logger.info(f"⏭️ Interrupt speech too short ({total_frames} frames), ignoring.")
             self.speech_buffer = bytearray()
             self.speech_frames_count = 0
             self.is_speaking = False
             self.interrupt_detected = False
             return
         
-        logger.info(f"🔄 Processing waiting interrupt: {len(self.speech_buffer)} bytes")
+        # CRITICAL: Merge saved interrupt buffer with current buffer for complete speech
+        if hasattr(self, 'interrupt_speech_buffer') and self.interrupt_speech_buffer:
+            combined_buffer = bytearray(self.interrupt_speech_buffer) + self.speech_buffer
+            logger.info(f"📦 Merged interrupt buffers: {len(self.interrupt_speech_buffer)} + {len(self.speech_buffer)} = {len(combined_buffer)} bytes")
+            self.speech_buffer = combined_buffer
+            self.speech_frames_count = total_frames
+            # Clear saved buffer after use
+            self.interrupt_speech_buffer = b''
+            self.interrupt_frames_captured = 0
+        
+        logger.info(f"🔄 Processing waiting interrupt: {len(self.speech_buffer)} bytes, {self.speech_frames_count} frames")
         was_interrupt = self.interrupt_detected
         self.interrupt_detected = False
-        # _process_user_speech already has the lock, so we can call it directly
         await self._process_user_speech(was_interrupt=True)
     
     async def _process_user_speech(self, was_interrupt: bool = False):
@@ -705,7 +736,9 @@ class TwilioStreamHandler:
                 
                 # Use agent config for STT if available
                 stt_model_to_use = self.agent_config.get("sttModel") if self.agent_config else None
-                logger.info(f"   📞 STT model to use: {stt_model_to_use or 'default (whisper-1)'}")
+                supported_languages = self.agent_config.get("supportedLanguages", ["en"]) if self.agent_config else ["en"]
+                primary_language = supported_languages[0] if supported_languages else "en"
+                logger.info(f"   📞 STT model: {stt_model_to_use or 'whisper-1'}, languages: {supported_languages}")
                 
                 # 1. Transcribe speech - USE SPECULATIVE RESULT IF AVAILABLE
                 perf_stt_start = time.perf_counter()
@@ -714,6 +747,7 @@ class TwilioStreamHandler:
                 if self.pending_transcription and len(self.pending_transcription) > 3:
                     # Use the speculative transcription (already processed in background!)
                     user_text = self.pending_transcription
+                    detected_language = primary_language  # Assume primary for speculative
                     perf_stt_end = time.perf_counter()
                     stt_duration = (perf_stt_end - perf_stt_start) * 1000
                     logger.info(f"⚡ Using SPECULATIVE transcription (0ms STT!): '{user_text[:50]}...'")
@@ -728,23 +762,34 @@ class TwilioStreamHandler:
                     # Route to correct STT provider based on model
                     if stt_model_to_use and stt_model_to_use.startswith("elevenlabs"):
                         # Use ElevenLabs STT (Scribe)
-                        logger.info(f"🎙️ Using ElevenLabs STT: {stt_model_to_use}")
+                        logger.info(f"🎙️ Using ElevenLabs STT: {stt_model_to_use} (lang hint: {primary_language})")
                         stt_tool = get_stt_tool(stt_model_to_use)
-                        stt_result = await stt_tool.transcribe(wav_audio_data, model=stt_model_to_use)
+                        stt_result = await stt_tool.transcribe(
+                            wav_audio_data,
+                            model=stt_model_to_use,
+                            language_code=primary_language
+                        )
                     else:
                         # Use OpenAI Whisper (default)
-                        logger.info(f"🤖 Using OpenAI Whisper STT: {stt_model_to_use or 'whisper-1'}")
+                        logger.info(f"🤖 Using OpenAI Whisper STT: {stt_model_to_use or 'whisper-1'} (lang hint: {primary_language})")
                         stt_result = await self.speech_tool.transcribe(
                             wav_audio_data,
                             "wav",
-                            model=stt_model_to_use
+                            model=stt_model_to_use,
+                            language=primary_language
                         )
                     user_text = stt_result.get("text", "").strip()
+                    detected_language = stt_result.get("detected_language", primary_language)
                     perf_stt_end = time.perf_counter()
                     stt_duration = (perf_stt_end - perf_stt_start) * 1000
                     # Clear speculative state
                     self.pending_transcription = ""
                     self.speculative_audio_buffer = bytearray()
+                
+                # NOTE: Language validation DISABLED - STT detection is unreliable for phone audio
+                # The language hint is passed to STT for accuracy, but we don't reject based on detection
+                # if detected_language and not is_language_supported(detected_language, supported_languages):
+                #     ...rejected speech here...
                 
                 if not user_text:
                     logger.info("STT result is empty, skipping AI response.")
@@ -933,10 +978,8 @@ class TwilioStreamHandler:
                     logger.info(f"👋 Farewell phrase detected, scheduling call hangup for {self.call_sid}")
                     await asyncio.sleep(1.5)  # Give time for audio to finish
                     try:
-                        import api_general
-                        if hasattr(api_general, 'twilio_phone_tool'):
-                            await api_general.twilio_phone_tool.hangup_call(self.call_sid)
-                            logger.info(f"📱 Call {self.call_sid} ended after farewell")
+                        await self.hangup_call(reason="Farewell phrase detected")
+                        logger.info(f"📱 Call {self.call_sid} ended after farewell")
                     except Exception as e:
                         logger.warning(f"Could not auto-hangup after farewell: {e}")
 
@@ -945,6 +988,61 @@ class TwilioStreamHandler:
                 raise
             except Exception as e:
                 logger.error(f"Error processing user speech (Query #{current_query_id}): {e}", exc_info=True)
+
+    def _split_for_fast_tts(self, text: str) -> List[str]:
+        """Split text into small TTS-friendly chunks for faster interrupt response.
+        
+        Splits at sentence boundaries, commas, semicolons to create ~50-80 char chunks.
+        Ensures interrupt checks happen frequently during long AI responses.
+        """
+        import re
+        chunks = []
+        
+        # First split into sentences
+        sentences = self.tts_tool._split_into_sentences(text)
+        
+        for sentence in sentences:
+            if len(sentence) > 80:
+                # Split long sentences at punctuation
+                parts = re.split(r'([,;:])', sentence)
+                current_chunk = ""
+                for i, part in enumerate(parts):
+                    if part in [',', ';', ':']:
+                        current_chunk += part
+                    elif len(current_chunk) + len(part) < 80:
+                        current_chunk += part
+                    else:
+                        if current_chunk.strip():
+                            chunks.append(current_chunk.strip())
+                        current_chunk = part
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+            else:
+                chunks.append(sentence)
+        
+        return [c for c in chunks if c.strip()]
+
+    async def _synthesize_with_interrupt_check(self, text: str, voice: str, model: str = None):
+        """Synthesize TTS with periodic interrupt checking (every 50ms).
+        
+        Returns None if interrupted during synthesis, allowing fast abort.
+        """
+        # Start TTS synthesis in background task
+        tts_task = asyncio.create_task(self._synthesize_pcm(text, voice=voice, model=model))
+        
+        # Poll for interrupt while TTS is running
+        while not tts_task.done():
+            if self.interrupt_detected:
+                tts_task.cancel()
+                logger.info(f"🛑 TTS cancelled mid-synthesis due to interrupt! (chunk: '{text[:30]}...')")
+                try:
+                    await tts_task
+                except asyncio.CancelledError:
+                    pass
+                return None
+            await asyncio.sleep(0.05)  # Check every 50ms
+        
+        return tts_task.result()
 
     async def _send_greeting(self):
         """Generates and streams a greeting message to the caller. For outbound calls, AI drives the conversation.
@@ -1018,33 +1116,33 @@ class TwilioStreamHandler:
         logger.info(f"   🎙️ TTS model: {tts_model or 'tts-1'}, voice: {tts_voice}")
         
         try:
-            sentences = self.tts_tool._split_into_sentences(text)
-            for sentence in sentences:
-                # CRITICAL: Check for interrupt before processing each sentence
-                # If interrupt detected, stop immediately and don't process any more sentences
+            # Split into smaller chunks for faster interrupt response
+            chunks = self._split_for_fast_tts(text)
+            logger.info(f"   📝 Split into {len(chunks)} TTS chunks for fast interrupt")
+            
+            for chunk in chunks:
+                # CRITICAL: Check for interrupt before processing each chunk
                 if self.interrupt_detected:
                     logger.info("🛑 TTS interrupted by user, stopping stream immediately.")
                     self.ai_is_speaking = False
                     self.ai_speech_start_time = None
-                    # Don't send any more audio - user wants to ask a new question
                     return
                 
-                if not sentence.strip():
+                if not chunk.strip():
                     continue
                 
-                # Get TTS in PCM format for fast conversion (no ffmpeg needed!)
-                # Use agent config for TTS voice and model
+                # Synthesize with interrupt polling (checks every 50ms during synthesis)
                 perf_tts_chunk_start = time.perf_counter()
-                tts_result = await self._synthesize_pcm(sentence, voice=tts_voice, model=tts_model)
+                tts_result = await self._synthesize_with_interrupt_check(chunk, voice=tts_voice, model=tts_model)
                 perf_tts_chunk_end = time.perf_counter()
                 
-                logger.info(f"⏱️ [PERF] TTS Chunk Generated: +{(perf_tts_chunk_end - perf_tts_chunk_start)*1000:.0f}ms (Sentence: '{sentence[:20]}...')")
-                
-                # Check again after TTS generation (user might have interrupted during generation)
-                if self.interrupt_detected:
-                    logger.info("🛑 TTS interrupted after generation, stopping stream.")
+                # If interrupted during synthesis, tts_result will be None
+                if tts_result is None or self.interrupt_detected:
+                    logger.info("🛑 TTS interrupted during synthesis, stopping stream.")
                     self.ai_is_speaking = False
                     return
+                
+                logger.info(f"⏱️ [PERF] TTS Chunk Generated: +{(perf_tts_chunk_end - perf_tts_chunk_start)*1000:.0f}ms (Chunk: '{chunk[:20]}...')")
                 
                 if tts_result.get("success"):
                     # CRITICAL: Check for interrupt BEFORE sending audio chunk
@@ -1064,9 +1162,9 @@ class TwilioStreamHandler:
                     mulaw_bytes = convert_pcm_to_mulaw(pcm_bytes, input_rate=24000, input_width=2)
                     if mulaw_bytes:
                         logger.info(f"📡 STEP 5: Sending {len(mulaw_bytes)} bytes audio to Twilio")
-                        # CHUNKED AUDIO: Split into 1.5s chunks (8kHz * 1.5s = 12000 bytes)
-                        # This allows interrupts to take effect immediately instead of waiting
-                        CHUNK_SIZE = 12000  # 1.5 seconds at 8kHz mu-law
+                        # CHUNKED AUDIO: Split into 100ms chunks (8kHz * 0.1s = 800 bytes)
+                        # Ultra-small chunks for instant interrupt response
+                        CHUNK_SIZE = 800  # 100ms at 8kHz mu-law - instant interrupt response
                         
                         for chunk_start in range(0, len(mulaw_bytes), CHUNK_SIZE):
                             # Check for interrupt BEFORE each chunk

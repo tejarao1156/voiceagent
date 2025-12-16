@@ -67,12 +67,14 @@ class ElevenLabsSpeechToTextTool:
             audio_file = io.BytesIO(audio_data)
             audio_file.name = f"audio.{file_format}"
 
-            # Build form data
+            # Build form data with accuracy-enhancing options
             files = {
                 "file": (f"audio.{file_format}", audio_file, f"audio/{file_format}")
             }
             data = {
                 "model_id": model_id,
+                "tag_audio_events": "true",  # Helps with noisy phone audio
+                "timestamps_granularity": "word",  # Word-level accuracy
             }
             if language_code:
                 data["language_code"] = language_code

@@ -429,6 +429,33 @@ async def mongodb_health_check(request: Request):
 
 
 @app.get(
+    "/api/languages",
+    summary="Get Supported Languages",
+    description="Get supported languages based on STT and TTS model intersection",
+    tags=["Configuration"]
+)
+async def get_languages(stt_model: str = "whisper-1", tts_model: str = "tts-1"):
+    """Get languages supported by BOTH STT and TTS models.
+    
+    Args:
+        stt_model: STT model name (e.g., "whisper-1", "elevenlabs-scribe-v1")
+        tts_model: TTS model name (e.g., "tts-1", "eleven_multilingual_v2")
+    
+    Returns:
+        List of language objects with code and name
+    """
+    from tools.language_config import get_supported_languages, get_stt_languages, get_tts_languages
+    
+    return {
+        "languages": get_supported_languages(stt_model, tts_model),
+        "stt_languages": get_stt_languages(stt_model),
+        "tts_languages": get_tts_languages(tts_model),
+        "stt_model": stt_model,
+        "tts_model": tts_model
+    }
+
+
+@app.get(
     "/personas",
     response_model=List[PersonaSummary],
     summary="List Personas",

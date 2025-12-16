@@ -1914,9 +1914,10 @@ const IncomingAgentView = () => {
     phoneNumber: '',
     sttModel: 'whisper-1',
     inferenceModel: 'gpt-4o-mini',
-    ttsProvider: 'openai',  // NEW: 'openai' or 'elevenlabs'
+    ttsProvider: 'openai',  // 'openai' or 'elevenlabs'
     ttsModel: 'tts-1',
     ttsVoice: 'alloy',
+    supportedLanguages: ['en'] as string[],  // Multi-select languages (max 3)
     promptId: '',
     systemPrompt: '',
     greeting: '',
@@ -1939,6 +1940,56 @@ const IncomingAgentView = () => {
     behavior: false,
     advanced: false,
   })
+
+  // Available languages based on STT+TTS model intersection
+  const [availableLanguages, setAvailableLanguages] = useState<{code: string, name: string}[]>([
+    {code: 'en', name: 'English'}
+  ])
+
+  // Language options for the selected provider
+  const getLanguageOptions = () => {
+    // Define language options per model combination
+    const languagesByModel: Record<string, {code: string, name: string}[]> = {
+      // OpenAI TTS models only support English
+      'tts-1': [{code: 'en', name: 'English'}],
+      'tts-1-hd': [{code: 'en', name: 'English'}],
+      // ElevenLabs Turbo - English only  
+      'eleven_turbo_v2_5': [{code: 'en', name: 'English'}],
+      'eleven_flash_v2_5': [{code: 'en', name: 'English'}],
+      // ElevenLabs Multilingual - supports many languages
+      'eleven_multilingual_v2': [
+        {code: 'en', name: 'English'},
+        {code: 'es', name: 'Spanish'},
+        {code: 'fr', name: 'French'},
+        {code: 'de', name: 'German'},
+        {code: 'it', name: 'Italian'},
+        {code: 'pt', name: 'Portuguese'},
+        {code: 'hi', name: 'Hindi'},
+        {code: 'te', name: 'Telugu'},
+        {code: 'ta', name: 'Tamil'},
+        {code: 'zh', name: 'Chinese'},
+        {code: 'ja', name: 'Japanese'},
+        {code: 'ko', name: 'Korean'},
+        {code: 'ar', name: 'Arabic'},
+        {code: 'ru', name: 'Russian'},
+      ],
+    }
+    return languagesByModel[agentForm.ttsModel] || [{code: 'en', name: 'English'}]
+  }
+
+  // Update available languages when TTS model changes
+  useEffect(() => {
+    const langs = getLanguageOptions()
+    setAvailableLanguages(langs)
+    // Reset to English if current selection not supported
+    const supportedCodes = langs.map(l => l.code)
+    const validSelections = agentForm.supportedLanguages.filter(code => supportedCodes.includes(code))
+    if (validSelections.length === 0) {
+      setAgentForm(prev => ({ ...prev, supportedLanguages: ['en'] }))
+    } else if (validSelections.length !== agentForm.supportedLanguages.length) {
+      setAgentForm(prev => ({ ...prev, supportedLanguages: validSelections }))
+    }
+  }, [agentForm.ttsModel])
 
   // Load agents
   const loadAgents = async () => {
@@ -2023,6 +2074,7 @@ const IncomingAgentView = () => {
           ttsProvider: 'openai',
           ttsModel: 'tts-1',
           ttsVoice: 'alloy',
+          supportedLanguages: ['en'],
           promptId: '',
           systemPrompt: '',
           greeting: '',
@@ -2283,6 +2335,7 @@ const IncomingAgentView = () => {
                               ttsProvider: agent.ttsModel?.startsWith('eleven') ? 'elevenlabs' : 'openai',
                               ttsModel: agent.ttsModel || 'tts-1',
                               ttsVoice: agent.ttsVoice || 'alloy',
+                              supportedLanguages: agent.supportedLanguages || ['en'],
                               promptId: agent.promptId || '',
                               systemPrompt: agent.systemPrompt || '',
                               greeting: agent.greeting || '',
@@ -2527,6 +2580,60 @@ const IncomingAgentView = () => {
                               <option value="adam">Adam (Middle-aged Male)</option>
                             </select>
                           </div>
+                          <div className="col-span-2">
+                            <label className="block text-xs font-medium text-slate-600 mb-1">
+                              Supported Languages (max 3)
+                              <span className="text-purple-500 ml-1">({agentForm.supportedLanguages.length}/3)</span>
+                            </label>
+                            <div className="flex flex-wrap gap-2 mb-2">
+                              {agentForm.supportedLanguages.map(code => {
+                                const lang = availableLanguages.find(l => l.code === code)
+                                return lang ? (
+                                  <span key={code} className="inline-flex items-center gap-1 px-2 py-1 bg-purple-100 text-purple-700 rounded-full text-xs font-medium">
+                                    {lang.name}
+                                    <button
+                                      type="button"
+                                      onClick={() => setAgentForm({
+                                        ...agentForm,
+                                        supportedLanguages: agentForm.supportedLanguages.filter(c => c !== code)
+                                      })}
+                                      className="hover:text-purple-900"
+                                    >
+                                      ×
+                                    </button>
+                                  </span>
+                                ) : null
+                              })}
+                            </div>
+                            <select
+                              value=""
+                              onChange={(e) => {
+                                const code = e.target.value
+                                if (code && !agentForm.supportedLanguages.includes(code) && agentForm.supportedLanguages.length < 3) {
+                                  setAgentForm({
+                                    ...agentForm,
+                                    supportedLanguages: [...agentForm.supportedLanguages, code]
+                                  })
+                                }
+                              }}
+                              disabled={agentForm.supportedLanguages.length >= 3}
+                              className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-purple-200 focus:ring-2 focus:ring-purple-500 outline-none disabled:opacity-50"
+                            >
+                              <option value="">+ Add language...</option>
+                              {availableLanguages
+                                .filter(lang => !agentForm.supportedLanguages.includes(lang.code))
+                                .map(lang => (
+                                  <option key={lang.code} value={lang.code}>{lang.name}</option>
+                                ))
+                              }
+                            </select>
+                            <p className="text-xs text-slate-400 mt-1">
+                              {availableLanguages.length === 1 
+                                ? 'Use Multilingual v2 TTS model for more language options'
+                                : 'Select languages the agent should understand and respond in'
+                              }
+                            </p>
+                          </div>
                         </div>
                       </div>
                     ) : (
@@ -2571,6 +2678,15 @@ const IncomingAgentView = () => {
                               <option value="nova">nova</option>
                               <option value="shimmer">shimmer</option>
                             </select>
+                          </div>
+                          <div className="col-span-2">
+                            <label className="block text-xs font-medium text-slate-600 mb-1">
+                              Language
+                            </label>
+                            <div className="flex items-center gap-2 px-3 py-2 bg-green-50 rounded-lg text-sm text-green-700">
+                              <span className="font-medium">English</span>
+                              <span className="text-xs text-green-500">(OpenAI TTS supports English only)</span>
+                            </div>
                           </div>
                         </div>
                       </div>

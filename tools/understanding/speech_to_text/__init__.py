@@ -20,19 +20,27 @@ class SpeechToTextTool:
     def __init__(self, client: Optional[openai.OpenAI] = None) -> None:
         self.client = client or openai.OpenAI(api_key=OPENAI_API_KEY)
 
-    async def transcribe(self, audio_data: bytes, file_format: str = "wav", model: Optional[str] = None) -> Dict[str, Any]:
+    async def transcribe(
+        self,
+        audio_data: bytes,
+        file_format: str = "wav",
+        model: Optional[str] = None,
+        language: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Transcribe raw audio bytes into text using OpenAI Whisper.
         
         Args:
             audio_data: Raw audio bytes to transcribe
             file_format: Audio file format (default: "wav")
-            model: Optional STT model override (e.g., "whisper-1"). If not provided, uses VOICE_MODEL from config.
+            model: Optional STT model override (e.g., "whisper-1")
+            language: Optional language hint (ISO 639-1 code, e.g., "en", "hi")
         """
         if not audio_data:
             return {
                 "success": False,
                 "error": "No audio data provided.",
                 "text": None,
+                "detected_language": None,
             }
 
         try:
@@ -42,17 +50,27 @@ class SpeechToTextTool:
             # Use provided model or fall back to config default
             stt_model = model or VOICE_MODEL
 
-            transcript = self.client.audio.transcriptions.create(
-                model=stt_model,
-                file=audio_file,
-                response_format="text",
-            )
+            # Build transcription kwargs
+            transcribe_kwargs = {
+                "model": stt_model,
+                "file": audio_file,
+                "response_format": "verbose_json",  # Get detected language
+            }
+            
+            # Add language hint if provided (improves accuracy)
+            if language:
+                transcribe_kwargs["language"] = language
 
-            text = transcript.strip()
-            logger.info("Speech-to-text successful: %s", text[:80])
+            transcript = self.client.audio.transcriptions.create(**transcribe_kwargs)
+
+            text = transcript.text.strip()
+            detected_language = getattr(transcript, 'language', language or 'en')
+            
+            logger.info("Speech-to-text successful (lang=%s): %s", detected_language, text[:80])
             return {
                 "success": True,
                 "text": text,
+                "detected_language": detected_language,
             }
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("Speech-to-text failed: %s", exc)
@@ -60,5 +78,6 @@ class SpeechToTextTool:
                 "success": False,
                 "error": str(exc),
                 "text": None,
+                "detected_language": None,
             }
 
