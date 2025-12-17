@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 ELEVENLABS_STT_PREFIXES = ("elevenlabs",)
 ELEVENLABS_TTS_PREFIXES = ("eleven",)
 
+# Default language for all STT models (prevents hallucination from noise)
+# All STT implementations should import and use this
+DEFAULT_LANGUAGE = "en"
+
 
 def get_stt_tool(model: Optional[str] = None) -> Union[SpeechToTextTool, ElevenLabsSpeechToTextTool]:
     """Get the appropriate STT tool based on model name.

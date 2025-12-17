@@ -38,6 +38,9 @@ NOISE_PHRASES = {
 # Single character patterns are also noise
 MIN_TRANSCRIPT_LENGTH = 3  # Minimum characters for valid transcript
 
+# Valid short responses that should NOT be filtered even if < MIN_TRANSCRIPT_LENGTH
+VALID_SHORT_RESPONSES = {"ok", "no", "hi", "go", "ya", "ye", "by", "bye"}
+
 class TwilioStreamHandler:
     """Handles the real-time Twilio media stream for a single phone call."""
 
@@ -96,6 +99,18 @@ class TwilioStreamHandler:
             "talk to you later", "speak to you later", "have a nice day",
             "thanks for calling", "thank you for calling"
         ]
+        
+        # === EDGE CASE HANDLING: Silence and Duration Timeouts ===
+        # Inactivity timeout: hang up if user doesn't speak for too long after greeting
+        self.INACTIVITY_TIMEOUT_SECONDS = 30  # Hangup after 30s of no user speech
+        self.PROMPT_AFTER_SILENCE_SECONDS = 8  # Prompt "Are you still there?" after 8s silence
+        self.last_user_speech_time: Optional[float] = None  # Track when user last spoke
+        self.silence_prompt_sent = False  # Track if we already sent silence prompt
+        self.inactivity_check_task: Optional[asyncio.Task] = None  # Background task for inactivity check
+        
+        # Max call duration: prevent calls from running forever
+        self.MAX_CALL_DURATION_SECONDS = 300  # 5 minutes max call duration
+        self.call_start_time: Optional[float] = None  # Track when call started
     
     def _should_end_call(self, text: str) -> bool:
         """Check if text contains farewell phrases indicating call should end."""
@@ -375,7 +390,11 @@ class TwilioStreamHandler:
         
         text_clean = text.strip().lower()
         
-        # Too short
+        # Allow valid short responses even if < MIN_TRANSCRIPT_LENGTH
+        if text_clean in VALID_SHORT_RESPONSES:
+            return True
+        
+        # Too short (but not in valid short responses)
         if len(text_clean) < MIN_TRANSCRIPT_LENGTH:
             logger.info(f"🔇 Rejecting short transcript: '{text}' ({len(text_clean)} chars < {MIN_TRANSCRIPT_LENGTH})")
             return False
@@ -531,6 +550,10 @@ class TwilioStreamHandler:
             self.speech_frames_count += 1
             self.silence_frames_count = 0
             self.rms_buffer.append(rms)  # Track RMS for quality validation
+            
+            # === EDGE CASE: Reset inactivity timer when user speaks ===
+            self.last_user_speech_time = time.time()
+            self.silence_prompt_sent = False  # Reset prompt flag since user is speaking
             
             # Trigger speculative STT in background (runs every 750ms during speech)
             self._trigger_speculative_stt()
@@ -1052,6 +1075,9 @@ class TwilioStreamHandler:
             logger.info(f"⏳ Call settling period starting for call {self.call_sid}...")
             await asyncio.sleep(0.5)  # 500ms settling period for all calls
             self.call_settling_complete = True
+            
+            # === EDGE CASE: Start tracking call duration ===
+            self.call_start_time = time.time()
             logger.info(f"✅ Call settled, ready to send greeting for call {self.call_sid}")
             
             # Check if agent_config is available
@@ -1094,11 +1120,139 @@ class TwilioStreamHandler:
             # PHASE 2: Greeting complete - now enable speech detection
             self.greeting_complete = True
             logger.info(f"🎤 Greeting complete, now listening for user speech (call {self.call_sid})")
+            
+            # === EDGE CASE: Start inactivity monitoring ===
+            # Initialize last user speech time to now (give user time to respond after greeting)
+            self.last_user_speech_time = time.time()
+            self.inactivity_check_task = asyncio.create_task(self._monitor_inactivity())
+            logger.info(f"⏰ Started inactivity monitoring for call {self.call_sid}")
+            
         except Exception as e:
             logger.error(f"❌ Error sending greeting for call {self.call_sid}: {e}", exc_info=True)
             # Enable listening even if greeting fails
             self.greeting_complete = True
             self.call_settling_complete = True
+
+    async def _monitor_inactivity(self):
+        """Background task to monitor for user inactivity and max call duration.
+        
+        DEFENSIVE: Only checks when call is truly idle (not during speech/processing).
+        Checks every 5 seconds:
+        - If user hasn't spoken for PROMPT_AFTER_SILENCE_SECONDS: send "Are you still there?" prompt
+        - If user hasn't spoken for INACTIVITY_TIMEOUT_SECONDS: hangup with farewell
+        - If call exceeds MAX_CALL_DURATION_SECONDS: hangup with farewell
+        """
+        logger.info(f"⏰ Inactivity monitor started for call {self.call_sid}")
+        
+        try:
+            while True:
+                await asyncio.sleep(5)  # Check every 5 seconds (less aggressive)
+                
+                # === DEFENSIVE CHECKS: Skip if call is actively in use ===
+                # Skip if AI is speaking (user waiting for response)
+                if self.ai_is_speaking:
+                    continue
+                
+                # Skip if user is currently speaking
+                if self.is_speaking:
+                    continue
+                
+                # Skip if speech is being processed
+                if self.speech_processing_task and not self.speech_processing_task.done():
+                    continue
+                
+                # Skip if TTS is being processed
+                if self.tts_streaming_task and not self.tts_streaming_task.done():
+                    continue
+                
+                current_time = time.time()
+                
+                # === Check max call duration (safety limit) ===
+                if self.call_start_time:
+                    call_duration = current_time - self.call_start_time
+                    if call_duration >= self.MAX_CALL_DURATION_SECONDS:
+                        logger.warning(f"⏰ Max call duration ({self.MAX_CALL_DURATION_SECONDS}s) reached for call {self.call_sid}")
+                        await self._hangup_call(
+                            reason="max_duration",
+                            farewell_message="I have to end our call now. Thank you for your time. Goodbye!"
+                        )
+                        return  # Stop monitoring
+                
+                # === Check user inactivity (only if not during active conversation) ===
+                if self.last_user_speech_time:
+                    silence_duration = current_time - self.last_user_speech_time
+                    
+                    # Check if user has been silent too long (total timeout)
+                    if silence_duration >= self.INACTIVITY_TIMEOUT_SECONDS:
+                        logger.warning(f"⏰ User inactivity timeout ({self.INACTIVITY_TIMEOUT_SECONDS}s) reached for call {self.call_sid}")
+                        await self._hangup_call(
+                            reason="inactivity",
+                            farewell_message="It seems like you're not there. I'll end the call now. Goodbye!"
+                        )
+                        return  # Stop monitoring
+                    
+                    # Check if we should prompt for activity (only once per silence period)
+                    if silence_duration >= self.PROMPT_AFTER_SILENCE_SECONDS and not self.silence_prompt_sent:
+                        logger.info(f"⏰ User silence ({silence_duration:.0f}s), sending prompt for call {self.call_sid}")
+                        self.silence_prompt_sent = True
+                        
+                        # Send "are you still there?" prompt
+                        try:
+                            await self._synthesize_and_stream_tts("Are you still there? I'm here to help.")
+                            # DON'T reset timer - let inactivity timeout proceed to hangup
+                        except Exception as e:
+                            logger.warning(f"Error sending silence prompt: {e}")
+                
+        except asyncio.CancelledError:
+            logger.info(f"⏰ Inactivity monitor cancelled for call {self.call_sid}")
+        except Exception as e:
+            # Don't let monitor errors crash the call
+            logger.error(f"⏰ Inactivity monitor error for call {self.call_sid}: {e}", exc_info=True)
+
+    async def _hangup_call(self, reason: str = "normal", farewell_message: Optional[str] = None):
+        """Gracefully hang up the call with optional farewell message.
+        
+        Args:
+            reason: Reason for hangup (for logging)
+            farewell_message: Optional message to say before hanging up
+        """
+        logger.info(f"📞 Hanging up call {self.call_sid} - reason: {reason}")
+        
+        try:
+            # Send farewell message if provided
+            if farewell_message:
+                logger.info(f"📢 Sending farewell: '{farewell_message}'")
+                await self._synthesize_and_stream_tts(farewell_message)
+                await asyncio.sleep(0.5)  # Give time for message to play
+            
+            # Cancel inactivity monitor if running
+            if self.inactivity_check_task and not self.inactivity_check_task.done():
+                self.inactivity_check_task.cancel()
+            
+            # Use Twilio REST API to end the call
+            try:
+                from utils.twilio_credentials import get_twilio_credentials
+                
+                # Get credentials from stored phone number
+                twilio_creds = await get_twilio_credentials(phone_number=self.to_number, call_sid=self.call_sid)
+                if twilio_creds:
+                    from twilio.rest import Client
+                    client = Client(twilio_creds["account_sid"], twilio_creds["auth_token"])
+                    client.calls(self.call_sid).update(status="completed")
+                    logger.info(f"✅ Call {self.call_sid} ended via Twilio API")
+                else:
+                    # Fallback: close websocket to end stream
+                    logger.info(f"⚠️ No Twilio creds, closing websocket for call {self.call_sid}")
+                    await self.websocket.close()
+            except Exception as e:
+                logger.warning(f"Could not end call via API, closing websocket: {e}")
+                try:
+                    await self.websocket.close()
+                except:
+                    pass
+                    
+        except Exception as e:
+            logger.error(f"Error in _hangup_call for {self.call_sid}: {e}", exc_info=True)
 
     async def _synthesize_and_stream_tts(self, text: str):
         """Synthesizes text to speech and streams it back to Twilio using fast PCM conversion.

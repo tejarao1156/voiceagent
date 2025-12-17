@@ -2447,6 +2447,75 @@ async def twilio_call_status(request: Request):
         return {"status": "error", "message": str(e)}
 
 @app.post(
+    "/webhooks/twilio/amd-status",
+    summary="Twilio AMD Status Webhook",
+    description="Handle Answering Machine Detection (AMD) results from Twilio async detection",
+    tags=["Twilio Phone Integration"]
+)
+async def twilio_amd_status(request: Request):
+    """
+    Webhook endpoint for Twilio AMD (Answering Machine Detection) results.
+    
+    AMD detection runs asynchronously and sends results via this callback:
+    - human: A human answered
+    - machine_start: Machine detected, speaking has begun
+    - machine_end_beep: Machine detected, beep detected (ready for voicemail)
+    - machine_end_silence: Machine detected, silence after message
+    - machine_end_other: Machine detected, other end condition
+    - fax: Fax machine detected
+    - unknown: Could not determine
+    
+    This enables the AI to behave differently for voicemail vs human.
+    """
+    try:
+        form_data = await request.form()
+        amd_data = dict(form_data)
+        
+        call_sid = amd_data.get("CallSid")
+        answered_by = amd_data.get("AnsweredBy", "unknown")
+        machine_detection_duration = amd_data.get("MachineDetectionDuration", "0")
+        
+        logger.info(f"📞 AMD DETECTION for call {call_sid}: {answered_by}")
+        logger.info(f"   Detection duration: {machine_detection_duration}ms")
+        logger.info(f"   Full AMD data: {amd_data}")
+        
+        # Handle based on detection result
+        if answered_by == "human":
+            logger.info(f"✅ Human answered call {call_sid} - proceeding with AI conversation")
+            # Normal call flow - AI will greet and converse
+            return {"status": "ok", "action": "continue", "answered_by": answered_by}
+            
+        elif answered_by in ["machine_start", "machine_end_beep", "machine_end_silence", "machine_end_other"]:
+            logger.info(f"📼 Voicemail/Machine detected for call {call_sid}: {answered_by}")
+            
+            # Option 1: Leave a voicemail message (current behavior - continue call)
+            # The AI greeting will play as the voicemail message
+            logger.info(f"   → Leaving voicemail (AI greeting will play as message)")
+            
+            # Option 2: Hangup immediately (uncomment to enable)
+            # try:
+            #     from databases.mongodb_phone_store import MongoDBPhoneStore
+            #     # ... hangup logic here ...
+            #     logger.info(f"   → Hanging up (voicemail not supported)")
+            # except Exception as e:
+            #     logger.warning(f"Could not hangup voicemail call: {e}")
+            
+            return {"status": "ok", "action": "voicemail", "answered_by": answered_by}
+            
+        elif answered_by == "fax":
+            logger.warning(f"📠 Fax machine detected for call {call_sid} - should hangup")
+            # Fax machines can't receive AI calls - hangup
+            return {"status": "ok", "action": "hangup", "answered_by": answered_by}
+            
+        else:
+            logger.warning(f"❓ Unknown AMD result for call {call_sid}: {answered_by}")
+            return {"status": "ok", "action": "continue", "answered_by": answered_by}
+            
+    except Exception as e:
+        logger.error(f"❌ Error handling AMD status webhook: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+@app.post(
     "/webhooks/twilio/recording",
     summary="Twilio Recording Handler",
     description="Handles recorded audio from caller",

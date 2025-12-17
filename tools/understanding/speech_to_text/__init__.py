@@ -57,9 +57,15 @@ class SpeechToTextTool:
                 "response_format": "verbose_json",  # Get detected language
             }
             
-            # Add language hint if provided (improves accuracy)
-            if language:
-                transcribe_kwargs["language"] = language
+            # Force default language if not specified (prevents foreign hallucination from noise)
+            from tools.provider_factory import DEFAULT_LANGUAGE
+            if not language:
+                language = DEFAULT_LANGUAGE
+            transcribe_kwargs["language"] = language
+            
+            # Add prompt to help Whisper handle phone audio (reduces hallucinations)
+            # This guides the model to expect phone call audio with potential noise
+            transcribe_kwargs["prompt"] = "Phone call audio transcription. Clear speech."
 
             transcript = self.client.audio.transcriptions.create(**transcribe_kwargs)
 

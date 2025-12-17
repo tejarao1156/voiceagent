@@ -88,6 +88,9 @@ def convert_mulaw_to_wav_bytes(mulaw_bytes: bytes, sample_rate: int = 8000, targ
                     pcm_data = audioop.mul(pcm_data, 2, safe_factor)
                 logger.info(f"🔊 Boosted quiet audio for STT: RMS {rms_before} → {audioop.rms(pcm_data, 2)} (factor: {boost_factor:.1f}x)")
         
+        # Apply normalization for consistent audio levels (helps both OpenAI and ElevenLabs)
+        pcm_data = normalize_audio(pcm_data, width=2, target_level=0.85)
+        
         # Create a WAV file in memory
         wav_io = io.BytesIO()
         with wave.open(wav_io, 'wb') as wf:
@@ -121,6 +124,51 @@ def normalize_audio(pcm_data: bytes, width: int = 2, target_level: float = 0.9) 
         return pcm_data
     except Exception as e:
         logger.error(f"Error normalizing audio: {e}", exc_info=True)
+        return pcm_data
+
+def trim_silence(pcm_data: bytes, width: int = 2, threshold: int = 200, min_samples: int = 100) -> bytes:
+    """Trim leading and trailing silence from audio to help STT focus on speech.
+    
+    This helps OpenAI Whisper avoid hallucinations from long silences.
+    
+    Args:
+        pcm_data: Raw PCM audio bytes
+        width: Sample width in bytes (2 = 16-bit)
+        threshold: Amplitude threshold below which is considered silence
+        min_samples: Minimum samples to keep (prevent over-trimming)
+    
+    Returns:
+        Trimmed PCM audio bytes
+    """
+    try:
+        import struct
+        samples = struct.unpack(f'{len(pcm_data)//width}h', pcm_data)
+        
+        if len(samples) < min_samples * 2:
+            return pcm_data  # Too short to trim
+        
+        # Find first non-silent sample from start
+        start_idx = 0
+        for i, s in enumerate(samples):
+            if abs(s) > threshold:
+                start_idx = max(0, i - 10)  # Keep 10 samples before speech
+                break
+        
+        # Find first non-silent sample from end
+        end_idx = len(samples)
+        for i in range(len(samples) - 1, -1, -1):
+            if abs(samples[i]) > threshold:
+                end_idx = min(len(samples), i + 10)  # Keep 10 samples after speech
+                break
+        
+        # Ensure minimum samples
+        if end_idx - start_idx < min_samples:
+            return pcm_data
+        
+        trimmed = samples[start_idx:end_idx]
+        return struct.pack(f'{len(trimmed)}h', *trimmed)
+    except Exception as e:
+        logger.warning(f"Error trimming silence: {e}")
         return pcm_data
 
 def boost_quiet_audio(pcm_data: bytes, width: int = 2, target_rms: int = 2000, min_rms: int = 500) -> bytes:

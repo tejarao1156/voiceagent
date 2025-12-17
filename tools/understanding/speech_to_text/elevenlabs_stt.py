@@ -76,8 +76,12 @@ class ElevenLabsSpeechToTextTool:
                 "tag_audio_events": "true",  # Helps with noisy phone audio
                 "timestamps_granularity": "word",  # Word-level accuracy
             }
-            if language_code:
-                data["language_code"] = language_code
+            
+            # Force default language if not specified (prevents foreign hallucination from noise)
+            from tools.provider_factory import DEFAULT_LANGUAGE
+            if not language_code:
+                language_code = DEFAULT_LANGUAGE
+            data["language_code"] = language_code
 
             headers = {
                 "xi-api-key": self.api_key,
