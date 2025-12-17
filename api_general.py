@@ -429,6 +429,33 @@ async def mongodb_health_check(request: Request):
 
 
 @app.get(
+    "/api/languages",
+    summary="Get Supported Languages",
+    description="Get supported languages based on STT and TTS model intersection",
+    tags=["Configuration"]
+)
+async def get_languages(stt_model: str = "whisper-1", tts_model: str = "tts-1"):
+    """Get languages supported by BOTH STT and TTS models.
+    
+    Args:
+        stt_model: STT model name (e.g., "whisper-1", "elevenlabs-scribe-v1")
+        tts_model: TTS model name (e.g., "tts-1", "eleven_multilingual_v2")
+    
+    Returns:
+        List of language objects with code and name
+    """
+    from tools.language_config import get_supported_languages, get_stt_languages, get_tts_languages
+    
+    return {
+        "languages": get_supported_languages(stt_model, tts_model),
+        "stt_languages": get_stt_languages(stt_model),
+        "tts_languages": get_tts_languages(tts_model),
+        "stt_model": stt_model,
+        "tts_model": tts_model
+    }
+
+
+@app.get(
     "/personas",
     response_model=List[PersonaSummary],
     summary="List Personas",
@@ -1851,7 +1878,10 @@ async def twilio_incoming_call(request: Request):
                 import json
                 encoded_config = base64.b64encode(json.dumps(agent_config).encode('utf-8')).decode('utf-8')
                 stream.parameter(name="AgentConfig", value=encoded_config)
-                logger.info(f"📤 Passing agent_config to stream handler (reused code path): {agent_config.get('name')}")
+                logger.info(f"📤 Passing agent_config to stream handler: {agent_config.get('name')}")
+                logger.info(f"   📞 STT Model: {agent_config.get('sttModel', 'NOT SET')}")
+                logger.info(f"   🎙️ TTS Model: {agent_config.get('ttsModel', 'NOT SET')}")
+                logger.info(f"   🔊 TTS Voice: {agent_config.get('ttsVoice', 'NOT SET')}")
 
 
             # Pass custom context via stream parameter if available
@@ -2414,6 +2444,75 @@ async def twilio_call_status(request: Request):
     except Exception as e:
         logger.error(f"❌ Error handling status webhook: {str(e)}", exc_info=True)
         # Don't return 500 to Twilio, just log it
+        return {"status": "error", "message": str(e)}
+
+@app.post(
+    "/webhooks/twilio/amd-status",
+    summary="Twilio AMD Status Webhook",
+    description="Handle Answering Machine Detection (AMD) results from Twilio async detection",
+    tags=["Twilio Phone Integration"]
+)
+async def twilio_amd_status(request: Request):
+    """
+    Webhook endpoint for Twilio AMD (Answering Machine Detection) results.
+    
+    AMD detection runs asynchronously and sends results via this callback:
+    - human: A human answered
+    - machine_start: Machine detected, speaking has begun
+    - machine_end_beep: Machine detected, beep detected (ready for voicemail)
+    - machine_end_silence: Machine detected, silence after message
+    - machine_end_other: Machine detected, other end condition
+    - fax: Fax machine detected
+    - unknown: Could not determine
+    
+    This enables the AI to behave differently for voicemail vs human.
+    """
+    try:
+        form_data = await request.form()
+        amd_data = dict(form_data)
+        
+        call_sid = amd_data.get("CallSid")
+        answered_by = amd_data.get("AnsweredBy", "unknown")
+        machine_detection_duration = amd_data.get("MachineDetectionDuration", "0")
+        
+        logger.info(f"📞 AMD DETECTION for call {call_sid}: {answered_by}")
+        logger.info(f"   Detection duration: {machine_detection_duration}ms")
+        logger.info(f"   Full AMD data: {amd_data}")
+        
+        # Handle based on detection result
+        if answered_by == "human":
+            logger.info(f"✅ Human answered call {call_sid} - proceeding with AI conversation")
+            # Normal call flow - AI will greet and converse
+            return {"status": "ok", "action": "continue", "answered_by": answered_by}
+            
+        elif answered_by in ["machine_start", "machine_end_beep", "machine_end_silence", "machine_end_other"]:
+            logger.info(f"📼 Voicemail/Machine detected for call {call_sid}: {answered_by}")
+            
+            # Option 1: Leave a voicemail message (current behavior - continue call)
+            # The AI greeting will play as the voicemail message
+            logger.info(f"   → Leaving voicemail (AI greeting will play as message)")
+            
+            # Option 2: Hangup immediately (uncomment to enable)
+            # try:
+            #     from databases.mongodb_phone_store import MongoDBPhoneStore
+            #     # ... hangup logic here ...
+            #     logger.info(f"   → Hanging up (voicemail not supported)")
+            # except Exception as e:
+            #     logger.warning(f"Could not hangup voicemail call: {e}")
+            
+            return {"status": "ok", "action": "voicemail", "answered_by": answered_by}
+            
+        elif answered_by == "fax":
+            logger.warning(f"📠 Fax machine detected for call {call_sid} - should hangup")
+            # Fax machines can't receive AI calls - hangup
+            return {"status": "ok", "action": "hangup", "answered_by": answered_by}
+            
+        else:
+            logger.warning(f"❓ Unknown AMD result for call {call_sid}: {answered_by}")
+            return {"status": "ok", "action": "continue", "answered_by": answered_by}
+            
+    except Exception as e:
+        logger.error(f"❌ Error handling AMD status webhook: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
 
 @app.post(

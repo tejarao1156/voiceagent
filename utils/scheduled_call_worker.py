@@ -167,7 +167,7 @@ class ScheduledCallWorker:
             })
 
     async def _initiate_single_call(self, client, from_number, to_number, scheduled_call_id):
-        """Initiate a single call via Twilio"""
+        """Initiate a single call via Twilio with AMD (voicemail detection)"""
         try:
             normalized_to = normalize_phone_number(to_number)
             
@@ -185,7 +185,15 @@ class ScheduledCallWorker:
                     method="POST",
                     status_callback=f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/status",
                     status_callback_event=["initiated", "ringing", "answered", "completed"],
-                    status_callback_method="POST"
+                    status_callback_method="POST",
+                    # === AMD (Answering Machine Detection) for voicemail handling ===
+                    # DetectMessageEnd: Wait for voicemail beep before triggering callback
+                    machine_detection="DetectMessageEnd",
+                    machine_detection_timeout=30,  # Seconds to wait for detection
+                    # Async AMD: Detection result sent via callback (doesn't block call connection)
+                    async_amd=True,
+                    async_amd_status_callback=f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/amd-status",
+                    async_amd_status_callback_method="POST"
                 )
             )
             

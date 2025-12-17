@@ -22,6 +22,11 @@ MONGODB_CONVERSATIONS_COLLECTION = os.getenv("MONGODB_CONVERSATIONS_COLLECTION",
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # ============================================================================
+# ELEVENLABS CONFIGURATION
+# ============================================================================
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+
+# ============================================================================
 # HUGGING FACE CONFIGURATION
 # ============================================================================
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")  # Optional - works without but better with it
