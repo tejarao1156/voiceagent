@@ -10,6 +10,7 @@ import {
   Users,
   Settings,
   Mic,
+  MicOff,
   BarChart3,
   Globe,
   Zap,
@@ -46,7 +47,8 @@ import {
   AlertCircle,
   DollarSign,
   LogOut,
-  Moon
+  Moon,
+  PhoneOff
 } from 'lucide-react'
 // import { useTheme } from '../components/ThemeProvider'
 
@@ -415,6 +417,705 @@ const LogsView = () => {
           <div className="h-full flex flex-col items-center justify-center text-slate-400">
             <History className="h-16 w-16 mb-4 opacity-20" />
             <p className="text-lg font-medium">Select a call to view details</p>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// AI Chat View - Standalone view for browser-based AI conversations
+const AIChatView = () => {
+  // AI Chat state
+  const [chatConfig, setChatConfig] = useState({
+    sttModel: 'whisper-1',
+    ttsModel: 'tts-1',
+    ttsVoice: 'alloy',
+    inferenceModel: 'gpt-4o-mini',
+    provider: 'openai'
+  })
+  const [chatSessions, setChatSessions] = useState<any[]>([])
+  const [selectedSessionId, setSelectedSessionId] = useState<string>('')
+  const [isChatActive, setIsChatActive] = useState(false)
+  const [chatMessages, setChatMessages] = useState<any[]>([])
+  const [isConnecting, setIsConnecting] = useState(false)
+  const [wsConnection, setWsConnection] = useState<WebSocket | null>(null)
+  const [userInput, setUserInput] = useState('')
+
+  // Microphone state
+  const [isRecording, setIsRecording] = useState(false)
+  const [isMuted, setIsMuted] = useState(false)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioStreamRef = useRef<MediaStream | null>(null)
+  const audioQueueRef = useRef<string[]>([])
+  const isPlayingRef = useRef(false)
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null)
+  const [isAISpeaking, setIsAISpeaking] = useState(false)
+  const isAISpeakingRef = useRef(false) // Ref to avoid stale closure in callbacks
+
+  // Handle interrupt - stop audio and clear queue
+  const handleInterrupt = () => {
+    console.log('🛑 Interrupt: stopping audio and clearing queue')
+    // Stop current audio
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause()
+      currentAudioRef.current = null
+    }
+    // Clear queue
+    audioQueueRef.current = []
+    isPlayingRef.current = false
+    setIsAISpeaking(false)
+    isAISpeakingRef.current = false // Update ref for callback access
+  }
+
+  // Helper: Convert blob to base64
+  const blobToBase64 = (blob: Blob): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onloadend = () => resolve(reader.result as string)
+      reader.onerror = reject
+      reader.readAsDataURL(blob)
+    })
+  }
+
+  // Play audio from queue
+  const playNextAudio = async () => {
+    if (isPlayingRef.current || audioQueueRef.current.length === 0) {
+      // Queue empty - AI finished speaking
+      if (audioQueueRef.current.length === 0 && !isPlayingRef.current) {
+        setIsAISpeaking(false)
+        isAISpeakingRef.current = false
+      }
+      return
+    }
+    isPlayingRef.current = true
+    setIsAISpeaking(true)
+    isAISpeakingRef.current = true
+
+    const audioData = audioQueueRef.current.shift()
+    if (audioData) {
+      try {
+        const audio = new Audio(`data:audio/mp3;base64,${audioData}`)
+        currentAudioRef.current = audio // Store reference for interrupt
+
+        audio.onended = () => {
+          isPlayingRef.current = false
+          currentAudioRef.current = null
+          // Check if more audio in queue, otherwise AI finished speaking
+          if (audioQueueRef.current.length === 0) {
+            setIsAISpeaking(false)
+            isAISpeakingRef.current = false
+          }
+          playNextAudio() // Play next in queue
+        }
+        audio.onerror = () => {
+          isPlayingRef.current = false
+          currentAudioRef.current = null
+          playNextAudio()
+        }
+        await audio.play()
+      } catch (e) {
+        console.error('Audio playback error:', e)
+        isPlayingRef.current = false
+        currentAudioRef.current = null
+        playNextAudio()
+      }
+    } else {
+      isPlayingRef.current = false
+      setIsAISpeaking(false)
+      isAISpeakingRef.current = false
+    }
+  }
+
+  // Start microphone recording
+  const startRecording = async (ws: WebSocket) => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: 16000,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true
+        }
+      })
+      audioStreamRef.current = stream
+
+      const recorder = new MediaRecorder(stream, {
+        mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
+      })
+
+      recorder.ondataavailable = async (e) => {
+        if (e.data.size > 0 && ws.readyState === WebSocket.OPEN && !isMuted) {
+          const base64 = await blobToBase64(e.data)
+          const audioData = base64.split(',')[1] // Remove data:audio/...;base64,
+          ws.send(JSON.stringify({
+            type: 'audio_chunk',
+            audio_data: audioData,
+            format: recorder.mimeType.includes('webm') ? 'webm' : 'mp4'
+          }))
+        }
+      }
+
+      recorder.start(500) // Send chunks every 500ms
+      mediaRecorderRef.current = recorder
+      setIsRecording(true)
+      console.log('🎤 Microphone recording started')
+    } catch (error) {
+      console.error('Failed to start microphone:', error)
+      alert('Microphone access denied. Please allow microphone access to use voice chat.')
+    }
+  }
+
+  // Stop microphone recording
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop()
+    }
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach(track => track.stop())
+      audioStreamRef.current = null
+    }
+    mediaRecorderRef.current = null
+    setIsRecording(false)
+    console.log('🎤 Microphone recording stopped')
+  }
+
+  // Load AI Chat sessions
+  const loadChatSessions = async () => {
+    try {
+      const response = await fetch('/api/ai-chat')
+      if (response.ok) {
+        const result = await response.json()
+        if (result.success && Array.isArray(result.sessions)) {
+          setChatSessions(result.sessions)
+        }
+      }
+    } catch (error) {
+      console.error('Error loading chat sessions:', error)
+    }
+  }
+
+  useEffect(() => {
+    loadChatSessions()
+  }, [])
+
+  // Start AI Chat
+  const startChat = async () => {
+    setIsConnecting(true)
+    setChatMessages([]) // Clear previous messages
+    audioQueueRef.current = [] // Clear audio queue
+
+    try {
+      const createResponse = await fetch('/api/ai-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(chatConfig)
+      })
+
+      if (!createResponse.ok) {
+        throw new Error('Failed to create session')
+      }
+
+      const { session_id } = await createResponse.json()
+      setSelectedSessionId(session_id)
+
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const wsUrl = `${wsProtocol}//${window.location.hostname}:4002/ws/ai-chat/${session_id}?` +
+        `stt_model=${chatConfig.sttModel}&tts_model=${chatConfig.ttsModel}&` +
+        `tts_voice=${chatConfig.ttsVoice}&inference_model=${chatConfig.inferenceModel}&` +
+        `provider=${chatConfig.provider}`
+
+      const ws = new WebSocket(wsUrl)
+
+      ws.onopen = async () => {
+        console.log('AI Chat WebSocket connected')
+        setIsChatActive(true)
+        setIsConnecting(false)
+        // Auto-start microphone recording
+        await startRecording(ws)
+      }
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data)
+        if (data.type === 'transcription') {
+          // User spoke - if AI was speaking, this triggered an interrupt
+          if (isAISpeakingRef.current) {
+            console.log('🚨 User spoke while AI speaking - frontend interrupt')
+            handleInterrupt()
+          }
+          setChatMessages(prev => [...prev, { role: 'user', text: data.text, timestamp: data.timestamp }])
+        } else if (data.type === 'conversation_response') {
+          // Only add to messages if not already shown (streaming may have added sentences)
+          setChatMessages(prev => {
+            // Check if last message is from assistant with same query_id to avoid dupe
+            const last = prev[prev.length - 1]
+            if (last?.role === 'assistant' && last?.query_id === data.query_id) {
+              // Update existing message with full text
+              return [...prev.slice(0, -1), { ...last, text: data.text }]
+            }
+            return [...prev, { role: 'assistant', text: data.text, timestamp: data.timestamp, query_id: data.query_id }]
+          })
+        } else if (data.type === 'audio_response' && data.audio_base64) {
+          // Queue audio for playback
+          audioQueueRef.current.push(data.audio_base64)
+          playNextAudio()
+        } else if (data.type === 'interrupt_clear') {
+          // Backend requests interrupt - clear audio queue
+          console.log('🛑 Backend interrupt_clear received')
+          handleInterrupt()
+        } else if (data.type === 'end_session') {
+          // AI said goodbye - auto-end chat
+          console.log('👋 Backend end_session received - auto-ending chat')
+          setTimeout(() => endChat(), 1500) // Give audio time to finish
+        } else if (data.type === 'error') {
+          console.error('AI Chat error:', data.message)
+        }
+      }
+
+      ws.onerror = (error) => {
+        console.error('AI Chat WebSocket error:', error)
+        setIsConnecting(false)
+        stopRecording()
+      }
+
+      ws.onclose = () => {
+        console.log('AI Chat WebSocket closed')
+        setIsChatActive(false)
+        stopRecording()
+      }
+
+      setWsConnection(ws)
+    } catch (error) {
+      console.error('Error starting chat:', error)
+      setIsConnecting(false)
+    }
+  }
+
+  const endChat = async () => {
+    // Stop microphone first
+    stopRecording()
+
+    if (wsConnection) {
+      wsConnection.close()
+      setWsConnection(null)
+    }
+    setIsChatActive(false)
+
+    if (selectedSessionId) {
+      await fetch(`/api/ai-chat/${selectedSessionId}/end`, { method: 'PUT' })
+    }
+    loadChatSessions()
+  }
+
+  const sendTextInput = () => {
+    if (wsConnection && userInput.trim()) {
+      wsConnection.send(JSON.stringify({
+        type: 'text_input',
+        text: userInput.trim()
+      }))
+      setUserInput('')
+    }
+  }
+
+  const resumeSession = async (sessionId: string) => {
+    try {
+      const response = await fetch(`/api/ai-chat/${sessionId}`)
+      if (response.ok) {
+        const { session } = await response.json()
+        setSelectedSessionId(sessionId)
+        setChatMessages(session.messages || [])
+        if (session.config) {
+          setChatConfig(session.config)
+        }
+      }
+    } catch (error) {
+      console.error('Error resuming session:', error)
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-800 mb-2">AI Chat</h2>
+          <p className="text-slate-600">Chat with AI using voice or text - no phone calls required.</p>
+        </div>
+        {isChatActive ? (
+          <button
+            onClick={endChat}
+            className="px-4 py-2.5 rounded-xl bg-red-600 text-white text-sm font-bold shadow-lg shadow-red-500/30 hover:bg-red-700 transition-all flex items-center space-x-2"
+          >
+            <PhoneOff className="h-4 w-4" />
+            <span>End Chat</span>
+          </button>
+        ) : (
+          <button
+            onClick={startChat}
+            disabled={isConnecting}
+            className="px-4 py-2.5 rounded-xl bg-purple-600 text-white text-sm font-bold shadow-lg shadow-purple-500/30 hover:bg-purple-700 transition-all flex items-center space-x-2 disabled:opacity-50"
+          >
+            <Bot className="h-4 w-4" />
+            <span>{isConnecting ? 'Connecting...' : 'Start Chat'}</span>
+          </button>
+        )}
+      </div>
+
+      {/* Config and Chat Panel */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Left: Configuration */}
+        <LightGlassCard className="lg:col-span-1 space-y-4">
+          <h3 className="font-bold text-slate-700 flex items-center gap-2">
+            <Settings className="h-4 w-4 text-purple-600" />
+            Configuration
+          </h3>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Voice Provider</label>
+            <select
+              value={chatConfig.provider}
+              onChange={(e) => {
+                const provider = e.target.value
+                if (provider === 'elevenlabs') {
+                  setChatConfig({ ...chatConfig, provider, sttModel: 'elevenlabs-scribe-v1', ttsModel: 'eleven_turbo_v2_5', ttsVoice: 'rachel' })
+                } else {
+                  setChatConfig({ ...chatConfig, provider, sttModel: 'whisper-1', ttsModel: 'tts-1', ttsVoice: 'alloy' })
+                }
+              }}
+              disabled={isChatActive}
+              className="w-full rounded-lg border-none bg-slate-50 px-3 py-2 text-sm font-medium ring-1 ring-slate-200 focus:ring-purple-500 outline-none disabled:opacity-50"
+            >
+              <option value="openai">🤖 OpenAI</option>
+              <option value="elevenlabs">🎙️ ElevenLabs</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">LLM Model</label>
+            <select
+              value={chatConfig.inferenceModel}
+              onChange={(e) => setChatConfig({ ...chatConfig, inferenceModel: e.target.value })}
+              disabled={isChatActive}
+              className="w-full rounded-lg border-none bg-slate-50 px-3 py-2 text-sm font-medium ring-1 ring-slate-200 focus:ring-purple-500 outline-none disabled:opacity-50"
+            >
+              <option value="gpt-4o-mini">gpt-4o-mini (Fast)</option>
+              <option value="gpt-4o">gpt-4o (Capable)</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Voice</label>
+            <select
+              value={chatConfig.ttsVoice}
+              onChange={(e) => setChatConfig({ ...chatConfig, ttsVoice: e.target.value })}
+              disabled={isChatActive}
+              className="w-full rounded-lg border-none bg-slate-50 px-3 py-2 text-sm font-medium ring-1 ring-slate-200 focus:ring-purple-500 outline-none disabled:opacity-50"
+            >
+              {chatConfig.provider === 'elevenlabs' ? (
+                <><option value="rachel">Rachel</option><option value="drew">Drew</option><option value="josh">Josh</option><option value="emily">Emily</option></>
+              ) : (
+                <><option value="alloy">Alloy</option><option value="echo">Echo</option><option value="nova">Nova</option><option value="shimmer">Shimmer</option></>
+              )}
+            </select>
+          </div>
+
+          <div className="pt-4 border-t border-slate-200">
+            <label className="block text-xs font-medium text-slate-600 mb-1">Resume Previous Chat</label>
+            <select
+              onChange={(e) => { if (e.target.value) resumeSession(e.target.value) }}
+              disabled={isChatActive}
+              className="w-full rounded-lg border-none bg-slate-50 px-3 py-2 text-sm font-medium ring-1 ring-slate-200 focus:ring-purple-500 outline-none disabled:opacity-50"
+            >
+              <option value="">Select a session...</option>
+              {chatSessions.map(session => (
+                <option key={session.session_id} value={session.session_id}>
+                  {new Date(session.created_at).toLocaleString()} ({session.message_count} msgs)
+                </option>
+              ))}
+            </select>
+          </div>
+        </LightGlassCard>
+
+        {/* Right: Chat Interface */}
+        <LightGlassCard className="lg:col-span-2 flex flex-col min-h-[400px]">
+          {isChatActive && (
+            <div className="flex items-center justify-between py-2 px-4 bg-purple-50 rounded-lg mb-4">
+              <div className="flex items-center space-x-2 text-purple-700">
+                {isRecording && !isMuted ? (
+                  <>
+                    <div className="relative">
+                      <Mic className="h-5 w-5 text-red-500" />
+                      <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                      </span>
+                    </div>
+                    <span className="text-sm font-medium">🎤 Recording...</span>
+                  </>
+                ) : isMuted ? (
+                  <>
+                    <MicOff className="h-5 w-5 text-slate-400" />
+                    <span className="text-sm font-medium text-slate-500">Muted</span>
+                  </>
+                ) : (
+                  <>
+                    <Volume2 className="h-5 w-5 animate-pulse" />
+                    <span className="text-sm font-medium">Voice Chat Active</span>
+                  </>
+                )}
+              </div>
+              <button
+                onClick={() => setIsMuted(!isMuted)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${isMuted
+                  ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                  : 'bg-red-100 text-red-700 hover:bg-red-200'
+                  }`}
+              >
+                {isMuted ? 'Unmute' : 'Mute'}
+              </button>
+            </div>
+          )}
+
+          <div className="flex-1 overflow-y-auto space-y-3 mb-4 p-2" style={{ maxHeight: '300px' }}>
+            {chatMessages.length === 0 ? (
+              <div className="text-center text-slate-400 py-8">
+                <Bot className="h-12 w-12 mx-auto mb-2 opacity-30" />
+                <p>No messages yet. Start a chat to begin!</p>
+              </div>
+            ) : (
+              chatMessages.map((msg, i) => (
+                <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[80%] rounded-2xl px-4 py-2 ${msg.role === 'user' ? 'bg-purple-600 text-white' : 'bg-slate-100 text-slate-800'}`}>
+                    <p className="text-sm">{msg.text}</p>
+                    <p className={`text-xs mt-1 ${msg.role === 'user' ? 'text-purple-200' : 'text-slate-400'}`}>
+                      {new Date(msg.timestamp).toLocaleTimeString()}
+                    </p>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div className="flex items-center space-x-2 pt-4 border-t border-slate-200">
+            <input
+              type="text"
+              value={userInput}
+              onChange={(e) => setUserInput(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && sendTextInput()}
+              placeholder={isChatActive ? "Type a message..." : "Start chat first..."}
+              disabled={!isChatActive}
+              className="flex-1 rounded-xl border-none bg-slate-50 px-4 py-3 text-sm font-medium ring-1 ring-slate-200 focus:ring-purple-500 outline-none disabled:opacity-50"
+            />
+            <button
+              onClick={sendTextInput}
+              disabled={!isChatActive || !userInput.trim()}
+              className="p-3 rounded-xl bg-purple-600 text-white hover:bg-purple-700 transition-colors disabled:opacity-50"
+            >
+              <Send className="h-4 w-4" />
+            </button>
+          </div>
+        </LightGlassCard>
+      </div>
+    </div>
+  )
+}
+
+// AI Chat Logs View - View and manage AI chat session history
+const AIChatLogsView = () => {
+  const [sessions, setSessions] = useState<any[]>([])
+  const [selectedSession, setSelectedSession] = useState<any | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [filter, setFilter] = useState<'all' | 'active' | 'ended'>('all')
+
+  // Load sessions
+  const loadSessions = async () => {
+    try {
+      setLoading(true)
+      const response = await fetch('/api/ai-chat')
+      if (response.ok) {
+        const result = await response.json()
+        if (result.sessions) {
+          setSessions(result.sessions)
+        }
+      }
+    } catch (error) {
+      console.error('Error loading AI chat sessions:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Load session details
+  const loadSessionDetails = async (sessionId: string) => {
+    try {
+      const response = await fetch(`/api/ai-chat/${sessionId}`)
+      if (response.ok) {
+        const result = await response.json()
+        if (result.session) {
+          setSelectedSession(result.session)
+        }
+      }
+    } catch (error) {
+      console.error('Error loading session details:', error)
+    }
+  }
+
+  // Delete session
+  const deleteSession = async (sessionId: string) => {
+    if (!confirm('Are you sure you want to delete this chat session?')) return
+    try {
+      const response = await fetch(`/api/ai-chat/${sessionId}`, { method: 'DELETE' })
+      if (response.ok) {
+        loadSessions()
+        if (selectedSession?.session_id === sessionId) {
+          setSelectedSession(null)
+        }
+      }
+    } catch (error) {
+      console.error('Error deleting session:', error)
+    }
+  }
+
+  useEffect(() => {
+    loadSessions()
+  }, [])
+
+  const filteredSessions = sessions.filter(session => {
+    if (filter === 'all') return true
+    return session.status === filter
+  })
+
+  return (
+    <div className="h-[calc(100vh-140px)] flex space-x-6">
+      {/* Left Sidebar: Session List */}
+      <div className="w-1/3 flex flex-col space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-2xl font-bold text-slate-800">AI Chat Sessions</h2>
+          <div className="flex space-x-2 bg-white p-1 rounded-lg border border-slate-200">
+            {['all', 'active', 'ended'].map((f) => (
+              <button
+                key={f}
+                onClick={() => setFilter(f as any)}
+                className={`px-3 py-1 text-xs font-bold rounded-md capitalize transition-colors ${filter === f ? 'bg-purple-100 text-purple-700' : 'text-slate-500 hover:bg-slate-50'
+                  }`}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto space-y-3 pr-2">
+          {filteredSessions.length === 0 ? (
+            <div className="text-center py-10 text-slate-400">
+              <Bot className="h-16 w-16 mx-auto mb-4 opacity-20" />
+              <p className="text-lg font-medium">No chat sessions found</p>
+            </div>
+          ) : (
+            filteredSessions.map((session) => (
+              <div
+                key={session.session_id}
+                onClick={() => loadSessionDetails(session.session_id)}
+                className={`p-4 rounded-xl border cursor-pointer transition-all duration-200 ${selectedSession?.session_id === session.session_id
+                  ? 'bg-purple-50 border-purple-200 shadow-md ring-1 ring-purple-200'
+                  : 'bg-white border-slate-100 hover:border-purple-200 hover:shadow-sm'
+                  }`}
+              >
+                <div className="flex justify-between items-start mb-2">
+                  <div className="flex items-center space-x-2">
+                    {session.status === 'active' ? (
+                      <span className="relative flex h-2.5 w-2.5">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-purple-500"></span>
+                      </span>
+                    ) : (
+                      <div className="h-2.5 w-2.5 rounded-full bg-slate-300" />
+                    )}
+                    <span className={`text-xs font-bold uppercase tracking-wider ${session.status === 'active' ? 'text-purple-600' : 'text-slate-500'
+                      }`}>
+                      {session.status}
+                    </span>
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      deleteSession(session.session_id)
+                    }}
+                    className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+                <p className="text-sm font-medium text-slate-700 mb-1">
+                  {new Date(session.created_at).toLocaleString()}
+                </p>
+                <p className="text-xs text-slate-500">
+                  {session.message_count} messages • {session.config?.provider || 'openai'}
+                </p>
+                {session.last_message && (
+                  <p className="text-xs text-slate-400 mt-2 truncate">
+                    "{session.last_message}"
+                  </p>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* Right Panel: Session Details */}
+      <div className="flex-1">
+        {selectedSession ? (
+          <LightGlassCard className="h-full flex flex-col">
+            <div className="flex items-center justify-between mb-4 pb-4 border-b border-slate-200">
+              <div>
+                <h3 className="text-lg font-bold text-slate-800">
+                  Chat Session
+                </h3>
+                <p className="text-sm text-slate-500">
+                  {new Date(selectedSession.created_at).toLocaleString()} •
+                  {selectedSession.config?.provider} / {selectedSession.config?.tts_voice}
+                </p>
+              </div>
+              <span className={`px-3 py-1 rounded-full text-xs font-bold ${selectedSession.status === 'active'
+                ? 'bg-purple-100 text-purple-700'
+                : 'bg-slate-100 text-slate-700'
+                }`}>
+                {selectedSession.status}
+              </span>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-3 p-2">
+              {selectedSession.messages?.length === 0 ? (
+                <div className="text-center text-slate-400 py-8">
+                  No messages in this session
+                </div>
+              ) : (
+                selectedSession.messages?.map((msg: any, i: number) => (
+                  <div
+                    key={i}
+                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div
+                      className={`max-w-[80%] rounded-2xl px-4 py-2 ${msg.role === 'user'
+                        ? 'bg-purple-600 text-white'
+                        : 'bg-slate-100 text-slate-800'
+                        }`}
+                    >
+                      <p className="text-sm">{msg.text}</p>
+                      <p className={`text-xs mt-1 ${msg.role === 'user' ? 'text-purple-200' : 'text-slate-400'}`}>
+                        {new Date(msg.timestamp).toLocaleTimeString()}
+                      </p>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </LightGlassCard>
+        ) : (
+          <div className="h-full flex flex-col items-center justify-center text-slate-400">
+            <Bot className="h-16 w-16 mb-4 opacity-20" />
+            <p className="text-lg font-medium">Select a session to view details</p>
           </div>
         )}
       </div>
@@ -3988,7 +4689,7 @@ const OutgoingAgentView = () => {
 
 export default function FuturisticDemo() {
   const router = useRouter()
-  // const { theme, toggleTheme } = useTheme()
+  // const {theme, toggleTheme} = useTheme()
   const [activeTab, setActiveTab] = useState('dashboard')
   const [isLoaded, setIsLoaded] = useState(false)
   const [showProfileMenu, setShowProfileMenu] = useState(false)
@@ -4042,10 +4743,12 @@ export default function FuturisticDemo() {
 
             <NavItem icon={PhoneIncoming} label="Incoming Agent" active={activeTab === 'incoming-agent'} onClick={() => setActiveTab('incoming-agent')} />
             <NavItem icon={PhoneOutgoing} label="Outgoing Agent" active={activeTab === 'outgoing-agent'} onClick={() => setActiveTab('outgoing-agent')} />
+            <NavItem icon={Bot} label="AI Chat" active={activeTab === 'ai-chat'} onClick={() => setActiveTab('ai-chat')} />
             <NavItem icon={FileText} label="Prompts" active={activeTab === 'prompts'} onClick={() => setActiveTab('prompts')} />
             <NavItem icon={MessageSquare} label="Messaging Agents" active={activeTab === 'messaging-agents'} onClick={() => setActiveTab('messaging-agents')} />
             <NavItem icon={Send} label="Messages & SMS" active={activeTab === 'messages'} onClick={() => setActiveTab('messages')} />
             <NavItem icon={History} label="Call History" active={activeTab === 'logs'} onClick={() => setActiveTab('logs')} />
+            <NavItem icon={Bot} label="AI Chat Logs" active={activeTab === 'ai-chat-logs'} onClick={() => setActiveTab('ai-chat-logs')} />
             <NavItem icon={Volume2} label="Voice Customization" active={activeTab === 'voices'} onClick={() => setActiveTab('voices')} />
             <NavItem icon={Link} label="Endpoints & Webhooks" active={activeTab === 'endpoints'} onClick={() => setActiveTab('endpoints')} />
 
@@ -4085,30 +4788,34 @@ export default function FuturisticDemo() {
 
                     activeTab === 'incoming-agent' ? 'Incoming Agent' :
                       activeTab === 'outgoing-agent' ? 'Outgoing Agent' :
-                        activeTab === 'prompts' ? 'Prompts Management' :
-                          activeTab === 'messaging-agents' ? 'Messaging Agents' :
-                            activeTab === 'messages' ? 'Messages & SMS' :
-                              activeTab === 'logs' ? 'Call History' :
-                                activeTab === 'voices' ? 'Voice Customization' :
-                                  activeTab === 'endpoints' ? 'Endpoints & Webhooks' :
-                                    activeTab === 'activity' ? 'Activity Logs' :
-                                      activeTab === 'settings' ? 'Settings' :
-                                        'Command Center'}
+                        activeTab === 'ai-chat' ? 'AI Chat' :
+                          activeTab === 'prompts' ? 'Prompts Management' :
+                            activeTab === 'messaging-agents' ? 'Messaging Agents' :
+                              activeTab === 'messages' ? 'Messages & SMS' :
+                                activeTab === 'logs' ? 'Call History' :
+                                  activeTab === 'ai-chat-logs' ? 'AI Chat Logs' :
+                                    activeTab === 'voices' ? 'Voice Customization' :
+                                      activeTab === 'endpoints' ? 'Endpoints & Webhooks' :
+                                        activeTab === 'activity' ? 'Activity Logs' :
+                                          activeTab === 'settings' ? 'Settings' :
+                                            'Command Center'}
                 </motion.h2>
                 <p className="text-slate-500 dark:text-slate-400 mt-1 font-medium">
                   {activeTab === 'dialer' ? 'Make calls and manage active connections.' :
 
                     activeTab === 'incoming-agent' ? 'Create and manage Voice Agents for your Business.' :
-                      activeTab === 'outgoing-agent' ? 'Schedule AI or normal outgoing calls to single or multiple numbers.' :
-                        activeTab === 'prompts' ? 'Create and manage AI prompts for outgoing calls.' :
-                          activeTab === 'messaging-agents' ? 'Create and manage SMS/Messaging Agents for your Business.' :
-                            activeTab === 'messages' ? 'View and send SMS messages to customers.' :
-                              activeTab === 'logs' ? 'Review past call performance and recordings.' :
-                                activeTab === 'voices' ? 'Preview and customize TTS voices for your agents.' :
-                                  activeTab === 'endpoints' ? 'Manage webhook URLs and API endpoints.' :
-                                    activeTab === 'activity' ? 'Monitor system events and activity history.' :
-                                      activeTab === 'settings' ? 'Configure your account and system preferences.' :
-                                        "Good afternoon, Teja. Here's what's happening today."}
+                      activeTab === 'outgoing-agent' ? 'Schedule AI or normal outgoing calls.' :
+                        activeTab === 'ai-chat' ? 'Chat with AI using voice or text - no phone calls required.' :
+                          activeTab === 'prompts' ? 'Create and manage AI prompts for outgoing calls.' :
+                            activeTab === 'messaging-agents' ? 'Create and manage SMS/Messaging Agents for your Business.' :
+                              activeTab === 'messages' ? 'View and send SMS messages to customers.' :
+                                activeTab === 'logs' ? 'Review past call performance and recordings.' :
+                                  activeTab === 'ai-chat-logs' ? 'View and manage your AI chat conversation history.' :
+                                    activeTab === 'voices' ? 'Preview and customize TTS voices for your agents.' :
+                                      activeTab === 'endpoints' ? 'Manage webhook URLs and API endpoints.' :
+                                        activeTab === 'activity' ? 'Monitor system events and activity history.' :
+                                          activeTab === 'settings' ? 'Configure your account and system preferences.' :
+                                            "Good afternoon, Teja. Here's what's happening today."}
                 </p>
               </div>
 
@@ -4181,10 +4888,12 @@ export default function FuturisticDemo() {
 
               {activeTab === 'incoming-agent' && <IncomingAgentView />}
               {activeTab === 'outgoing-agent' && <OutgoingAgentView />}
+              {activeTab === 'ai-chat' && <AIChatView />}
               {activeTab === 'prompts' && <PromptsView />}
               {activeTab === 'messaging-agents' && <MessagingAgentsView />}
               {activeTab === 'messages' && <MessagesView />}
               {activeTab === 'logs' && <LogsView />}
+              {activeTab === 'ai-chat-logs' && <AIChatLogsView />}
               {activeTab === 'voices' && <VoiceCustomizationView />}
               {activeTab === 'endpoints' && <EndpointsView />}
               {activeTab === 'activity' && <ActivityLogsView />}

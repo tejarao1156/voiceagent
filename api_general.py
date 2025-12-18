@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Query, Path, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Query, Path, WebSocket, WebSocketDisconnect, Body
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -1615,6 +1615,240 @@ async def disconnect_websocket(session_id: str):
     except Exception as e:
         logger.error(f"Error disconnecting session {session_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# AI CHAT ENDPOINTS (Browser-based voice chat without Twilio)
+# ============================================================================
+
+@app.post(
+    "/api/ai-chat",
+    summary="Create AI Chat Session",
+    description="Create a new AI chat session with optional model configuration",
+    tags=["AI Chat"]
+)
+async def create_ai_chat_session(
+    config: Optional[Dict[str, Any]] = Body(default=None)
+):
+    """
+    Create a new AI chat session for browser-based voice conversations.
+    
+    **Request body** (optional):
+    ```json
+    {
+        "stt_model": "whisper-1",
+        "tts_model": "tts-1",
+        "tts_voice": "alloy",
+        "inference_model": "gpt-4o-mini",
+        "provider": "openai"
+    }
+    ```
+    """
+    try:
+        from databases.mongodb_ai_chat_store import MongoDBChatStore
+        chat_store = MongoDBChatStore()
+        
+        # Handle case where config comes as dict with 'config' key or directly
+        actual_config = config
+        if isinstance(config, dict) and 'config' in config:
+            actual_config = config.get('config')
+        
+        session_id = await chat_store.create_session(config=actual_config)
+        
+        if session_id:
+            return {
+                "success": True,
+                "session_id": session_id,
+                "config": actual_config or {},
+                "message": "AI chat session created"
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Failed to create session"
+            }
+    except Exception as e:
+        logger.error(f"Error creating AI chat session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/api/ai-chat",
+    summary="List AI Chat Sessions",
+    description="Get all AI chat sessions for the logs view",
+    tags=["AI Chat"]
+)
+async def list_ai_chat_sessions(
+    status: Optional[str] = Query(None, description="Filter by status: active or ended"),
+    limit: int = Query(100, description="Maximum sessions to return")
+):
+    """Get all AI chat sessions for the logs view."""
+    try:
+        from databases.mongodb_ai_chat_store import MongoDBChatStore
+        chat_store = MongoDBChatStore()
+        
+        sessions = await chat_store.get_all_sessions(status=status, limit=limit)
+        
+        return {
+            "success": True,
+            "sessions": sessions,
+            "count": len(sessions)
+        }
+    except Exception as e:
+        logger.error(f"Error listing AI chat sessions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/api/ai-chat/{session_id}",
+    summary="Get AI Chat Session",
+    description="Get a specific AI chat session with all messages",
+    tags=["AI Chat"]
+)
+async def get_ai_chat_session(session_id: str):
+    """Get a specific AI chat session with all messages."""
+    try:
+        from databases.mongodb_ai_chat_store import MongoDBChatStore
+        chat_store = MongoDBChatStore()
+        
+        session = await chat_store.get_session(session_id)
+        
+        if session:
+            return {
+                "success": True,
+                "session": session
+            }
+        else:
+            raise HTTPException(status_code=404, detail="Session not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting AI chat session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put(
+    "/api/ai-chat/{session_id}/end",
+    summary="End AI Chat Session",
+    description="Mark an AI chat session as ended",
+    tags=["AI Chat"]
+)
+async def end_ai_chat_session(session_id: str):
+    """Mark an AI chat session as ended."""
+    try:
+        from databases.mongodb_ai_chat_store import MongoDBChatStore
+        chat_store = MongoDBChatStore()
+        
+        success = await chat_store.end_session(session_id)
+        
+        return {
+            "success": success,
+            "message": "Session ended" if success else "Failed to end session"
+        }
+    except Exception as e:
+        logger.error(f"Error ending AI chat session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete(
+    "/api/ai-chat/{session_id}",
+    summary="Delete AI Chat Session",
+    description="Delete an AI chat session",
+    tags=["AI Chat"]
+)
+async def delete_ai_chat_session(session_id: str):
+    """Delete an AI chat session."""
+    try:
+        from databases.mongodb_ai_chat_store import MongoDBChatStore
+        chat_store = MongoDBChatStore()
+        
+        success = await chat_store.delete_session(session_id)
+        
+        if success:
+            return {"success": True, "message": "Session deleted"}
+        else:
+            raise HTTPException(status_code=404, detail="Session not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting AI chat session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.websocket("/ws/ai-chat/{session_id}")
+async def websocket_ai_chat(
+    websocket: WebSocket,
+    session_id: str,
+    stt_model: Optional[str] = Query("whisper-1"),
+    tts_model: Optional[str] = Query("tts-1"),
+    tts_voice: Optional[str] = Query("alloy"),
+    inference_model: Optional[str] = Query("gpt-4o-mini"),
+    provider: Optional[str] = Query("openai")
+):
+    """
+    AI Chat WebSocket endpoint for browser-based voice conversations.
+    
+    **Query Parameters:**
+    - stt_model: Speech-to-text model (default: whisper-1)
+    - tts_model: Text-to-speech model (default: tts-1)
+    - tts_voice: TTS voice (default: alloy)
+    - inference_model: LLM model (default: gpt-4o-mini)
+    - provider: AI provider (default: openai)
+    
+    **Message Types (same as /ws/voice-agent):**
+    - `audio_chunk`: Send audio data for processing
+    - `text_input`: Send text input for processing
+    - `ping`: Keep connection alive
+    
+    **Response Types:**
+    - `connection_established`: Connection successful
+    - `transcription`: User speech transcribed
+    - `conversation_response`: AI text response
+    - `audio_response`: AI voice response (base64)
+    """
+    # Build config from query params
+    config = {
+        "stt_model": stt_model,
+        "tts_model": tts_model,
+        "tts_voice": tts_voice,
+        "inference_model": inference_model,
+        "provider": provider
+    }
+    
+    # Use extended connect with config
+    await realtime_agent.connect_with_config(websocket, session_id, config)
+    
+    # Store messages in MongoDB
+    from databases.mongodb_ai_chat_store import MongoDBChatStore
+    chat_store = MongoDBChatStore()
+    
+    # Create or update session in MongoDB
+    await chat_store.create_session(session_id=session_id, config=config)
+    
+    try:
+        while True:
+            # Receive message
+            data = await websocket.receive_text()
+            
+            # Parse to check if we should store messages
+            try:
+                msg_data = json.loads(data)
+                msg_type = msg_data.get("type")
+                
+                # Store user text input
+                if msg_type == "text_input" and msg_data.get("text"):
+                    await chat_store.add_message(session_id, "user", msg_data["text"])
+            except:
+                pass
+            
+            # Process using existing handler
+            await realtime_agent.handle_websocket_message(websocket, session_id, data)
+            
+    except WebSocketDisconnect:
+        await realtime_agent.disconnect(session_id)
+        # Don't end session on disconnect - user can resume
+    except Exception as e:
+        logger.error(f"AI Chat WebSocket error for session {session_id}: {str(e)}")
+        await realtime_agent.disconnect(session_id)
 
 # ============================================================================
 # TWILIO PHONE INTEGRATION ENDPOINTS
