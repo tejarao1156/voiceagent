@@ -17,6 +17,7 @@ from voice_processor import VoiceProcessor
 from conversation_manager import ConversationManager
 from config import MAX_AUDIO_FILE_SIZE, ALLOWED_AUDIO_FORMATS
 from tools.provider_factory import get_stt_tool, get_tts_tool
+from databases.mongodb_ai_chat_store import MongoDBChatStore
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +40,49 @@ VALID_SHORT_RESPONSES = {"ok", "no", "hi", "go", "ya", "ye", "by", "bye", "yes",
 # Minimum transcript length
 MIN_TRANSCRIPT_LENGTH = 3
 
+# Unclear/incomplete question phrases - use previous context
+UNCLEAR_PHRASES = {
+    "what", "huh", "sorry", "pardon", "come again", "say again", 
+    "repeat", "say that again", "what was that", "excuse me",
+    "i didnt catch", "didn't catch", "didnt hear", "didn't hear"
+}
+
+def _is_unclear_question(text: str) -> bool:
+    """Check if user's question is unclear/incomplete and needs context."""
+    if not text:
+        return False
+    clean = text.strip().lower().rstrip("?.,!")
+    # Direct match with unclear phrases
+    if clean in UNCLEAR_PHRASES:
+        return True
+    # Check for partial matches
+    for phrase in UNCLEAR_PHRASES:
+        if phrase in clean and len(clean) < 20:  # Short text containing unclear phrase
+            return True
+    # Very short text (less than 5 chars) that's not a valid response
+    if len(clean) < 5 and clean not in VALID_SHORT_RESPONSES:
+        return True
+    return False
+
 def _is_valid_transcript(text: str) -> bool:
     """Validate that transcript is meaningful speech, not noise.
-    Returns False for single chars, noise words, and very short text."""
+    Returns False for single chars, noise words, parenthetical sounds, and very short text."""
     if not text:
         return False
     
     text_clean = text.strip().lower()
+    
+    # Filter parenthetical sound/action descriptions (e.g., "(car engine starts)", "(soft music)")
+    # These are common STT artifacts from background noise
+    if re.match(r'^\s*\([^)]+\)\s*$', text_clean):
+        logger.info(f"🔇 Rejecting parenthetical sound description: '{text}'")
+        return False
+    
+    # Also filter if it contains parenthetical content describing sounds/actions
+    sound_pattern = r'\([^)]*(?:music|engine|sound|noise|beep|ring|click|door|car|phone|background|silence|static|breathing|cough|sneeze|laugh|sigh|hum|whisper|murmur|rustl|shuffl|tap|knock|buzz)[^)]*\)'
+    if re.search(sound_pattern, text_clean, re.IGNORECASE):
+        logger.info(f"🔇 Rejecting transcript with sound description: '{text}'")
+        return False
     
     # Strip punctuation for more accurate noise detection
     # This ensures "Oh." is treated the same as "oh"
@@ -104,11 +141,24 @@ class RealTimeVoiceAgent:
         self.processing_tasks: Dict[str, asyncio.Task] = {} # Track active processing task per session
         self.ai_speaking: Dict[str, bool] = {}              # Track if AI is currently speaking per session
         
-        # Time-based chunking for low-latency processing (per-session)
-        # Note: RMS-based detection doesn't work on WebM (compressed audio)
+        # Silence-based processing (per-session)
+        # Wait for 2 seconds of silence after user stops speaking before responding
         self.chunk_count: Dict[str, int] = {}               # Count chunks received
-        self.CHUNKS_BEFORE_PROCESS = 40                     # ~1.5 sec (depends on MediaRecorder timeslice)
-        self.MAX_BUFFER_BYTES = 25000                       # ~1.5 sec fallback (was 80000)
+        self.last_chunk_time: Dict[str, float] = {}         # Track when last chunk was received
+        self.silence_check_tasks: Dict[str, asyncio.Task] = {}  # Background tasks checking for silence
+        self.SILENCE_WAIT_SECONDS = 2.0                     # Wait 2 seconds of silence before responding
+        self.MAX_BUFFER_BYTES = 100000                      # Max buffer before forcing process (safety limit)
+        
+        # Context tracking for unclear questions
+        self.last_user_question: Dict[str, str] = {}        # Last meaningful question per session
+        self.last_question_answered: Dict[str, bool] = {}   # Whether last question was answered
+        
+        # Inactivity timeout tracking
+        self.last_user_speech_time: Dict[str, float] = {}   # When user last spoke
+        self.inactivity_reminder_count: Dict[str, int] = {} # Reminders sent (max 3)
+        self.inactivity_check_tasks: Dict[str, asyncio.Task] = {}  # Background inactivity checker
+        self.INACTIVITY_REMINDER_INTERVAL = 10.0            # Remind every 10 seconds
+        self.MAX_INACTIVITY_REMINDERS = 3                   # Max reminders before auto-end
         
     async def connect(self, websocket: WebSocket, session_id: str):
         """Accept WebSocket connection"""
@@ -124,8 +174,20 @@ class RealTimeVoiceAgent:
         self.processing_tasks[session_id] = None
         self.ai_speaking[session_id] = False
         
-        # Initialize chunk counting state
+        # Initialize chunk counting and silence detection state
         self.chunk_count[session_id] = 0
+        self.last_chunk_time[session_id] = 0.0
+        self.silence_check_tasks[session_id] = None
+        
+        # Initialize context tracking
+        self.last_user_question[session_id] = ""
+        self.last_question_answered[session_id] = True
+        
+        # Initialize inactivity tracking
+        import time
+        self.last_user_speech_time[session_id] = time.time()
+        self.inactivity_reminder_count[session_id] = 0
+        self.inactivity_check_tasks[session_id] = None
         
         logger.info(f"WebSocket connected for session: {session_id}")
         
@@ -179,6 +241,12 @@ class RealTimeVoiceAgent:
             
             provider = config.get('provider', 'openai')
             logger.info(f"AI Chat session {session_id} configured: provider={provider}, stt={stt_model}, tts={tts_model}")
+            
+            # Start inactivity checker for AI Chat sessions
+            self.inactivity_check_tasks[session_id] = asyncio.create_task(
+                self._check_inactivity(session_id)
+            )
+            logger.info(f"⏰ Started inactivity checker for session {session_id}")
     
     def get_session_config(self, session_id: str) -> Dict[str, Any]:
         """Get AI configuration for a session.
@@ -198,6 +266,20 @@ class RealTimeVoiceAgent:
                 logger.info(f"Cancelled active processing task for session {session_id}")
             del self.processing_tasks[session_id]
         
+        # Cancel any silence check task
+        if session_id in self.silence_check_tasks:
+            task = self.silence_check_tasks[session_id]
+            if task and not task.done():
+                task.cancel()
+            del self.silence_check_tasks[session_id]
+        
+        # Cancel any inactivity check task
+        if session_id in self.inactivity_check_tasks:
+            task = self.inactivity_check_tasks[session_id]
+            if task and not task.done():
+                task.cancel()
+            del self.inactivity_check_tasks[session_id]
+        
         # Clean up all session state
         if session_id in self.active_connections:
             del self.active_connections[session_id]
@@ -211,6 +293,12 @@ class RealTimeVoiceAgent:
             del self.ai_speaking[session_id]
         if session_id in self.chunk_count:
             del self.chunk_count[session_id]
+        if session_id in self.last_chunk_time:
+            del self.last_chunk_time[session_id]
+        if session_id in self.last_user_speech_time:
+            del self.last_user_speech_time[session_id]
+        if session_id in self.inactivity_reminder_count:
+            del self.inactivity_reminder_count[session_id]
         
         logger.info(f"WebSocket disconnected for session: {session_id}")
     
@@ -233,6 +321,88 @@ class RealTimeVoiceAgent:
             if phrase in text_lower:
                 return True
         return False
+    
+    async def _check_inactivity(self, session_id: str):
+        """Background task to check for user inactivity and send reminders.
+        
+        - After 10s of silence: Send reminder #1
+        - After 20s of silence: Send reminder #2
+        - After 30s of silence: Send reminder #3 + auto-end
+        """
+        import time
+        
+        REMINDER_MESSAGES = [
+            "Are you still there?",
+            "I'm still here if you need anything.",
+            "It seems you're busy. Goodbye for now!"
+        ]
+        
+        try:
+            while True:
+                await asyncio.sleep(2)  # Check every 2 seconds
+                
+                # Check if session still exists
+                if session_id not in self.active_connections:
+                    logger.debug(f"Session {session_id} disconnected, stopping inactivity check")
+                    return
+                
+                # Skip check if AI is speaking
+                if self.ai_speaking.get(session_id, False):
+                    continue
+                
+                # Calculate time since last speech
+                last_speech = self.last_user_speech_time.get(session_id, time.time())
+                elapsed = time.time() - last_speech
+                reminder_count = self.inactivity_reminder_count.get(session_id, 0)
+                
+                # Determine if we should send a reminder
+                expected_reminders = int(elapsed // self.INACTIVITY_REMINDER_INTERVAL)
+                
+                if expected_reminders > reminder_count and reminder_count < self.MAX_INACTIVITY_REMINDERS:
+                    # Time to send a reminder
+                    reminder_index = min(reminder_count, len(REMINDER_MESSAGES) - 1)
+                    reminder_text = REMINDER_MESSAGES[reminder_index]
+                    
+                    logger.info(f"⏰ Inactivity reminder #{reminder_count + 1} for session {session_id}: '{reminder_text}'")
+                    
+                    # Get voice processor for TTS
+                    session_data = self.session_data.get(session_id, {})
+                    voice_processor = session_data.get("voice_processor", self.default_voice_processor)
+                    config = session_data.get("config", {})
+                    tts_voice = config.get("tts_voice", "alloy")
+                    
+                    # Generate and send reminder audio
+                    try:
+                        tts_result = await voice_processor.generate_voice_response(reminder_text, tts_voice)
+                        
+                        if tts_result.get("success"):
+                            await self.send_message(session_id, {
+                                "type": "inactivity_reminder",
+                                "text": reminder_text,
+                                "audio_base64": tts_result.get("audio_base64"),
+                                "reminder_number": reminder_count + 1,
+                                "timestamp": datetime.utcnow().isoformat()
+                            })
+                    except Exception as e:
+                        logger.warning(f"Failed to generate reminder audio: {e}")
+                    
+                    # Update reminder count
+                    self.inactivity_reminder_count[session_id] = reminder_count + 1
+                    
+                    # Check if this was the final reminder
+                    if reminder_count + 1 >= self.MAX_INACTIVITY_REMINDERS:
+                        logger.info(f"⏰ Max inactivity reminders reached for session {session_id}, ending session")
+                        await self.send_message(session_id, {
+                            "type": "inactivity_end",
+                            "message": "Session ended due to inactivity",
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        return
+                        
+        except asyncio.CancelledError:
+            logger.debug(f"Inactivity check task cancelled for session {session_id}")
+        except Exception as e:
+            logger.error(f"Error in inactivity check for {session_id}: {e}")
     
     async def handle_interrupt(self, session_id: str):
         """Handle user interrupt - cancel current processing and notify frontend.
@@ -286,13 +456,78 @@ class RealTimeVoiceAgent:
             if buffer.strip():
                 yield buffer.strip()
     
-    async def process_audio_chunk(self, session_id: str, audio_data: bytes, audio_format: str = "wav"):
-        """Process audio chunk with time-based triggering for low-latency response.
+    async def _check_silence_and_process(self, session_id: str, audio_format: str):
+        """Background task to check for silence and trigger processing.
         
-        Uses chunk counting instead of RMS (which doesn't work on compressed WebM audio).
-        Triggers STT after receiving enough chunks or hitting buffer limit.
+        Waits for SILENCE_WAIT_SECONDS of no new audio chunks before triggering STT.
         """
         try:
+            while True:
+                await asyncio.sleep(0.5)  # Check every 500ms
+                
+                # Check if session still exists
+                if session_id not in self.active_connections:
+                    logger.debug(f"Session {session_id} disconnected, stopping silence check")
+                    return
+                
+                # Check if we have audio to process
+                if session_id not in self.audio_buffers or not self.audio_buffers[session_id]:
+                    continue
+                
+                # Calculate time since last chunk
+                last_time = self.last_chunk_time.get(session_id, 0)
+                if last_time == 0:
+                    continue
+                
+                import time
+                elapsed = time.time() - last_time
+                
+                # If enough silence has passed, trigger processing
+                if elapsed >= self.SILENCE_WAIT_SECONDS:
+                    buffer_size = sum(len(chunk) for chunk in self.audio_buffers[session_id])
+                    if buffer_size > 0:
+                        logger.info(f"🔇 {self.SILENCE_WAIT_SECONDS}s silence detected, triggering STT ({buffer_size} bytes)")
+                        await self._trigger_audio_processing(session_id, audio_format)
+                        return  # Task complete
+                        
+        except asyncio.CancelledError:
+            logger.debug(f"Silence check task cancelled for session {session_id}")
+        except Exception as e:
+            logger.error(f"Error in silence check for {session_id}: {e}")
+    
+    async def _trigger_audio_processing(self, session_id: str, audio_format: str):
+        """Trigger audio processing with current buffer."""
+        try:
+            # Combine audio chunks
+            combined_audio = b''.join(self.audio_buffers[session_id])
+            
+            # For WebM/MP4: prepend header
+            if audio_format in ["webm", "mp4"]:
+                header_key = f"{session_id}_header"
+                header = self.session_data.get(session_id, {}).get(header_key, b'')
+                if header:
+                    combined_audio = header + combined_audio
+            
+            # Clear buffer and reset chunk count
+            self.audio_buffers[session_id] = []
+            self.chunk_count[session_id] = 0
+            self.last_chunk_time[session_id] = 0.0
+            
+            # Process audio
+            await self.process_audio(session_id, combined_audio, audio_format)
+            
+        except Exception as e:
+            logger.error(f"Error triggering audio processing for {session_id}: {e}")
+    
+    async def process_audio_chunk(self, session_id: str, audio_data: bytes, audio_format: str = "wav"):
+        """Process audio chunk with silence-based triggering.
+        
+        Accumulates audio chunks and triggers STT after 2 seconds of silence,
+        allowing the user to pause briefly without triggering a response.
+        """
+        try:
+            import time
+            
             # Initialize session buffers if needed
             if session_id not in self.audio_buffers:
                 self.audio_buffers[session_id] = []
@@ -307,40 +542,28 @@ class RealTimeVoiceAgent:
                     logger.info(f"Cached {audio_format} header ({len(audio_data)} bytes) for session {session_id}")
                     return
             
-            # Accumulate audio and count chunks
+            # Accumulate audio and update timestamp
             self.audio_buffers[session_id].append(audio_data)
             self.chunk_count[session_id] = self.chunk_count.get(session_id, 0) + 1
+            self.last_chunk_time[session_id] = time.time()
             buffer_size = sum(len(chunk) for chunk in self.audio_buffers[session_id])
             
-            # Trigger conditions:
-            # 1. Received enough chunks (~1.5 sec based on MediaRecorder timeslice)
-            # 2. Buffer size limit reached (fallback)
-            should_process = False
+            # Start silence check task if not already running
+            existing_task = self.silence_check_tasks.get(session_id)
+            if existing_task is None or existing_task.done():
+                self.silence_check_tasks[session_id] = asyncio.create_task(
+                    self._check_silence_and_process(session_id, audio_format)
+                )
             
-            if self.chunk_count[session_id] >= self.CHUNKS_BEFORE_PROCESS:
-                logger.info(f"📦 Chunk count reached ({self.chunk_count[session_id]} chunks), triggering STT")
-                should_process = True
-            elif buffer_size >= self.MAX_BUFFER_BYTES:
-                logger.info(f"📦 Buffer limit reached ({buffer_size} bytes), triggering STT")
-                should_process = True
-            
-            if should_process:
-                # Combine audio chunks
-                combined_audio = b''.join(self.audio_buffers[session_id])
-                
-                # For WebM/MP4: prepend header
-                if audio_format in ["webm", "mp4"]:
-                    header_key = f"{session_id}_header"
-                    header = self.session_data.get(session_id, {}).get(header_key, b'')
-                    if header:
-                        combined_audio = header + combined_audio
-                
-                # Clear buffer and reset chunk count
-                self.audio_buffers[session_id] = []
-                self.chunk_count[session_id] = 0
-                
-                # Process audio
-                await self.process_audio(session_id, combined_audio, audio_format)
+            # Safety limit: force process if buffer gets too large
+            if buffer_size >= self.MAX_BUFFER_BYTES:
+                logger.info(f"📦 Buffer limit reached ({buffer_size} bytes), forcing STT")
+                # Cancel silence check task
+                if session_id in self.silence_check_tasks:
+                    task = self.silence_check_tasks[session_id]
+                    if task and not task.done():
+                        task.cancel()
+                await self._trigger_audio_processing(session_id, audio_format)
                 
         except Exception as e:
             logger.error(f"Error processing audio chunk for {session_id}: {str(e)}")
@@ -409,12 +632,46 @@ class RealTimeVoiceAgent:
                 "timestamp": datetime.utcnow().isoformat()
             })
             
+            # Reset inactivity timer - user spoke
+            import time
+            self.last_user_speech_time[session_id] = time.time()
+            self.inactivity_reminder_count[session_id] = 0
+            
+            # Save user message to MongoDB
+            try:
+                chat_store = MongoDBChatStore()
+                await chat_store.add_message(session_id, "user", user_text)
+            except Exception as e:
+                logger.warning(f"Failed to save user message to MongoDB: {e}")
+            
             # Get config from session data
             config = session_data.get("config", {})
             
             # Get conversation history for context
             conversation_history = session_data.get("conversation_history", [])
             logger.info(f"📚 Query #{current_query_id}: '{user_text[:50]}...' (history: {len(conversation_history)} interactions)")
+            
+            # Check if this is an unclear question (what?, huh?, etc.)
+            effective_user_text = user_text
+            if _is_unclear_question(user_text):
+                logger.info(f"❓ Detected unclear question: '{user_text}'")
+                
+                # Check if we have a previous unanswered question to use as context
+                last_question = self.last_user_question.get(session_id, "")
+                was_answered = self.last_question_answered.get(session_id, True)
+                
+                if last_question and not was_answered:
+                    # Use previous question as context
+                    logger.info(f"📝 Using previous question for context: '{last_question[:50]}...'")
+                    effective_user_text = f"The user said '{user_text}' after I was explaining something. They might want me to repeat or clarify. My previous response was about: {last_question}"
+                else:
+                    # No context available - ask for clarification
+                    logger.info("🤷 No previous context, asking for clarification")
+                    effective_user_text = "The user said something unclear like 'what' or 'huh'. Politely ask them to repeat their question."
+            else:
+                # This is a meaningful question - track it
+                self.last_user_question[session_id] = user_text
+                self.last_question_answered[session_id] = False
             
             # Prepare context with persona config if available
             persona_config = config.get("persona_config")
@@ -438,7 +695,7 @@ class RealTimeVoiceAgent:
             # Create sentence stream from LLM
             sentence_stream = self.conversation_manager._generate_response_streaming(
                 context=context,
-                user_input=user_text,
+                user_input=effective_user_text,
                 conversation_history=conversation_history,
                 persona_config=None,
                 model=inference_model,
@@ -504,6 +761,16 @@ class RealTimeVoiceAgent:
             self.conversation_manager.add_to_conversation_history(
                 session_data, user_text, full_response.strip()
             )
+            
+            # Save assistant message to MongoDB
+            try:
+                chat_store = MongoDBChatStore()
+                await chat_store.add_message(session_id, "assistant", full_response.strip())
+            except Exception as e:
+                logger.warning(f"Failed to save assistant message to MongoDB: {e}")
+            
+            # Mark the question as answered
+            self.last_question_answered[session_id] = True
             
             # Restore State Parsing & Updates (Fix for state tracking)
             # Parse the full response to update conversation state (e.g. GREETING -> TAKING_ORDER)
@@ -766,6 +1033,18 @@ class RealTimeVoiceAgent:
                     "type": "pong",
                     "timestamp": datetime.utcnow().isoformat()
                 })
+            
+            elif message_type == "silence_detected":
+                # Frontend detected 2 seconds of silence - trigger STT
+                logger.info(f"🔇 Silence detected from frontend for session {session_id}")
+                # Get the audio format from session data
+                audio_format = "webm"  # Default for browser
+                # Trigger processing if we have buffered audio
+                if session_id in self.audio_buffers and self.audio_buffers[session_id]:
+                    buffer_size = sum(len(chunk) for chunk in self.audio_buffers[session_id])
+                    if buffer_size > 0:
+                        logger.info(f"🔇 Processing {buffer_size} bytes of buffered audio")
+                        await self._trigger_audio_processing(session_id, audio_format)
             
             else:
                 await self.send_message(session_id, {

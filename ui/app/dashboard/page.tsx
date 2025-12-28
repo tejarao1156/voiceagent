@@ -428,11 +428,11 @@ const LogsView = () => {
 const AIChatView = () => {
   // AI Chat state
   const [chatConfig, setChatConfig] = useState({
-    sttModel: 'whisper-1',
-    ttsModel: 'tts-1',
-    ttsVoice: 'alloy',
+    sttModel: 'elevenlabs-scribe-v1',
+    ttsModel: 'eleven_turbo_v2_5',
+    ttsVoice: 'rachel',
     inferenceModel: 'gpt-4o-mini',
-    provider: 'openai'
+    provider: 'elevenlabs'
   })
   const [chatSessions, setChatSessions] = useState<any[]>([])
   const [selectedSessionId, setSelectedSessionId] = useState<string>('')
@@ -452,6 +452,19 @@ const AIChatView = () => {
   const currentAudioRef = useRef<HTMLAudioElement | null>(null)
   const [isAISpeaking, setIsAISpeaking] = useState(false)
   const isAISpeakingRef = useRef(false) // Ref to avoid stale closure in callbacks
+  
+  // Silence detection refs
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const analyserRef = useRef<AnalyserNode | null>(null)
+  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const lastSpeechTimeRef = useRef<number>(0)
+  const SILENCE_THRESHOLD = 15 // Audio level below this is considered silence
+  const SILENCE_DURATION_MS = 2000 // 2 seconds of silence to trigger
+  
+  // Noise cancellation: baseline tracking for background voice filtering
+  const baselineNoiseRef = useRef<number>(10) // Adaptive baseline noise level
+  const VOICE_THRESHOLD_MULTIPLIER = 2.0 // Voice must be 2x louder than baseline
+  const isSpeakingRef = useRef<boolean>(false) // Track if primary speaker is speaking
 
   // Handle interrupt - stop audio and clear queue
   const handleInterrupt = () => {
@@ -527,7 +540,7 @@ const AIChatView = () => {
     }
   }
 
-  // Start microphone recording
+  // Start microphone recording with silence detection
   const startRecording = async (ws: WebSocket) => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -540,12 +553,75 @@ const AIChatView = () => {
       })
       audioStreamRef.current = stream
 
+      // Set up Web Audio API for silence detection
+      const audioContext = new AudioContext()
+      audioContextRef.current = audioContext
+      const source = audioContext.createMediaStreamSource(stream)
+      const analyser = audioContext.createAnalyser()
+      analyser.fftSize = 256
+      source.connect(analyser)
+      analyserRef.current = analyser
+      
+      // Initialize last speech time
+      lastSpeechTimeRef.current = Date.now()
+      
+      // Start silence detection loop with noise cancellation
+      const checkSilence = () => {
+        if (!analyserRef.current || !ws || ws.readyState !== WebSocket.OPEN) return
+        
+        const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount)
+        analyserRef.current.getByteFrequencyData(dataArray)
+        
+        // Calculate average audio level
+        const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length
+        
+        // Calculate dynamic threshold: must be significantly louder than baseline
+        const dynamicThreshold = Math.max(SILENCE_THRESHOLD, baselineNoiseRef.current * VOICE_THRESHOLD_MULTIPLIER)
+        
+        if (average > dynamicThreshold) {
+          // Primary speaker detected - voice is significantly above baseline
+          lastSpeechTimeRef.current = Date.now()
+          isSpeakingRef.current = true
+          
+          // Slowly increase baseline if voice is very loud (adapts to loud environments)
+          if (average > baselineNoiseRef.current * 4) {
+            baselineNoiseRef.current = baselineNoiseRef.current * 0.98 + (average / 4) * 0.02
+          }
+        } else if (average > SILENCE_THRESHOLD && average <= dynamicThreshold) {
+          // Audio detected but not loud enough - likely background voice
+          // Update baseline slowly (adapts to ambient noise)
+          baselineNoiseRef.current = baselineNoiseRef.current * 0.95 + average * 0.05
+          // Keep baseline within reasonable bounds
+          baselineNoiseRef.current = Math.max(5, Math.min(50, baselineNoiseRef.current))
+        } else {
+          // Silence detected
+          if (isSpeakingRef.current) {
+            // Was speaking, now silent - check duration
+            const silenceDuration = Date.now() - lastSpeechTimeRef.current
+            if (silenceDuration >= SILENCE_DURATION_MS) {
+              // 2 seconds of silence after speech - trigger STT
+              console.log(`🔇 2s silence detected (baseline: ${baselineNoiseRef.current.toFixed(1)}, threshold: ${dynamicThreshold.toFixed(1)})`)
+              ws.send(JSON.stringify({ type: 'silence_detected' }))
+              lastSpeechTimeRef.current = Date.now() // Reset to avoid repeated triggers
+              isSpeakingRef.current = false
+            }
+          }
+          // Slowly decay baseline during silence
+          baselineNoiseRef.current = Math.max(5, baselineNoiseRef.current * 0.99)
+        }
+      }
+      
+      // Check silence every 100ms
+      silenceTimerRef.current = setInterval(checkSilence, 100)
+
       const recorder = new MediaRecorder(stream, {
         mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
       })
 
       recorder.ondataavailable = async (e) => {
-        if (e.data.size > 0 && ws.readyState === WebSocket.OPEN && !isMuted) {
+        // Only send audio when user is actively speaking (above noise threshold)
+        // This prevents buffer from filling with silence
+        if (isSpeakingRef.current && e.data.size > 0 && ws.readyState === WebSocket.OPEN && !isMuted) {
           const base64 = await blobToBase64(e.data)
           const audioData = base64.split(',')[1] // Remove data:audio/...;base64,
           ws.send(JSON.stringify({
@@ -559,7 +635,7 @@ const AIChatView = () => {
       recorder.start(500) // Send chunks every 500ms
       mediaRecorderRef.current = recorder
       setIsRecording(true)
-      console.log('🎤 Microphone recording started')
+      console.log('🎤 Microphone recording started with silence detection')
     } catch (error) {
       console.error('Failed to start microphone:', error)
       alert('Microphone access denied. Please allow microphone access to use voice chat.')
@@ -568,6 +644,17 @@ const AIChatView = () => {
 
   // Stop microphone recording
   const stopRecording = () => {
+    // Clear silence detection
+    if (silenceTimerRef.current) {
+      clearInterval(silenceTimerRef.current)
+      silenceTimerRef.current = null
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close()
+      audioContextRef.current = null
+    }
+    analyserRef.current = null
+    
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop()
     }
@@ -667,6 +754,24 @@ const AIChatView = () => {
           // AI said goodbye - auto-end chat
           console.log('👋 Backend end_session received - auto-ending chat')
           setTimeout(() => endChat(), 1500) // Give audio time to finish
+        } else if (data.type === 'inactivity_reminder') {
+          // User hasn't spoken - play reminder
+          console.log(`⏰ Inactivity reminder #${data.reminder_number}: ${data.text}`)
+          if (data.audio_base64) {
+            audioQueueRef.current.push(data.audio_base64)
+            playNextAudio()
+          }
+          // Show reminder in chat
+          setChatMessages(prev => [...prev, { 
+            role: 'assistant', 
+            text: data.text, 
+            timestamp: data.timestamp,
+            isReminder: true 
+          }])
+        } else if (data.type === 'inactivity_end') {
+          // User didn't respond after max reminders - auto-end
+          console.log('⏰ Inactivity timeout - auto-ending chat')
+          setTimeout(() => endChat(), 2000) // Give last audio time to play
         } else if (data.type === 'error') {
           console.error('AI Chat error:', data.message)
         }
@@ -771,26 +876,6 @@ const AIChatView = () => {
           </h3>
 
           <div>
-            <label className="block text-xs font-medium text-slate-600 mb-1">Voice Provider</label>
-            <select
-              value={chatConfig.provider}
-              onChange={(e) => {
-                const provider = e.target.value
-                if (provider === 'elevenlabs') {
-                  setChatConfig({ ...chatConfig, provider, sttModel: 'elevenlabs-scribe-v1', ttsModel: 'eleven_turbo_v2_5', ttsVoice: 'rachel' })
-                } else {
-                  setChatConfig({ ...chatConfig, provider, sttModel: 'whisper-1', ttsModel: 'tts-1', ttsVoice: 'alloy' })
-                }
-              }}
-              disabled={isChatActive}
-              className="w-full rounded-lg border-none bg-slate-50 px-3 py-2 text-sm font-medium ring-1 ring-slate-200 focus:ring-purple-500 outline-none disabled:opacity-50"
-            >
-              <option value="openai">🤖 OpenAI</option>
-              <option value="elevenlabs">🎙️ ElevenLabs</option>
-            </select>
-          </div>
-
-          <div>
             <label className="block text-xs font-medium text-slate-600 mb-1">LLM Model</label>
             <select
               value={chatConfig.inferenceModel}
@@ -811,11 +896,12 @@ const AIChatView = () => {
               disabled={isChatActive}
               className="w-full rounded-lg border-none bg-slate-50 px-3 py-2 text-sm font-medium ring-1 ring-slate-200 focus:ring-purple-500 outline-none disabled:opacity-50"
             >
-              {chatConfig.provider === 'elevenlabs' ? (
-                <><option value="rachel">Rachel</option><option value="drew">Drew</option><option value="josh">Josh</option><option value="emily">Emily</option></>
-              ) : (
-                <><option value="alloy">Alloy</option><option value="echo">Echo</option><option value="nova">Nova</option><option value="shimmer">Shimmer</option></>
-              )}
+              <option value="rachel">Rachel</option>
+              <option value="drew">Drew</option>
+              <option value="josh">Josh</option>
+              <option value="emily">Emily</option>
+              <option value="adam">Adam</option>
+              <option value="sam">Sam</option>
             </select>
           </div>
 
