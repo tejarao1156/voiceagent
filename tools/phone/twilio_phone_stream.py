@@ -30,6 +30,22 @@ VAD_FRAME_BYTES = (VAD_SAMPLE_RATE * VAD_FRAME_DURATION_MS // 1000)
 MIN_RMS_THRESHOLD = 250  # Lower threshold for quiet speakers (was 500)
 MIN_SPEECH_DURATION_FRAMES = 6  # 6 frames * 20ms = 120ms minimum speech (was 8)
 
+# INTERRUPT-SPECIFIC THRESHOLDS (higher than normal speech to reduce false positives)
+# These require stronger signals to trigger interrupts during AI playback
+# This prevents background noise, AI echo, and quiet sounds from stopping the AI
+MIN_INTERRUPT_RMS_THRESHOLD = 400  # Base RMS threshold (may be raised by noise floor)
+
+# NOISE FLOOR CALIBRATION - Measures ambient noise to set dynamic thresholds
+# Calibrates during first 500ms after AI starts speaking
+NOISE_CALIBRATION_FRAMES = 25  # 25 frames * 20ms = 500ms calibration period
+NOISE_MARGIN = 300  # RMS margin above noise floor for interrupt detection
+
+# PRIMARY SPEAKER DETECTION - Filters out background speech (guy talking in back)
+# Caller's voice is louder than background because they hold phone to mouth
+PRIMARY_SPEAKER_MULTIPLIER = 2.0  # Voice must be 2x louder than noise floor
+MAX_INTERRUPT_RMS_VARIANCE = 30000  # Max variance - increased for PSTN call quality (was 15000)
+MAX_DYNAMIC_THRESHOLD = 800  # Cap max threshold to prevent runaway from AI echo in calibration
+
 # Noise phrase filtering - common STT artifacts that should be ignored
 NOISE_PHRASES = {
     "you", "uh", "um", "hmm", "ah", "oh", "huh", "eh", "mm", "mhm",
@@ -69,17 +85,24 @@ class TwilioStreamHandler:
         self.interrupt_speech_frames = 0  # Track how many frames of speech during interrupt (to validate real interrupt)
         
         # Human-like conversation tuning parameters
-        # TUNED for faster barge-in and quiet speaker detection per ElevenLabs guidance
-        self.SILENCE_THRESHOLD_FRAMES = 150  # 150 frames * 20ms/frame = 3000ms (3s) - gives user time to pause mid-sentence
-        self.INTERRUPT_GRACE_PERIOD_MS = 150  # Wait 150ms after AI starts speaking before allowing interrupts (was 200ms - faster barge-in)
-        self.MIN_INTERRUPT_FRAMES = 2  # Require at least 2 frames (40ms) of sustained speech for valid interrupt (was 3)
+        # TUNED to reduce false interrupt triggers while maintaining responsive barge-in
+        self.SILENCE_THRESHOLD_FRAMES = 150  # 150 frames * 20ms = 3s - gives user time to pause
+        self.INTERRUPT_GRACE_PERIOD_MS = 300  # Wait 300ms after AI starts before allowing interrupts (prevents AI echo)
+        self.MIN_INTERRUPT_FRAMES = 7  # Require 7 frames (140ms) of sustained speech for valid interrupt (was 10)
         
         # Audio quality validation
         self.rms_buffer: List[int] = []  # Track RMS values for average calculation
+        self.interrupt_rms_buffer: List[int] = []  # Track RMS values during interrupt validation
         self.greeting_complete = False  # Block speech processing until greeting finishes
         self.call_settling_complete = False  # Block speech until call has settled
         self.last_interrupt_time = 0.0  # Track last interrupt time for debouncing
         self.INTERRUPT_DEBOUNCE_MS = 200  # 200ms between interrupts - allows quick re-interrupts (was 300ms)
+        
+        # NOISE FLOOR CALIBRATION - Measures ambient noise to set dynamic thresholds
+        self.noise_floor: float = 0.0  # Calibrated ambient noise level (RMS)
+        self.noise_calibration_buffer: List[int] = []  # RMS samples during calibration
+        self.noise_calibration_complete: bool = False  # Flag for calibration state
+        self.dynamic_interrupt_threshold: int = MIN_INTERRUPT_RMS_THRESHOLD  # Dynamic threshold based on noise
         
         self.speech_processing_lock = asyncio.Lock()  # Prevent concurrent speech processing
         self.speech_processing_task = None  # Track active speech processing task for cancellation
@@ -148,12 +171,15 @@ class TwilioStreamHandler:
             elif event == 'mark':
                 mark_name = data['mark']['name']
                 logger.info(f"Received mark event: {mark_name}")
-                # When AI finishes speaking, re-enable user audio processing
+                # When AI finishes speaking a sentence, re-enable user audio processing
+                # NOTE: For multi-sentence responses, this fires after EACH sentence
                 if mark_name == "end_of_ai_speech":
                     was_interrupted = self.interrupt_detected
                     self.ai_is_speaking = False
                     self.ai_speech_start_time = None
-                    self.interrupt_speech_frames = 0  # Reset interrupt tracking
+                    # DON'T reset interrupt_speech_frames here!
+                    # Interrupt tracking must persist across sentence boundaries
+                    # Otherwise user can't interrupt during long multi-sentence responses
                     logger.info("✅ AI finished speaking, listening for user now.")
                     # If there's waiting interrupt speech, process it immediately
                     if was_interrupted and self.is_speaking and self.speech_buffer:
@@ -444,6 +470,31 @@ class TwilioStreamHandler:
         # CRITICAL: If AI is speaking, block ALL audio processing to prevent feedback loop
         # Exception: If interrupt is detected, allow capturing interrupt speech (but don't process until TTS stops)
         if self.ai_is_speaking and not self.interrupt_detected:
+            # === NOISE FLOOR CALIBRATION ===
+            # During first 500ms (25 frames) after AI starts, measure ambient noise
+            if not self.noise_calibration_complete:
+                self.noise_calibration_buffer.append(rms)
+                if len(self.noise_calibration_buffer) >= NOISE_CALIBRATION_FRAMES:
+                    # Calculate noise floor as average RMS during calibration
+                    self.noise_floor = sum(self.noise_calibration_buffer) / len(self.noise_calibration_buffer)
+                    
+                    # Calculate dynamic threshold: max of base threshold or noise_floor + margin
+                    # Also apply primary speaker multiplier (2x noise floor)
+                    # BUT cap at MAX_DYNAMIC_THRESHOLD to prevent runaway from AI echo
+                    threshold_from_margin = self.noise_floor + NOISE_MARGIN
+                    threshold_from_multiplier = self.noise_floor * PRIMARY_SPEAKER_MULTIPLIER
+                    uncapped_threshold = max(
+                        MIN_INTERRUPT_RMS_THRESHOLD,
+                        threshold_from_margin,
+                        threshold_from_multiplier
+                    )
+                    self.dynamic_interrupt_threshold = int(min(uncapped_threshold, MAX_DYNAMIC_THRESHOLD))
+                    
+                    self.noise_calibration_complete = True
+                    logger.info(f"📊 Noise floor calibrated: {self.noise_floor:.0f} RMS → threshold: {self.dynamic_interrupt_threshold} (capped at {MAX_DYNAMIC_THRESHOLD})")
+                # During calibration, don't allow interrupts (still in grace period anyway)
+                return
+            
             # Check if this could be an interrupt (user speaking while AI is talking)
             if is_speech:
                 # Check if grace period has passed (prevents AI from hearing its own voice)
@@ -459,16 +510,47 @@ class TwilioStreamHandler:
                     # Too soon after last interrupt - ignore
                     return
                 
-                # Grace period passed - potential interrupt, start tracking
+                # === PRIMARY SPEAKER DETECTION ===
+                # Use dynamic threshold to filter background noise and background chatter
+                if rms < self.dynamic_interrupt_threshold:
+                    # Speech detected but RMS too low - likely noise, AI echo, or guy talking in background
+                    if self.interrupt_speech_frames == 0:
+                        logger.debug(f"🔇 Potential interrupt ignored - RMS {rms} < dynamic threshold {self.dynamic_interrupt_threshold} (noise floor: {self.noise_floor:.0f})")
+                    self.interrupt_speech_frames = 0  # Reset counter since this wasn't strong enough
+                    return
+                
+                # Dynamic threshold passed - potential interrupt from PRIMARY speaker, start tracking
                 if self.interrupt_speech_frames == 0:
-                    logger.info(f"🔍 Potential interrupt detected (RMS: {rms}), validating...")
+                    logger.info(f"🔍 Potential interrupt detected (RMS: {rms} >= threshold {self.dynamic_interrupt_threshold}), validating...")
+                    self.interrupt_rms_buffer = []  # Reset RMS buffer for new potential interrupt
                 
                 self.interrupt_speech_frames += 1
+                self.interrupt_rms_buffer.append(rms)  # Track RMS for cumulative validation
                 
-                # Only treat as real interrupt if speech is sustained (filters out brief AI feedback)
+                # Only treat as real interrupt if speech is sustained (filters out brief noise spikes)
                 if self.interrupt_speech_frames >= self.MIN_INTERRUPT_FRAMES:
-                    # Validated interrupt - user is really speaking!
-                    logger.info(f"🚨 INTERRUPT VALIDATED: {self.interrupt_speech_frames} frames of sustained speech (RMS avg: {rms})!")
+                    # Calculate average RMS across all interrupt frames
+                    avg_interrupt_rms = sum(self.interrupt_rms_buffer) / len(self.interrupt_rms_buffer) if self.interrupt_rms_buffer else 0
+                    
+                    # Final validation 1: average RMS must still be above dynamic threshold
+                    if avg_interrupt_rms < self.dynamic_interrupt_threshold:
+                        logger.info(f"🔇 Interrupt rejected - avg RMS {avg_interrupt_rms:.0f} < threshold {self.dynamic_interrupt_threshold}")
+                        self.interrupt_speech_frames = 0
+                        self.interrupt_rms_buffer = []
+                        return
+                    
+                    # Final validation 2: Check RMS variance (background chatter has high variance)
+                    if len(self.interrupt_rms_buffer) >= 3:
+                        mean_rms = avg_interrupt_rms
+                        variance = sum((x - mean_rms) ** 2 for x in self.interrupt_rms_buffer) / len(self.interrupt_rms_buffer)
+                        if variance > MAX_INTERRUPT_RMS_VARIANCE:
+                            logger.info(f"🔇 Interrupt rejected - high RMS variance {variance:.0f} > {MAX_INTERRUPT_RMS_VARIANCE} (likely background chatter)")
+                            self.interrupt_speech_frames = 0
+                            self.interrupt_rms_buffer = []
+                            return
+                    
+                    # Validated interrupt - user is really speaking with sustained, consistent energy!
+                    logger.info(f"🚨 INTERRUPT VALIDATED: {self.interrupt_speech_frames} frames, avg RMS: {avg_interrupt_rms:.0f}, threshold: {self.dynamic_interrupt_threshold}!")
                     self.interrupt_detected = True
                     self.last_interrupt_time = time.time()  # Record for debouncing
                     
@@ -537,11 +619,13 @@ class TwilioStreamHandler:
             else:
                 # No speech detected - reset interrupt tracking
                 self.interrupt_speech_frames = 0
+                self.interrupt_rms_buffer = []
                 return  # Still block all audio while AI is speaking
         
         # Reset interrupt tracking if we're not in interrupt detection mode
         if not self.ai_is_speaking:
             self.interrupt_speech_frames = 0
+            self.interrupt_rms_buffer = []
         
         # Normal speech detection and processing
         # If interrupt is detected, allow capturing even if AI is still speaking (TTS is stopping)
@@ -1259,10 +1343,22 @@ class TwilioStreamHandler:
         Supports interruption - will stop streaming if user interrupts."""
         logger.info(f"🔈 STEP 4: TTS Synthesis - '{text[:50]}...'")
         
+        # Track if this is the first sentence of a new response (for calibration)
+        is_new_response = not self.ai_is_speaking
+        
         # Set flag to prevent processing incoming audio (feedback loop prevention)
         self.ai_is_speaking = True
         self.ai_speech_start_time = time.time()  # Record when AI started speaking (for grace period)
-        logger.info("   🔇 AI started speaking, muting user audio input")
+        
+        # Only reset noise calibration for FIRST sentence of a response
+        # This prevents AI echo from corrupting calibration on subsequent sentences
+        if is_new_response:
+            self.noise_calibration_buffer = []
+            self.noise_calibration_complete = False
+            self.dynamic_interrupt_threshold = MIN_INTERRUPT_RMS_THRESHOLD
+            logger.info("   🔇 AI started NEW response, muting user + starting noise calibration")
+        else:
+            logger.info("   🔇 AI continuing multi-sentence response (keeping existing calibration)")
         
         # Get agent config for TTS if available
         tts_voice = self.agent_config.get("ttsVoice", "alloy") if self.agent_config else "alloy"
