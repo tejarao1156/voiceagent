@@ -105,6 +105,16 @@ class MongoDBMessageAgentStore:
             # Ensure direction is set to "messaging"
             agent_data["direction"] = "messaging"
             
+            # Set services field - default to ["sms"] for backward compatibility
+            if "services" not in agent_data or not agent_data.get("services"):
+                agent_data["services"] = ["sms"]
+            else:
+                # Validate services values
+                valid_services = {"sms", "whatsapp"}
+                agent_data["services"] = [s for s in agent_data["services"] if s in valid_services]
+                if not agent_data["services"]:
+                    agent_data["services"] = ["sms"]  # Default if all invalid
+            
             # Log the agent data being saved
             logger.info(f"Creating message agent in MongoDB collection '{self.collection_name}': {agent_name} ({phone_number})")
             
@@ -301,6 +311,13 @@ class MongoDBMessageAgentStore:
             
             # Ensure direction stays as "messaging"
             update_data["direction"] = "messaging"
+            
+            # Validate services if provided
+            if "services" in update_data:
+                valid_services = {"sms", "whatsapp"}
+                update_data["services"] = [s for s in update_data["services"] if s in valid_services]
+                if not update_data["services"]:
+                    update_data["services"] = ["sms"]  # Default if all invalid
             
             result = await collection.update_one(
                 {"_id": object_id, "isDeleted": {"$ne": True}},

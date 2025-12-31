@@ -34,28 +34,73 @@ class MongoDBMessageStore:
             logger.error(f"Error accessing collection '{self.collection_name}': {e}", exc_info=True)
             return None
     
-    async def get_or_create_conversation_id(self, from_number: str, to_number: str, agent_id: str) -> Optional[str]:
-        """Get existing conversation_id or create a new one with UUID
-        from_number = user_number, to_number = agent_number"""
+    async def get_or_create_conversation_id(self, from_number: str, to_number: str, agent_id: str, 
+                                            force_new: bool = False) -> tuple[Optional[str], bool]:
+        """Get existing conversation_id or create a new one with UUID.
+        
+        If the last message is more than 1 day old, creates a new conversation.
+        
+        Args:
+            from_number: User phone number
+            to_number: Agent phone number  
+            agent_id: Agent ID for lookup
+            force_new: If True, forces creation of new conversation
+            
+        Returns:
+            Tuple of (conversation_id, is_new_conversation)
+            - conversation_id: UUID for the conversation
+            - is_new_conversation: True if this is a new conversation (should send greeting)
+        """
         if not is_mongodb_available():
-            return None
+            return None, False
         
         try:
-            # First try to get existing conversation_id
-            existing_id = await self.get_conversation_id(from_number, to_number, agent_id)
-            if existing_id:
-                return existing_id
-            
-            # No existing conversation found, create new UUID
-            new_conversation_id = str(uuid.uuid4())
             normalized_from = normalize_phone_number(from_number)
-            normalized_to = normalize_phone_number(to_number)
-            logger.info(f"Created new conversation_id: {new_conversation_id} for {normalized_from} <-> {normalized_to}")
-            return new_conversation_id
+            normalized_agent = normalize_phone_number(agent_id)
+            
+            # Check last message time to determine greeting and conversation status
+            last_msg_time = await self.get_last_message_time(normalized_agent, normalized_from)
+            
+            if last_msg_time is None:
+                # No previous messages - this is a brand new conversation
+                new_conversation_id = str(uuid.uuid4())
+                logger.info(f"🆕 No previous messages - creating NEW conversation: {new_conversation_id}")
+                return new_conversation_id, True  # New conv + greeting
+            
+            # Calculate time since last message
+            time_since_last = datetime.utcnow() - last_msg_time.replace(tzinfo=None)
+            minutes_since_last = time_since_last.total_seconds() / 60
+            hours_since_last = time_since_last.total_seconds() / 3600
+            days_since_last = time_since_last.days
+            
+            logger.info(f"📅 Time since last message: {minutes_since_last:.1f} minutes ({hours_since_last:.1f} hours, {days_since_last} days)")
+            
+            if days_since_last >= 1 or force_new:
+                # More than 1 day since last message - create NEW conversation + greeting
+                new_conversation_id = str(uuid.uuid4())
+                logger.info(f"🆕 Last message > 1 day ago - creating NEW conversation: {new_conversation_id}")
+                return new_conversation_id, True  # New conv + greeting
+            
+            # Get existing conversation ID
+            existing_id = await self.get_conversation_id(from_number, to_number, agent_id)
+            if not existing_id:
+                # Fallback - create new if no existing ID found
+                new_conversation_id = str(uuid.uuid4())
+                logger.info(f"🆕 No existing conversation_id found - creating NEW: {new_conversation_id}")
+                return new_conversation_id, True  # New conv + greeting
+            
+            if minutes_since_last < 30:
+                # Less than 30 minutes - active chat, no greeting
+                logger.info(f"✅ Active chat (< 30 min) - continuing conversation: {existing_id}, NO greeting")
+                return existing_id, False  # Same conv, no greeting
+            else:
+                # 30 min to 1 day - re-engaging after break, send greeting but same conversation
+                logger.info(f"👋 Re-engaging (30 min - 1 day gap) - continuing conversation: {existing_id}, WITH greeting")
+                return existing_id, True  # Same conv + greeting
             
         except Exception as e:
             logger.error(f"Error getting or creating conversation_id: {e}")
-            return None
+            return None, False
     
     async def check_message_exists(self, message_sid: str, agent_id: str, user_number: Optional[str] = None) -> bool:
         """Check if a message with the given message_sid already exists for this agent_id + user_number"""
@@ -81,7 +126,8 @@ class MongoDBMessageStore:
     
     async def create_message(self, message_sid: str, from_number: str, to_number: str, 
                             body: str, agent_id: Optional[str] = None, 
-                            conversation_id: Optional[str] = None) -> bool:
+                            conversation_id: Optional[str] = None,
+                            channel: str = "sms") -> bool:
         """Add a new message to the conversation document.
         Document structure: { agent_id, user_number, messages: [...] }
         One document per agent_id + user_number combination."""
@@ -118,7 +164,7 @@ class MongoDBMessageStore:
             # Get or create conversation_id if not provided
             if not conversation_id:
                 logger.info(f"🔍 Getting or creating conversation_id for {from_number} <-> {to_number} (agent: {normalized_agent})")
-                conversation_id = await self.get_or_create_conversation_id(from_number, to_number, normalized_agent)
+                conversation_id, _ = await self.get_or_create_conversation_id(from_number, to_number, normalized_agent)
                 if not conversation_id:
                     logger.error(f"❌ Could not get or create conversation_id for message {message_sid}")
                     return False
@@ -135,6 +181,7 @@ class MongoDBMessageStore:
                 "role": "user",  # Added role field: inbound = user
                 "status": "received",
                 "timestamp": now,
+                "channel": channel,  # Track message channel (sms or whatsapp)
             }
             
             # Upsert: Update if document exists, insert if it doesn't
@@ -169,7 +216,8 @@ class MongoDBMessageStore:
     
     async def create_outbound_message(self, message_sid: str, from_number: str, to_number: str,
                                      body: str, agent_id: Optional[str] = None,
-                                     conversation_id: Optional[str] = None) -> bool:
+                                     conversation_id: Optional[str] = None,
+                                     channel: str = "sms") -> bool:
         """Add a new outbound message to the conversation document.
         Document structure: { agent_id, user_number, messages: [...] }
         One document per agent_id + user_number combination."""
@@ -197,7 +245,7 @@ class MongoDBMessageStore:
             if not conversation_id:
                 logger.info(f"🔍 Getting or creating conversation_id for outbound message {from_number} -> {to_number} (agent: {normalized_agent})")
                 # For outbound, we need to find conversation where from_number is the agent and to_number is the user
-                conversation_id = await self.get_or_create_conversation_id(to_number, from_number, normalized_agent)
+                conversation_id, _ = await self.get_or_create_conversation_id(to_number, from_number, normalized_agent)
                 if not conversation_id:
                     logger.error(f"❌ Could not get or create conversation_id for outbound message {message_sid}")
                     return False
@@ -214,6 +262,7 @@ class MongoDBMessageStore:
                 "role": "assistant",  # Added role field: outbound = assistant
                 "status": "sent",
                 "timestamp": now,
+                "channel": channel,  # Track message channel (sms or whatsapp)
             }
             
             # Upsert: Update if document exists, insert if it doesn't
@@ -285,6 +334,64 @@ class MongoDBMessageStore:
             
         except Exception as e:
             logger.error(f"Error getting conversation_id: {e}")
+            return None
+    
+    async def get_last_message_time(self, agent_id: str, user_number: str) -> Optional[datetime]:
+        """Get timestamp of the most recent message between user and agent.
+        
+        Args:
+            agent_id: Normalized agent phone number
+            user_number: Normalized user phone number
+            
+        Returns:
+            datetime of last message, or None if no messages exist
+        """
+        if not is_mongodb_available():
+            return None
+        
+        try:
+            collection = self._get_collection()
+            if collection is None:
+                return None
+            
+            normalized_agent = normalize_phone_number(agent_id)
+            normalized_user = normalize_phone_number(user_number)
+            
+            # Get the document for this agent_id + user_number combination
+            doc = await collection.find_one({
+                "agent_id": normalized_agent,
+                "user_number": normalized_user
+            })
+            
+            if not doc:
+                logger.info(f"📅 No conversation found for agent={normalized_agent}, user={normalized_user}")
+                return None
+            
+            # Get messages array and find the most recent timestamp
+            messages_array = doc.get("messages", [])
+            if not messages_array:
+                logger.info(f"📅 Conversation exists but no messages for agent={normalized_agent}, user={normalized_user}")
+                return None
+            
+            # Find the most recent message timestamp
+            latest_time = None
+            for msg in messages_array:
+                timestamp_str = msg.get("timestamp")
+                if timestamp_str:
+                    try:
+                        msg_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                        if latest_time is None or msg_time > latest_time:
+                            latest_time = msg_time
+                    except Exception as parse_error:
+                        logger.warning(f"Could not parse timestamp '{timestamp_str}': {parse_error}")
+            
+            if latest_time:
+                logger.info(f"📅 Last message time for agent={normalized_agent}, user={normalized_user}: {latest_time.isoformat()}")
+            
+            return latest_time
+            
+        except Exception as e:
+            logger.error(f"Error getting last message time: {e}", exc_info=True)
             return None
     
     async def get_all_messages_by_agent_id(self, agent_id: str, limit: int = 100) -> List[Dict[str, Any]]:
