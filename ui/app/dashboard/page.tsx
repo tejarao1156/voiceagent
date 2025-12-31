@@ -447,6 +447,7 @@ const MessagingAgentsView = () => {
     temperature: 0.7,
     maxTokens: 500,
     active: true,
+    services: ['sms'] as ('sms' | 'whatsapp')[],  // New: track enabled services
   })
 
   const [phoneForm, setPhoneForm] = useState({
@@ -531,12 +532,14 @@ const MessagingAgentsView = () => {
         setAgentForm({
           name: '',
           phoneNumber: '',
+          promptId: '',
           systemPrompt: '',
           greeting: '',
           inferenceModel: 'gpt-4o-mini',
           temperature: 0.7,
           maxTokens: 500,
           active: true,
+          services: ['sms'],
         })
         setTimeout(() => loadAgents(), 500)
       }
@@ -547,15 +550,29 @@ const MessagingAgentsView = () => {
 
   // Handle delete agent
   const handleDeleteAgent = async (agentId: string) => {
-    if (confirm('Are you sure you want to delete this messaging agent?')) {
-      try {
-        const response = await fetch(`/api/message-agents/${agentId}`, { method: 'DELETE' })
-        if (response.ok) {
-          loadAgents()
-        }
-      } catch (error) {
-        console.error('Error deleting messaging agent:', error)
+    if (!confirm('Are you sure you want to delete this messaging agent?')) return;
+    
+    try {
+      const response = await fetch(`/api/message-agents/${agentId}`, { method: 'DELETE' });
+      
+      if (response.ok) {
+        // Optimistic update - immediately remove from UI
+        setAgents(prev => prev.filter(a => a.id !== agentId));
+        // Also reload to ensure sync with server
+        await loadAgents();
+      } else {
+        // Try to get error message from response
+        let errorMessage = 'Failed to delete agent';
+        try {
+          const data = await response.json();
+          errorMessage = data.detail || data.message || errorMessage;
+        } catch {}
+        console.error('Delete failed:', response.status, errorMessage);
+        alert(`Error: ${errorMessage}`);
       }
+    } catch (error) {
+      console.error('Error deleting messaging agent:', error);
+      alert('Failed to delete agent. Please check your connection and try again.');
     }
   }
 
@@ -566,12 +583,24 @@ const MessagingAgentsView = () => {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ active }),
-      })
+      });
+      
       if (response.ok) {
-        loadAgents()
+        // Optimistic update
+        setAgents(prev => prev.map(a => a.id === agent.id ? { ...a, active } : a));
+        await loadAgents();
+      } else {
+        let errorMessage = 'Failed to update agent';
+        try {
+          const data = await response.json();
+          errorMessage = data.detail || data.message || errorMessage;
+        } catch {}
+        console.error('Toggle failed:', response.status, errorMessage);
+        alert(`Error: ${errorMessage}`);
       }
     } catch (error) {
-      console.error('Error toggling messaging agent:', error)
+      console.error('Error toggling messaging agent:', error);
+      alert('Failed to update agent. Please try again.');
     }
   }
 
@@ -736,6 +765,7 @@ const MessagingAgentsView = () => {
                 <tr className="bg-slate-50/50 border-b border-slate-200/60 text-xs font-bold text-slate-500 uppercase tracking-wider">
                   <th className="p-4">Agent Name</th>
                   <th className="p-4">Phone Number</th>
+                  <th className="p-4">Services</th>
                   <th className="p-4">Model</th>
                   <th className="p-4">Active</th>
                   <th className="p-4">Last Updated</th>
@@ -755,6 +785,20 @@ const MessagingAgentsView = () => {
                       </div>
                     </td>
                     <td className="p-4 font-mono text-slate-600">{agent.phoneNumber}</td>
+                    <td className="p-4">
+                      <div className="flex flex-wrap gap-1">
+                        {(agent.services || ['sms']).includes('sms') && (
+                          <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-bold bg-blue-100 text-blue-700">
+                            📱 SMS
+                          </span>
+                        )}
+                        {(agent.services || []).includes('whatsapp') && (
+                          <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-bold bg-green-100 text-green-700">
+                            💬 WhatsApp
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="p-4 text-slate-600">{agent.inferenceModel || 'gpt-4o-mini'}</td>
                     <td className="p-4">
                       <label className="relative inline-flex items-center cursor-pointer">
@@ -781,12 +825,14 @@ const MessagingAgentsView = () => {
                             setAgentForm({
                               name: agent.name,
                               phoneNumber: agent.phoneNumber,
+                              promptId: agent.promptId || '',
                               systemPrompt: agent.systemPrompt || '',
                               greeting: agent.greeting || '',
                               inferenceModel: agent.inferenceModel || 'gpt-4o-mini',
                               temperature: agent.temperature || 0.7,
                               maxTokens: agent.maxTokens || 500,
                               active: agent.active !== false,
+                              services: agent.services || ['sms'],
                             })
                             setCreateModalOpen(true)
                           }}
@@ -806,7 +852,7 @@ const MessagingAgentsView = () => {
                 ))}
                 {filteredAgents.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="p-8 text-center text-slate-500">
+                    <td colSpan={7} className="p-8 text-center text-slate-500">
                       No messaging agents found. Click "Create Messaging Agent" to add one.
                     </td>
                   </tr>
@@ -904,6 +950,51 @@ const MessagingAgentsView = () => {
                       />
                       <span className="text-sm font-medium text-slate-700">Active (Enable agent to receive messages)</span>
                     </label>
+
+                    {/* Services Selection */}
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">Services *</label>
+                      <p className="text-xs text-slate-500 mb-3">Select which messaging channels this agent should handle</p>
+                      <div className="flex flex-wrap gap-4">
+                        <label className="flex items-center space-x-2 cursor-pointer bg-slate-50 px-4 py-2 rounded-lg ring-1 ring-slate-200 hover:bg-slate-100 transition-colors">
+                          <input
+                            type="checkbox"
+                            checked={agentForm.services.includes('sms')}
+                            onChange={(e) => {
+                              const newServices = e.target.checked
+                                ? [...agentForm.services, 'sms']
+                                : agentForm.services.filter(s => s !== 'sms')
+                              // Ensure at least one service is selected
+                              if (newServices.length > 0) {
+                                setAgentForm({ ...agentForm, services: newServices as ('sms' | 'whatsapp')[] })
+                              }
+                            }}
+                            className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-2 focus:ring-blue-500"
+                          />
+                          <span className="text-sm font-medium text-slate-700">📱 SMS</span>
+                        </label>
+                        <label className="flex items-center space-x-2 cursor-pointer bg-slate-50 px-4 py-2 rounded-lg ring-1 ring-slate-200 hover:bg-slate-100 transition-colors">
+                          <input
+                            type="checkbox"
+                            checked={agentForm.services.includes('whatsapp')}
+                            onChange={(e) => {
+                              const newServices = e.target.checked
+                                ? [...agentForm.services, 'whatsapp']
+                                : agentForm.services.filter(s => s !== 'whatsapp')
+                              // Ensure at least one service is selected
+                              if (newServices.length > 0) {
+                                setAgentForm({ ...agentForm, services: newServices as ('sms' | 'whatsapp')[] })
+                              }
+                            }}
+                            className="h-4 w-4 rounded border-slate-300 text-green-600 focus:ring-2 focus:ring-green-500"
+                          />
+                          <span className="text-sm font-medium text-slate-700">💬 WhatsApp</span>
+                        </label>
+                      </div>
+                      {agentForm.services.length === 0 && (
+                        <p className="text-xs text-red-500 mt-2">At least one service must be selected</p>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
@@ -1091,39 +1182,60 @@ const MessagingAgentsView = () => {
                   </div>
                 </div>
 
-                {registrationSuccess.webhookConfiguration?.instructions?.includes("automatically") ? (
-                  <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                {registrationSuccess.webhookConfiguration?.instructions?.includes("automatically") && (
+                  <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
                     <p className="text-sm text-blue-800 font-medium">
-                      ✨ Great news! We detected ngrok and automatically configured your Twilio webhook.
+                      ✨ Great news! We detected ngrok and automatically configured your SMS webhook.
                     </p>
                     <p className="text-xs text-blue-600 mt-1">
-                      You don't need to do anything else.
+                      However, you still need to configure the WhatsApp Sandbox URL manually.
                     </p>
                   </div>
-                ) : (
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-sm font-bold text-slate-700 mb-2">
-                        A MESSAGE COMES IN (Webhook)
-                      </label>
-                      <div className="flex items-center gap-2">
-                        <code className="flex-1 p-3 bg-slate-50 border border-slate-200 rounded-lg text-sm font-mono text-slate-600 break-all">
-                          {registrationSuccess.webhookConfiguration?.smsWebhookUrl || registrationSuccess.smsWebhookUrl}
-                        </code>
-                        <button
-                          onClick={() => navigator.clipboard.writeText(registrationSuccess.webhookConfiguration?.smsWebhookUrl || registrationSuccess.smsWebhookUrl)}
-                          className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-                          title="Copy URL"
-                        >
-                          <Copy className="h-5 w-5" />
-                        </button>
-                      </div>
-                      <p className="text-xs text-slate-500 mt-1">
-                        Set this URL in Twilio Console → Phone Numbers → Manage → Active Numbers → [Your Number] → Messaging → "A MESSAGE COMES IN" (Webhook)
-                      </p>
-                    </div>
-                  </div>
                 )}
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-2">
+                      📱 SMS Webhook URL
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 p-3 bg-slate-50 border border-slate-200 rounded-lg text-sm font-mono text-slate-600 break-all">
+                        {registrationSuccess.webhookConfiguration?.smsWebhookUrl || registrationSuccess.smsWebhookUrl}
+                      </code>
+                      <button
+                        onClick={() => navigator.clipboard.writeText(registrationSuccess.webhookConfiguration?.smsWebhookUrl || registrationSuccess.smsWebhookUrl)}
+                        className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                        title="Copy URL"
+                      >
+                        <Copy className="h-5 w-5" />
+                      </button>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Twilio Console → Phone Numbers → [Your Number] → "A MESSAGE COMES IN"
+                    </p>
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-2">
+                      💬 WhatsApp Webhook URL
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 p-3 bg-green-50 border border-green-200 rounded-lg text-sm font-mono text-slate-600 break-all">
+                        {(registrationSuccess.webhookConfiguration?.smsWebhookUrl || registrationSuccess.smsWebhookUrl)?.replace('/sms', '/whatsapp')}
+                      </code>
+                      <button
+                        onClick={() => navigator.clipboard.writeText((registrationSuccess.webhookConfiguration?.smsWebhookUrl || registrationSuccess.smsWebhookUrl)?.replace('/sms', '/whatsapp'))}
+                        className="p-2 text-slate-400 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+                        title="Copy URL"
+                      >
+                        <Copy className="h-5 w-5" />
+                      </button>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Twilio Console → Messaging → WhatsApp Sandbox → "WHEN A MESSAGE COMES IN"
+                    </p>
+                  </div>
+                </div>
 
                 <div className="pt-4 border-t border-slate-200 flex justify-end">
                   <button
@@ -1942,39 +2054,39 @@ const IncomingAgentView = () => {
   })
 
   // Available languages based on STT+TTS model intersection
-  const [availableLanguages, setAvailableLanguages] = useState<{code: string, name: string}[]>([
-    {code: 'en', name: 'English'}
+  const [availableLanguages, setAvailableLanguages] = useState<{ code: string, name: string }[]>([
+    { code: 'en', name: 'English' }
   ])
 
   // Language options for the selected provider
   const getLanguageOptions = () => {
     // Define language options per model combination
-    const languagesByModel: Record<string, {code: string, name: string}[]> = {
+    const languagesByModel: Record<string, { code: string, name: string }[]> = {
       // OpenAI TTS models only support English
-      'tts-1': [{code: 'en', name: 'English'}],
-      'tts-1-hd': [{code: 'en', name: 'English'}],
+      'tts-1': [{ code: 'en', name: 'English' }],
+      'tts-1-hd': [{ code: 'en', name: 'English' }],
       // ElevenLabs Turbo - English only  
-      'eleven_turbo_v2_5': [{code: 'en', name: 'English'}],
-      'eleven_flash_v2_5': [{code: 'en', name: 'English'}],
+      'eleven_turbo_v2_5': [{ code: 'en', name: 'English' }],
+      'eleven_flash_v2_5': [{ code: 'en', name: 'English' }],
       // ElevenLabs Multilingual - supports many languages
       'eleven_multilingual_v2': [
-        {code: 'en', name: 'English'},
-        {code: 'es', name: 'Spanish'},
-        {code: 'fr', name: 'French'},
-        {code: 'de', name: 'German'},
-        {code: 'it', name: 'Italian'},
-        {code: 'pt', name: 'Portuguese'},
-        {code: 'hi', name: 'Hindi'},
-        {code: 'te', name: 'Telugu'},
-        {code: 'ta', name: 'Tamil'},
-        {code: 'zh', name: 'Chinese'},
-        {code: 'ja', name: 'Japanese'},
-        {code: 'ko', name: 'Korean'},
-        {code: 'ar', name: 'Arabic'},
-        {code: 'ru', name: 'Russian'},
+        { code: 'en', name: 'English' },
+        { code: 'es', name: 'Spanish' },
+        { code: 'fr', name: 'French' },
+        { code: 'de', name: 'German' },
+        { code: 'it', name: 'Italian' },
+        { code: 'pt', name: 'Portuguese' },
+        { code: 'hi', name: 'Hindi' },
+        { code: 'te', name: 'Telugu' },
+        { code: 'ta', name: 'Tamil' },
+        { code: 'zh', name: 'Chinese' },
+        { code: 'ja', name: 'Japanese' },
+        { code: 'ko', name: 'Korean' },
+        { code: 'ar', name: 'Arabic' },
+        { code: 'ru', name: 'Russian' },
       ],
     }
-    return languagesByModel[agentForm.ttsModel] || [{code: 'en', name: 'English'}]
+    return languagesByModel[agentForm.ttsModel] || [{ code: 'en', name: 'English' }]
   }
 
   // Update available languages when TTS model changes
@@ -2628,7 +2740,7 @@ const IncomingAgentView = () => {
                               }
                             </select>
                             <p className="text-xs text-slate-400 mt-1">
-                              {availableLanguages.length === 1 
+                              {availableLanguages.length === 1
                                 ? 'Use Multilingual v2 TTS model for more language options'
                                 : 'Select languages the agent should understand and respond in'
                               }

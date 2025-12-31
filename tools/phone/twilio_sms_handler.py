@@ -25,7 +25,8 @@ class TwilioSMSHandler:
         to_number: str,
         message_body: str,
         agent_config: Dict[str, Any],
-        conversation_history: Optional[List[Dict[str, Any]]] = None
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
+        is_new_conversation: Optional[bool] = None
     ) -> Dict[str, Any]:
         """
         Process incoming SMS message and generate AI response
@@ -36,6 +37,7 @@ class TwilioSMSHandler:
             message_body: Text content of the message
             agent_config: Agent configuration (system prompt, greeting, etc.)
             conversation_history: Previous messages in this conversation for personalization
+            is_new_conversation: If True, send greeting. If None, infer from conversation_history.
         
         Returns:
             Dictionary with:
@@ -44,9 +46,11 @@ class TwilioSMSHandler:
                 - is_greeting: Whether this is the first message (should send greeting)
         """
         try:
-            # Determine if this is a new conversation based on MongoDB history
-            # If conversation_history is empty or None, it's a new conversation
-            is_new_conversation = not conversation_history or len(conversation_history) == 0
+            # Determine if this is a new conversation
+            # If is_new_conversation is explicitly passed, use it (time-based from caller)
+            # Otherwise, fall back to checking if conversation_history is empty
+            if is_new_conversation is None:
+                is_new_conversation = not conversation_history or len(conversation_history) == 0
             
             logger.info(f"📝 Conversation status: {'NEW' if is_new_conversation else 'EXISTING'}")
             if conversation_history:

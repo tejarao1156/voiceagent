@@ -60,7 +60,7 @@ TEST_AUDIO_TRANSCRIPTS = {
 }
 MONGODB_HEALTH_CACHE_TTL = 5  # seconds
 PERSONA_ALIASES = {"friendly_agent": "friendly_guide"}
-DEFAULT_SMS_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response><Message>Thanks! Our agent will reply shortly.</Message></Response>'
+DEFAULT_SMS_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
 
 
 def make_twiml_response(
@@ -193,6 +193,11 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "WEBSOCKET"],  # Restrict to needed methods
     allow_headers=["*"],  # Keep headers open for API compatibility
 )
+
+# Message deduplication cache to prevent processing duplicate webhook requests (Twilio retries)
+import asyncio
+_processed_message_sids: set = set()
+_processed_sids_lock = asyncio.Lock()
 
 
 @app.middleware("http")
@@ -1968,14 +1973,13 @@ async def sms_webhook_health_check():
     tags=["Twilio Phone Integration"],
     response_class=HTMLResponse
 )
-async def twilio_incoming_sms(request: Request):
+async def process_messaging_webhook(request: Request, channel_override: Optional[str] = None):
     """
-    Handle incoming SMS messages from Twilio.
-    - Checks if the 'To' number is registered and active
-    - Loads messaging agent configuration for that number
-    - If agent is active: processes message with LLM and sends response
-    - If agent is inactive: no response sent
-    - Stores all messages in MongoDB for personalization
+    Unified logic for processing incoming messages from Twilio (SMS or WhatsApp).
+    
+    Args:
+        request: FastAPI request object
+        channel_override: Force a specific channel ('whatsapp') if known
     """
     try:
         from databases.mongodb_phone_store import MongoDBPhoneStore, normalize_phone_number
@@ -1983,34 +1987,65 @@ async def twilio_incoming_sms(request: Request):
         from databases.mongodb_message_store import MongoDBMessageStore
         
         form_data = await request.form()
-        sms_data = dict(form_data)
-        message_sid = sms_data.get("MessageSid")
-        from_number = sms_data.get("From")
-        to_number = sms_data.get("To")
-        message_body = sms_data.get("Body", "")
+        msg_data = dict(form_data)
+        message_sid = msg_data.get("MessageSid")
+        from_number_raw = msg_data.get("From", "")
+        to_number_raw = msg_data.get("To", "")
+        message_body = msg_data.get("Body", "")
+        
+        # DEDUPLICATION: Check if we've already processed this message (Twilio retries)
+        if message_sid:
+            async with _processed_sids_lock:
+                if message_sid in _processed_message_sids:
+                    logger.info(f"⚠️ DUPLICATE MESSAGE DETECTED: {message_sid} - already processed, skipping")
+                    return make_twiml_response(DEFAULT_SMS_TWIML)
+                _processed_message_sids.add(message_sid)
+                # Clean old entries to prevent memory leak (keep last 500)
+                if len(_processed_message_sids) > 500:
+                    logger.info(f"🧹 Clearing message dedup cache (was {len(_processed_message_sids)} entries)")
+                    _processed_message_sids.clear()
+        
+        # Detect channel / Is WhatsApp?
+        # If channel_override is provided (e.g. from WhatsApp endpoint), use it.
+        # Otherwise verify via prefixes.
+        is_whatsapp = False
+        if channel_override == "whatsapp":
+            is_whatsapp = True
+        else:
+            is_whatsapp = from_number_raw.startswith("whatsapp:") or to_number_raw.startswith("whatsapp:")
+            
+        channel = "whatsapp" if is_whatsapp else "sms"
+        
+        # Strip 'whatsapp:' prefix for phone number lookups
+        from_number = from_number_raw.replace("whatsapp:", "") if from_number_raw else ""
+        to_number = to_number_raw.replace("whatsapp:", "") if to_number_raw else ""
+        
+        # Logging Setup
+        emoji = "💬" if is_whatsapp else "📱"
+        channel_name = "WHATSAPP" if is_whatsapp else "SMS"
         
         # CRITICAL: Log immediately when webhook is received
-        logger.info(f"📱 ========== INCOMING SMS WEBHOOK RECEIVED ==========")
-        logger.info(f"📱 MessageSid: {message_sid}")
-        logger.info(f"📱 From: {from_number}")
-        logger.info(f"📱 To: {to_number}")
-        logger.info(f"📱 Body length: {len(message_body)} chars")
-        logger.info(f"📱 Body: {message_body}")  # Log full body for debugging
-        logger.info(f"📱 Full webhook data keys: {list(sms_data.keys())}")
-        logger.info(f"📱 Full webhook data: {sms_data}")  # Log all data for debugging
-        logger.info(f"📱 Timestamp: {datetime.utcnow().isoformat()}")
+        logger.info(f"{emoji} ========== INCOMING {channel_name} WEBHOOK RECEIVED ==========")
+        logger.info(f"{emoji} MessageSid: {message_sid}")
+        logger.info(f"{emoji} From (raw): {from_number_raw}")
+        logger.info(f"{emoji} From (normalized): {from_number}")
+        logger.info(f"{emoji} To (raw): {to_number_raw}")
+        logger.info(f"{emoji} To (normalized): {to_number}")
+        logger.info(f"{emoji} Body: {message_body}")
+        logger.info(f"{emoji} Channel: {channel}")
+        logger.info(f"{emoji} Timestamp: {datetime.utcnow().isoformat()}")
+        
         # Also print to stdout for immediate visibility
         print(f"\n{'='*60}")
-        print(f"📱 ========== INCOMING SMS WEBHOOK RECEIVED ==========")
-        print(f"📱 MessageSid: {message_sid}")
-        print(f"📱 From: {from_number}")
-        print(f"📱 To: {to_number}")
-        print(f"📱 Body: {message_body}")
-        print(f"📱 Timestamp: {datetime.utcnow().isoformat()}")
+        print(f"{emoji} ========== INCOMING {channel_name} WEBHOOK RECEIVED ==========")
+        print(f"{emoji} From: {from_number}")
+        print(f"{emoji} To: {to_number}")
+        print(f"{emoji} Body: {message_body}")
+        print(f"{emoji} Channel: {channel}")
         print(f"{'='*60}\n")
         
         if not is_mongodb_available():
-            logger.error("MongoDB is not available - cannot process SMS")
+            logger.error(f"MongoDB is not available - cannot process {channel_name} message")
             return make_twiml_response(DEFAULT_SMS_TWIML, status_code=503)
         
         phone_store = MongoDBPhoneStore()
@@ -2018,7 +2053,7 @@ async def twilio_incoming_sms(request: Request):
         
         # Check if 'to' number is registered
         if not to_number:
-            logger.warning("No 'To' number in SMS webhook")
+            logger.warning(f"No 'To' number in {channel_name} webhook")
             return make_twiml_response(DEFAULT_SMS_TWIML)
         
         normalized_to = normalize_phone_number(to_number)
@@ -2029,108 +2064,87 @@ async def twilio_incoming_sms(request: Request):
             logger.warning(f"❌ Phone number '{to_number}' is NOT registered or inactive")
             return make_twiml_response(DEFAULT_SMS_TWIML)
         
-        # Validate message body first - if empty, don't process (no response sent)
+        # Validate message body first
         if not message_body or not message_body.strip():
             logger.warning(f"⚠️ Empty message body received from {from_number} - no response sent")
             return make_twiml_response(DEFAULT_SMS_TWIML)
         
-        # STEP 1: Search MongoDB for messages by phone number (agent_id)
+        # STEP 1: Search MongoDB for messages by phone number (agent_id) - mainly for debugging logs
+        # This was in original SMS code, useful for verifying connectivity/history
         logger.info(f"📚 Searching MongoDB for messages by phone number (agent_id): {normalized_to}")
-        all_messages = await message_store.get_all_messages_by_agent_id(agent_id=normalized_to, limit=100)
-        logger.info(f"📚 Found {len(all_messages)} existing message(s) for phone number: {normalized_to}")
+        # Note: We don't necessarily need this call for logic, but kept for log consistency with old SMS code
+        # Skipping the 'get_all' call here as it's expensive and not used for logic
         
-        # STEP 2: Store incoming message in MongoDB (with duplicate check)
+        # STEP 2: Get conversation_id and check if this is a new conversation (time-based)
+        logger.info(f"🔍 Checking conversation status for {from_number} <-> {normalized_to}...")
+        conversation_id, is_new_conversation = await message_store.get_or_create_conversation_id(
+            from_number, to_number, normalized_to
+        )
+        logger.info(f"📝 Conversation ID: {conversation_id}, Is New: {is_new_conversation}")
+        
+        # STEP 3: Store incoming message in MongoDB
         logger.info(f"💾 Storing incoming message in MongoDB...")
-        conversation_id = None
         try:
             message_stored = await message_store.create_message(
                 message_sid=message_sid,
                 from_number=from_number,
                 to_number=to_number,
                 body=message_body,
-                agent_id=normalized_to
+                agent_id=normalized_to,
+                conversation_id=conversation_id,
+                channel=channel
             )
             
             if not message_stored:
                 logger.warning(f"⚠️ Message {message_sid} not stored (may be duplicate or error)")
-                # Try to get conversation_id anyway for response storage
-                conversation_id = await message_store.get_or_create_conversation_id(from_number, to_number, normalized_to)
             else:
                 logger.info(f"✅ Successfully stored incoming message {message_sid} in MongoDB")
-                # Get conversation_id for this conversation (to use for outbound message)
-                conversation_id = await message_store.get_conversation_id(from_number, to_number, normalized_to)
-                if not conversation_id:
-                    logger.warning(f"⚠️ Could not retrieve conversation_id after storing message - will try to get/create again")
-                    conversation_id = await message_store.get_or_create_conversation_id(from_number, to_number, normalized_to)
         except Exception as store_error:
             logger.error(f"❌ Exception storing incoming message {message_sid}: {store_error}", exc_info=True)
-            # Try to get conversation_id anyway
-            conversation_id = await message_store.get_or_create_conversation_id(from_number, to_number, normalized_to)
-        
-        logger.info(f"📝 Conversation ID: {conversation_id}")
-        
-        # Load messaging agent configuration from messaging_agents collection
+            
+        # Load messaging agent configuration
         logger.info(f"🔍 ========== LOADING MESSAGING AGENT ==========")
-        logger.info(f"🔍 Phone number to lookup: {normalized_to}")
-        logger.info(f"🔍 Collection: messaging_agents")
         from databases.mongodb_message_agent_store import MongoDBMessageAgentStore
         message_agent_store = MongoDBMessageAgentStore()
-        logger.info(f"🔍 Querying MongoDB for messaging agent with phoneNumber={normalized_to}...")
         agent_config = await message_agent_store.get_message_agent_by_phone(normalized_to)
         
         if not agent_config:
             logger.warning(f"❌ ========== NO MESSAGING AGENT FOUND ==========")
             logger.warning(f"❌ Phone number: {normalized_to}")
-            logger.warning(f"❌ Collection searched: messaging_agents")
-            logger.warning(f"❌ Make sure you have created a messaging agent for this number")
-            logger.warning(f"❌ No response will be sent to user")
-            # No response sent if no agent configured
             return make_twiml_response(DEFAULT_SMS_TWIML)
-        
+            
         logger.info(f"✅ ========== MESSAGING AGENT FOUND ==========")
-        logger.info(f"✅ Agent ID: {agent_config.get('id', 'N/A')}")
-        logger.info(f"✅ Agent name: {agent_config.get('name', 'Unknown')}")
-        logger.info(f"✅ Agent phone: {agent_config.get('phoneNumber', 'N/A')}")
-        logger.info(f"✅ Agent active status: {agent_config.get('active', False)}")
-        logger.info(f"✅ Agent direction: {agent_config.get('direction', 'N/A')}")
-        logger.info(f"✅ Agent inference model: {agent_config.get('inferenceModel', 'N/A')}")
+        logger.info(f"✅ Agent: {agent_config.get('name')} (ID: {agent_config.get('id')})")
         
-        # Check if agent is active - messaging agents must be active to respond
-        if not agent_config.get("active", False):
-            logger.warning(f"⚠️ ========== AGENT IS INACTIVE ==========")
-            logger.warning(f"⚠️ Messaging agent '{agent_config.get('name')}' for {normalized_to} is INACTIVE")
-            logger.warning(f"⚠️ No response will be sent to user")
-            logger.warning(f"⚠️ To enable responses, activate the agent in the UI")
+        # Check if agent has service enabled
+        agent_services = agent_config.get("services", ["sms"])
+        if channel not in agent_services:
+            logger.warning(f"⚠️ Agent '{agent_config.get('name')}' does not have {channel.upper()} service enabled")
             return make_twiml_response(DEFAULT_SMS_TWIML)
-        
-        logger.info(f"✅ ========== AGENT IS ACTIVE - PROCESSING MESSAGE ==========")
-        logger.info(f"✅ Active messaging agent '{agent_config.get('name')}' found for {normalized_to}")
-        logger.info(f"✅ Will process message and generate AI response")
-        
+            
+        if not agent_config.get("active", False):
+            logger.warning(f"⚠️ Agent '{agent_config.get('name')}' is INACTIVE")
+            return make_twiml_response(DEFAULT_SMS_TWIML)
+            
         # STEP 3: Get last 24 hours of messages for LLM inference
-        # Check if conversation exists with agent_id + user_number
         normalized_from = normalize_phone_number(from_number)
         conversation_exists = await message_store.check_conversation_exists(normalized_to, normalized_from)
         
         if conversation_exists:
-            logger.info(f"✅ Found existing conversation for agent_id={normalized_to}, user_number={normalized_from}")
-            # Get last 24 hours of messages for this conversation
             conversation_history = await message_store.get_last_24h_messages(normalized_to, normalized_from)
-            logger.info(f"📚 Retrieved {len(conversation_history)} message(s) from last 24 hours for LLM inference")
+            logger.info(f"📚 Retrieved {len(conversation_history)} message(s) from last 24 hours")
         else:
-            logger.info(f"🆕 New conversation - no previous messages for agent_id={normalized_to}, user_number={normalized_from}")
             conversation_history = []
-        
-        logger.info(f"📚 Using {len(conversation_history)} message(s) from conversation history for LLM")
-        
+            
         # Process message and generate AI response
-        logger.info(f"🤖 Processing message with AI agent: {agent_config.get('name')}")
+        logger.info(f"🤖 Processing message with AI agent: {agent_config.get('name')} (is_new_conversation: {is_new_conversation})")
         response_data = await twilio_sms_handler.process_incoming_message(
             from_number=from_number,
             to_number=to_number,
             message_body=message_body,
             agent_config=agent_config,
-            conversation_history=conversation_history
+            conversation_history=conversation_history,
+            is_new_conversation=is_new_conversation
         )
         
         response_text = response_data.get("response_text", "")
@@ -2138,78 +2152,86 @@ async def twilio_incoming_sms(request: Request):
         if not response_text:
             logger.warning("No response generated by AI")
             return make_twiml_response(DEFAULT_SMS_TWIML)
-        
-        # Send SMS response via Twilio
+            
+        # Send response via Twilio
         try:
-            # Get Twilio credentials for this phone number
-            logger.info(f"🔑 Getting Twilio credentials for {normalized_to}...")
             from utils.twilio_credentials import get_twilio_credentials_for_phone
             twilio_creds = await get_twilio_credentials_for_phone(normalized_to)
             
             if not twilio_creds:
                 logger.error(f"❌ Could not get Twilio credentials for {normalized_to}")
-                logger.error(f"   Make sure the phone number is registered with valid Twilio credentials")
                 return make_twiml_response(DEFAULT_SMS_TWIML)
-            
-            logger.info(f"✅ Got Twilio credentials (Account SID: {twilio_creds.get('account_sid', 'N/A')[:10]}...)")
-            
+                
             twilio_client = TwilioClient(
                 twilio_creds["account_sid"],
                 twilio_creds["auth_token"]
             )
             
-            # Send SMS response
-            logger.info(f"📤 Sending SMS response to {from_number} from {to_number}...")
-            logger.info(f"   Response text: {response_text[:100]}...")
+            # Send response using original raw numbers (to keep whatsapp: prefix if needed)
+            send_from = to_number_raw if is_whatsapp else to_number
+            send_to = from_number_raw if is_whatsapp else from_number
+            
+            logger.info(f"📤 Sending {channel_name} response to {send_to}...")
             sent_message = twilio_client.messages.create(
                 body=response_text,
-                from_=to_number,
-                to=from_number
+                from_=send_from,
+                to=send_to
             )
             
-            logger.info(f"✅ Sent SMS response successfully!")
-            logger.info(f"   MessageSid: {sent_message.sid}")
-            logger.info(f"   Status: {sent_message.status}")
-            logger.info(f"   Response preview: {response_text[:50]}...")
+            logger.info(f"✅ Sent response: {sent_message.sid}")
             
-            # Store outbound message in MongoDB (use same conversation_id)
+            # Store outbound message
             if conversation_id:
-                logger.info(f"💾 Storing outbound message in MongoDB with conversation_id: {conversation_id}...")
-                outbound_stored = await message_store.create_outbound_message(
+                await message_store.create_outbound_message(
                     message_sid=sent_message.sid,
                     from_number=to_number,
                     to_number=from_number,
                     body=response_text,
                     agent_id=normalized_to,
-                    conversation_id=conversation_id  # Use same conversation_id as inbound message
+                    conversation_id=conversation_id,
+                    channel=channel
                 )
+                logger.info(f"✅ Stored outbound message in MongoDB")
                 
-                if not outbound_stored:
-                    logger.error(f"❌ Failed to store outbound message {sent_message.sid} in MongoDB")
-                    logger.error(f"   This won't affect the SMS delivery, but message won't appear in UI")
-                else:
-                    logger.info(f"✅ Successfully stored outbound message {sent_message.sid} in MongoDB")
-            else:
-                logger.warning(f"⚠️ No conversation_id available, skipping outbound message storage")
-                logger.warning(f"   Message was sent but won't appear in UI without conversation_id")
-            
         except Exception as send_error:
-            logger.error(f"❌ Error sending SMS response: {send_error}", exc_info=True)
-            # Still return success to Twilio (message was received)
-        
-        # Return TwiML response mirroring the AI reply for compatibility tests
-        logger.info(f"📱 ========== SMS WEBHOOK PROCESSING COMPLETE ==========")
-        escaped = html.escape(response_text)
-        twiml_message = f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{escaped}</Message></Response>'
-        return make_twiml_response(twiml_message)
+            logger.error(f"❌ Error sending {channel_name} response: {send_error}", exc_info=True)
+            
+        logger.info(f"{emoji} ========== {channel_name} WEBHOOK PROCESSING COMPLETE ==========")
+        return make_twiml_response(DEFAULT_SMS_TWIML)
         
     except Exception as e:
-        logger.error(f"❌ ========== CRITICAL ERROR IN SMS WEBHOOK ==========")
+        logger.error(f"❌ ========== CRITICAL ERROR IN MESSAGING WEBHOOK ==========")
         logger.error(f"❌ Error: {e}", exc_info=True)
-        import traceback
-        logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
-        # Return empty response to avoid Twilio retries
         return make_twiml_response(DEFAULT_SMS_TWIML, status_code=500)
+
+
+async def twilio_incoming_sms(request: Request):
+    """
+    Handle incoming SMS messages from Twilio.
+    - Checks if the 'To' number is registered and active
+    - Loads messaging agent configuration for that number
+    - If agent is active: processes message with LLM and sends response
+    - If agent is inactive: no response sent
+    - Stores all messages in MongoDB for personalization
+    """
+    return await process_messaging_webhook(request, channel_override=None)
+
+
+@app.post(
+    "/webhooks/twilio/whatsapp",
+    summary="Twilio WhatsApp Webhook",
+    description="Handle incoming WhatsApp messages from Twilio. Automatically identifies messaging agent based on 'To' phone number.",
+    tags=["Twilio Phone Integration"],
+    response_class=HTMLResponse
+)
+async def twilio_incoming_whatsapp(request: Request):
+    """
+    Handle incoming WhatsApp messages from Twilio.
+    - Automatic detection via shared logic
+    - Stores messages in MongoDB
+    - Generates AI response
+    """
+    return await process_messaging_webhook(request, channel_override="whatsapp")
 
 
 @app.post("/phone/twilio/incoming-call", include_in_schema=False, tags=["Twilio Phone Integration"])
@@ -3547,6 +3569,7 @@ async def register_phone(request: Request, user: Dict[str, Any] = Depends(get_cu
         incoming_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/incoming"
         status_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/status"
         sms_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/sms"
+        whatsapp_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/whatsapp"
         
         # Prepare phone data (userId will be added by register_phone)
         registration_data = {
@@ -3558,6 +3581,7 @@ async def register_phone(request: Request, user: Dict[str, Any] = Depends(get_cu
             "webhookUrl": incoming_url,
             "statusCallbackUrl": status_url,
             "smsWebhookUrl": sms_url,  # Add SMS webhook URL
+            "whatsappWebhookUrl": whatsapp_url,  # Add WhatsApp webhook URL
             "type": phone_data.get("type", "calls")  # Default to 'calls'
         }
         
@@ -3644,7 +3668,9 @@ async def register_phone(request: Request, user: Dict[str, Any] = Depends(get_cu
             webhook_steps.append("4. For MESSAGING - Scroll to 'Messaging' section:")
             webhook_steps.append(f"   - Set 'A MESSAGE COMES IN' to: {sms_url} (POST)")
             
-        webhook_steps.append("5. Click Save")
+        webhook_steps.append("5. For WHATSAPP - Configure sandbox with:")
+        webhook_steps.append(f"   - Set 'WHEN A MESSAGE COMES IN' to: {whatsapp_url} (POST)")
+        webhook_steps.append("6. Click Save")
 
         return {
             "success": True,
@@ -3655,6 +3681,7 @@ async def register_phone(request: Request, user: Dict[str, Any] = Depends(get_cu
                 "incomingUrl": incoming_url,
                 "statusCallbackUrl": status_url,
                 "smsWebhookUrl": sms_url,
+                "whatsappWebhookUrl": whatsapp_url,
                 "instructions": "Twilio SMS Webhook updated automatically!" if twilio_updated else "Configure these URLs in your Twilio Console",
                 "steps": webhook_steps
             }
@@ -5655,7 +5682,7 @@ async def send_sms_message(request: Request):
             try:
                 # Get or create conversation_id
                 # For outbound messages: from_number is the agent, to_number is the user
-                conversation_id = await message_store.get_or_create_conversation_id(
+                conversation_id, _ = await message_store.get_or_create_conversation_id(
                     from_number=normalized_to,  # User's number (recipient)
                     to_number=normalized_from,  # Agent's number (sender)
                     agent_id=normalized_from
