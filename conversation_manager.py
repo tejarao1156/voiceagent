@@ -162,7 +162,7 @@ CONVERSATION CLOSURE BEHAVIOR:
     ) -> str:
         """Prepare context string for AI processing"""
         context = f"""
-Current conversation state: {session_data['state']}
+Current conversation state: {session_data.get('state', 'greeting')}
 Customer ID: {session_data.get('customer_id', 'Unknown')}
 Current conversation history: {len(session_data.get('conversation_history', []))} interactions
 """

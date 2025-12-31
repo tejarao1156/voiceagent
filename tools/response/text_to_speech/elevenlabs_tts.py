@@ -70,6 +70,7 @@ class ElevenLabsTextToSpeechTool:
         text: str,
         voice: Optional[str] = None,
         *,
+        persona: Optional[Dict[str, Any]] = None,  # Accept persona for API compatibility with OpenAI TTS
         model: Optional[str] = None,
         stability: float = 0.5,           # 0.0=expressive, 1.0=stable
         similarity_boost: float = 0.8,    # How closely to match voice
