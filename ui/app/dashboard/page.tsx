@@ -452,7 +452,7 @@ const AIChatView = () => {
   const currentAudioRef = useRef<HTMLAudioElement | null>(null)
   const [isAISpeaking, setIsAISpeaking] = useState(false)
   const isAISpeakingRef = useRef(false) // Ref to avoid stale closure in callbacks
-  
+
   // Silence detection refs
   const audioContextRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
@@ -460,7 +460,7 @@ const AIChatView = () => {
   const lastSpeechTimeRef = useRef<number>(0)
   const SILENCE_THRESHOLD = 15 // Audio level below this is considered silence
   const SILENCE_DURATION_MS = 2000 // 2 seconds of silence to trigger
-  
+
   // Noise cancellation: baseline tracking for background voice filtering
   const baselineNoiseRef = useRef<number>(10) // Adaptive baseline noise level
   const VOICE_THRESHOLD_MULTIPLIER = 2.0 // Voice must be 2x louder than baseline
@@ -561,28 +561,28 @@ const AIChatView = () => {
       analyser.fftSize = 256
       source.connect(analyser)
       analyserRef.current = analyser
-      
+
       // Initialize last speech time
       lastSpeechTimeRef.current = Date.now()
-      
+
       // Start silence detection loop with noise cancellation
       const checkSilence = () => {
         if (!analyserRef.current || !ws || ws.readyState !== WebSocket.OPEN) return
-        
+
         const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount)
         analyserRef.current.getByteFrequencyData(dataArray)
-        
+
         // Calculate average audio level
         const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length
-        
+
         // Calculate dynamic threshold: must be significantly louder than baseline
         const dynamicThreshold = Math.max(SILENCE_THRESHOLD, baselineNoiseRef.current * VOICE_THRESHOLD_MULTIPLIER)
-        
+
         if (average > dynamicThreshold) {
           // Primary speaker detected - voice is significantly above baseline
           lastSpeechTimeRef.current = Date.now()
           isSpeakingRef.current = true
-          
+
           // Slowly increase baseline if voice is very loud (adapts to loud environments)
           if (average > baselineNoiseRef.current * 4) {
             baselineNoiseRef.current = baselineNoiseRef.current * 0.98 + (average / 4) * 0.02
@@ -610,7 +610,7 @@ const AIChatView = () => {
           baselineNoiseRef.current = Math.max(5, baselineNoiseRef.current * 0.99)
         }
       }
-      
+
       // Check silence every 100ms
       silenceTimerRef.current = setInterval(checkSilence, 100)
 
@@ -654,7 +654,7 @@ const AIChatView = () => {
       audioContextRef.current = null
     }
     analyserRef.current = null
-    
+
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop()
     }
@@ -762,11 +762,11 @@ const AIChatView = () => {
             playNextAudio()
           }
           // Show reminder in chat
-          setChatMessages(prev => [...prev, { 
-            role: 'assistant', 
-            text: data.text, 
+          setChatMessages(prev => [...prev, {
+            role: 'assistant',
+            text: data.text,
             timestamp: data.timestamp,
-            isReminder: true 
+            isReminder: true
           }])
         } else if (data.type === 'inactivity_end') {
           // User didn't respond after max reminders - auto-end
@@ -889,6 +889,48 @@ const AIChatView = () => {
           </div>
 
           <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Provider</label>
+            <select
+              value={chatConfig.provider}
+              onChange={(e) => {
+                const newProvider = e.target.value
+                // Set appropriate defaults when provider changes
+                if (newProvider === 'deepgram') {
+                  setChatConfig({
+                    ...chatConfig,
+                    provider: newProvider,
+                    sttModel: 'nova-2',
+                    ttsModel: 'aura-asteria-en',
+                    ttsVoice: 'asteria'
+                  })
+                } else if (newProvider === 'elevenlabs') {
+                  setChatConfig({
+                    ...chatConfig,
+                    provider: newProvider,
+                    sttModel: 'elevenlabs-scribe-v1',
+                    ttsModel: 'eleven_turbo_v2_5',
+                    ttsVoice: 'rachel'
+                  })
+                } else {
+                  setChatConfig({
+                    ...chatConfig,
+                    provider: newProvider,
+                    sttModel: 'whisper-1',
+                    ttsModel: 'tts-1',
+                    ttsVoice: 'nova'
+                  })
+                }
+              }}
+              disabled={isChatActive}
+              className="w-full rounded-lg border-none bg-slate-50 px-3 py-2 text-sm font-medium ring-1 ring-slate-200 focus:ring-purple-500 outline-none disabled:opacity-50"
+            >
+              <option value="elevenlabs">ElevenLabs</option>
+              <option value="deepgram">Deepgram (Aura)</option>
+              <option value="openai">OpenAI</option>
+            </select>
+          </div>
+
+          <div>
             <label className="block text-xs font-medium text-slate-600 mb-1">Voice</label>
             <select
               value={chatConfig.ttsVoice}
@@ -896,12 +938,40 @@ const AIChatView = () => {
               disabled={isChatActive}
               className="w-full rounded-lg border-none bg-slate-50 px-3 py-2 text-sm font-medium ring-1 ring-slate-200 focus:ring-purple-500 outline-none disabled:opacity-50"
             >
-              <option value="rachel">Rachel</option>
-              <option value="drew">Drew</option>
-              <option value="josh">Josh</option>
-              <option value="emily">Emily</option>
-              <option value="adam">Adam</option>
-              <option value="sam">Sam</option>
+              {chatConfig.provider === 'deepgram' ? (
+                <>
+                  <option value="asteria">Asteria (Female)</option>
+                  <option value="luna">Luna (Female)</option>
+                  <option value="stella">Stella (Female)</option>
+                  <option value="athena">Athena (Female)</option>
+                  <option value="hera">Hera (Female)</option>
+                  <option value="orion">Orion (Male)</option>
+                  <option value="arcas">Arcas (Male)</option>
+                  <option value="perseus">Perseus (Male)</option>
+                  <option value="angus">Angus (Male)</option>
+                  <option value="orpheus">Orpheus (Male)</option>
+                  <option value="helios">Helios (Male)</option>
+                  <option value="zeus">Zeus (Male)</option>
+                </>
+              ) : chatConfig.provider === 'elevenlabs' ? (
+                <>
+                  <option value="rachel">Rachel</option>
+                  <option value="drew">Drew</option>
+                  <option value="josh">Josh</option>
+                  <option value="emily">Emily</option>
+                  <option value="adam">Adam</option>
+                  <option value="sam">Sam</option>
+                </>
+              ) : (
+                <>
+                  <option value="nova">Nova</option>
+                  <option value="alloy">Alloy</option>
+                  <option value="echo">Echo</option>
+                  <option value="fable">Fable</option>
+                  <option value="onyx">Onyx</option>
+                  <option value="shimmer">Shimmer</option>
+                </>
+              )}
             </select>
           </div>
 
@@ -1338,10 +1408,10 @@ const MessagingAgentsView = () => {
   // Handle delete agent
   const handleDeleteAgent = async (agentId: string) => {
     if (!confirm('Are you sure you want to delete this messaging agent?')) return;
-    
+
     try {
       const response = await fetch(`/api/message-agents/${agentId}`, { method: 'DELETE' });
-      
+
       if (response.ok) {
         // Optimistic update - immediately remove from UI
         setAgents(prev => prev.filter(a => a.id !== agentId));
@@ -1353,7 +1423,7 @@ const MessagingAgentsView = () => {
         try {
           const data = await response.json();
           errorMessage = data.detail || data.message || errorMessage;
-        } catch {}
+        } catch { }
         console.error('Delete failed:', response.status, errorMessage);
         alert(`Error: ${errorMessage}`);
       }
@@ -1371,7 +1441,7 @@ const MessagingAgentsView = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ active }),
       });
-      
+
       if (response.ok) {
         // Optimistic update
         setAgents(prev => prev.map(a => a.id === agent.id ? { ...a, active } : a));
@@ -1381,7 +1451,7 @@ const MessagingAgentsView = () => {
         try {
           const data = await response.json();
           errorMessage = data.detail || data.message || errorMessage;
-        } catch {}
+        } catch { }
         console.error('Toggle failed:', response.status, errorMessage);
         alert(`Error: ${errorMessage}`);
       }
@@ -2001,7 +2071,7 @@ const MessagingAgentsView = () => {
                       Twilio Console → Phone Numbers → [Your Number] → "A MESSAGE COMES IN"
                     </p>
                   </div>
-                  
+
                   <div>
                     <label className="block text-sm font-bold text-slate-700 mb-2">
                       💬 WhatsApp Webhook URL
@@ -3231,7 +3301,7 @@ const IncomingAgentView = () => {
                               phoneNumber: agent.phoneNumber,
                               sttModel: agent.sttModel || 'whisper-1',
                               inferenceModel: agent.inferenceModel || 'gpt-4o-mini',
-                              ttsProvider: agent.ttsModel?.startsWith('eleven') ? 'elevenlabs' : 'openai',
+                              ttsProvider: agent.ttsModel?.startsWith('eleven') ? 'elevenlabs' : agent.ttsModel?.startsWith('aura') || agent.sttModel?.startsWith('nova') ? 'deepgram' : 'openai',
                               ttsModel: agent.ttsModel || 'tts-1',
                               ttsVoice: agent.ttsVoice || 'alloy',
                               supportedLanguages: agent.supportedLanguages || ['en'],
@@ -3393,6 +3463,14 @@ const IncomingAgentView = () => {
                               ttsModel: 'eleven_turbo_v2_5',
                               ttsVoice: 'rachel'
                             });
+                          } else if (provider === 'deepgram') {
+                            setAgentForm({
+                              ...agentForm,
+                              ttsProvider: provider,
+                              sttModel: 'nova-2',
+                              ttsModel: 'aura-asteria-en',
+                              ttsVoice: 'asteria'
+                            });
                           } else {
                             setAgentForm({
                               ...agentForm,
@@ -3407,11 +3485,14 @@ const IncomingAgentView = () => {
                       >
                         <option value="openai">🤖 OpenAI (Whisper STT + TTS)</option>
                         <option value="elevenlabs">🎙️ ElevenLabs (Human-like Voice)</option>
+                        <option value="deepgram">⚡ Deepgram (Ultra Low Latency)</option>
                       </select>
                       <p className="text-xs text-slate-500 mt-1">
                         {agentForm.ttsProvider === 'elevenlabs'
                           ? 'ElevenLabs provides ultra-realistic, human-like voice synthesis'
-                          : 'OpenAI provides reliable, cost-effective voice processing'}
+                          : agentForm.ttsProvider === 'deepgram'
+                            ? 'Deepgram Aura provides ultra-low latency voice AI with natural speech'
+                            : 'OpenAI provides reliable, cost-effective voice processing'}
                       </p>
                     </div>
 
@@ -3534,6 +3615,67 @@ const IncomingAgentView = () => {
                             </p>
                           </div>
                         </div>
+                      </div>
+                    ) : agentForm.ttsProvider === 'deepgram' ? (
+                      /* Deepgram Options */
+                      <div className="border border-cyan-200 rounded-xl p-4 bg-cyan-50/30 space-y-4">
+                        <h4 className="text-sm font-bold text-cyan-700 flex items-center gap-2">
+                          ⚡ Deepgram Configuration
+                        </h4>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-xs font-medium text-slate-600 mb-1">STT Model</label>
+                            <select
+                              value={agentForm.sttModel}
+                              onChange={(e) => setAgentForm({ ...agentForm, sttModel: e.target.value })}
+                              className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-cyan-200 focus:ring-2 focus:ring-cyan-500 outline-none"
+                            >
+                              <option value="nova-2">Nova-2 (Best Accuracy)</option>
+                              <option value="nova-3">Nova-3 (Latest)</option>
+                              <option value="enhanced">Enhanced</option>
+                              <option value="base">Base (Fastest)</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-slate-600 mb-1">TTS Model</label>
+                            <select
+                              value={agentForm.ttsModel}
+                              onChange={(e) => setAgentForm({ ...agentForm, ttsModel: e.target.value })}
+                              className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-cyan-200 focus:ring-2 focus:ring-cyan-500 outline-none"
+                            >
+                              <option value="aura-asteria-en">Aura Asteria (Female)</option>
+                              <option value="aura-luna-en">Aura Luna (Female)</option>
+                              <option value="aura-stella-en">Aura Stella (Female)</option>
+                              <option value="aura-orion-en">Aura Orion (Male)</option>
+                              <option value="aura-arcas-en">Aura Arcas (Male)</option>
+                              <option value="aura-perseus-en">Aura Perseus (Male)</option>
+                            </select>
+                          </div>
+                          <div className="col-span-2">
+                            <label className="block text-xs font-medium text-slate-600 mb-1">Voice</label>
+                            <select
+                              value={agentForm.ttsVoice}
+                              onChange={(e) => setAgentForm({ ...agentForm, ttsVoice: e.target.value })}
+                              className="w-full rounded-lg border-none bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-cyan-200 focus:ring-2 focus:ring-cyan-500 outline-none"
+                            >
+                              <option value="asteria">Asteria (Female, Warm)</option>
+                              <option value="luna">Luna (Female, Friendly)</option>
+                              <option value="stella">Stella (Female, Clear)</option>
+                              <option value="athena">Athena (Female, Confident)</option>
+                              <option value="hera">Hera (Female, Calm)</option>
+                              <option value="orion">Orion (Male, Warm)</option>
+                              <option value="arcas">Arcas (Male, Friendly)</option>
+                              <option value="perseus">Perseus (Male, Clear)</option>
+                              <option value="angus">Angus (Male, Confident)</option>
+                              <option value="orpheus">Orpheus (Male, Calm)</option>
+                              <option value="helios">Helios (Male, Energetic)</option>
+                              <option value="zeus">Zeus (Male, Deep)</option>
+                            </select>
+                          </div>
+                        </div>
+                        <p className="text-xs text-cyan-600 mt-2">
+                          💡 Deepgram Aura is optimized for ultra-low latency conversational AI
+                        </p>
                       </div>
                     ) : (
                       /* OpenAI Options */
@@ -4604,6 +4746,14 @@ const OutgoingAgentView = () => {
                             ttsModel: 'eleven_turbo_v2_5',
                             ttsVoice: 'rachel'
                           });
+                        } else if (provider === 'deepgram') {
+                          setCallForm({
+                            ...callForm,
+                            ttsProvider: provider,
+                            sttModel: 'nova-2',
+                            ttsModel: 'aura-asteria-en',
+                            ttsVoice: 'asteria'
+                          });
                         } else {
                           setCallForm({
                             ...callForm,
@@ -4618,6 +4768,7 @@ const OutgoingAgentView = () => {
                     >
                       <option value="openai">🤖 OpenAI (Whisper + TTS)</option>
                       <option value="elevenlabs">🎙️ ElevenLabs (Human-like)</option>
+                      <option value="deepgram">⚡ Deepgram (Ultra Low Latency)</option>
                     </select>
                   </div>
 
@@ -4664,6 +4815,40 @@ const OutgoingAgentView = () => {
                             <option value="emily">Emily</option>
                             <option value="adam">Adam</option>
                             <option value="bella">Bella</option>
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+                  ) : callForm.ttsProvider === 'deepgram' ? (
+                    <div className="border border-cyan-200 rounded-lg p-3 bg-cyan-50/30 space-y-2">
+                      <h5 className="text-xs font-bold text-cyan-700">⚡ Deepgram Aura</h5>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-xs text-slate-500 mb-1">STT Model</label>
+                          <select
+                            value={callForm.sttModel}
+                            onChange={(e) => setCallForm({ ...callForm, sttModel: e.target.value })}
+                            className="w-full rounded bg-white px-2 py-1.5 text-xs ring-1 ring-cyan-200 focus:ring-cyan-500 outline-none"
+                          >
+                            <option value="nova-2">Nova-2</option>
+                            <option value="nova-3">Nova-3</option>
+                            <option value="enhanced">Enhanced</option>
+                            <option value="base">Base</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-slate-500 mb-1">Voice</label>
+                          <select
+                            value={callForm.ttsVoice}
+                            onChange={(e) => setCallForm({ ...callForm, ttsVoice: e.target.value })}
+                            className="w-full rounded bg-white px-2 py-1.5 text-xs ring-1 ring-cyan-200 focus:ring-cyan-500 outline-none"
+                          >
+                            <option value="asteria">Asteria</option>
+                            <option value="luna">Luna</option>
+                            <option value="orion">Orion</option>
+                            <option value="arcas">Arcas</option>
+                            <option value="perseus">Perseus</option>
+                            <option value="zeus">Zeus</option>
                           </select>
                         </div>
                       </div>

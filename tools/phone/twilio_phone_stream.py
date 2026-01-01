@@ -11,7 +11,7 @@ import webrtcvad
 
 from tools import SpeechToTextTool, ConversationalResponseTool, TextToSpeechTool
 from tools.phone.audio_utils import convert_pcm_to_mulaw, convert_mulaw_to_wav_bytes, normalize_audio, apply_noise_gate
-from tools.provider_factory import get_stt_tool, get_tts_tool, is_elevenlabs_tts
+from tools.provider_factory import get_stt_tool, get_tts_tool, is_elevenlabs_tts, is_deepgram_stt, is_deepgram_tts
 from tools.language_config import is_language_supported, get_language_names
 from conversation_manager import ConversationManager
 
@@ -300,7 +300,6 @@ class TwilioStreamHandler:
         custom_context_param = custom_params.get('CustomContext')
         if custom_context_param and is_outbound and self.agent_config:
             try:
-                import base64
                 custom_context = base64.b64decode(custom_context_param.encode('utf-8')).decode('utf-8')
                 logger.info(f"✅ Found custom context in stream parameters for outbound call")
                 # Override system prompt with custom context
@@ -721,7 +720,11 @@ class TwilioStreamHandler:
             stt_model = self.agent_config.get("sttModel") if self.agent_config else None
             
             # Route to correct STT provider based on model
-            if stt_model and stt_model.startswith("elevenlabs"):
+            if is_deepgram_stt(stt_model):
+                # Use Deepgram STT
+                stt_tool = get_stt_tool(stt_model)
+                result = await stt_tool.transcribe(wav_audio, model=stt_model)
+            elif stt_model and stt_model.startswith("elevenlabs"):
                 # Use ElevenLabs STT
                 stt_tool = get_stt_tool(stt_model)
                 result = await stt_tool.transcribe(wav_audio, model=stt_model)
@@ -867,7 +870,16 @@ class TwilioStreamHandler:
                 else:
                     # No speculative result - run STT synchronously
                     # Route to correct STT provider based on model
-                    if stt_model_to_use and stt_model_to_use.startswith("elevenlabs"):
+                    if is_deepgram_stt(stt_model_to_use):
+                        # Use Deepgram STT (Nova)
+                        logger.info(f"🎤 Using Deepgram STT: {stt_model_to_use} (lang hint: {primary_language})")
+                        stt_tool = get_stt_tool(stt_model_to_use)
+                        stt_result = await stt_tool.transcribe(
+                            wav_audio_data,
+                            model=stt_model_to_use,
+                            language=primary_language
+                        )
+                    elif stt_model_to_use and stt_model_to_use.startswith("elevenlabs"):
                         # Use ElevenLabs STT (Scribe)
                         logger.info(f"🎙️ Using ElevenLabs STT: {stt_model_to_use} (lang hint: {primary_language})")
                         stt_tool = get_stt_tool(stt_model_to_use)
@@ -1382,6 +1394,15 @@ class TwilioStreamHandler:
                     continue
                 
                 # Synthesize with interrupt polling (checks every 50ms during synthesis)
+                # SPECIAL PATH for Deepgram Streaming (Low Latency)
+                if is_deepgram_tts(tts_model):
+                    await self._stream_deepgram_tts(chunk, tts_voice, tts_model)
+                    # If interrupted during streaming, the helper sets self.ai_is_speaking = False
+                    if not self.ai_is_speaking:
+                         return
+                    continue # Move to next chunk
+
+                # ORIGINAL PATH for other providers (OpenAI, ElevenLabs)
                 perf_tts_chunk_start = time.perf_counter()
                 tts_result = await self._synthesize_with_interrupt_check(chunk, voice=tts_voice, model=tts_model)
                 perf_tts_chunk_end = time.perf_counter()
@@ -1401,15 +1422,21 @@ class TwilioStreamHandler:
                         self.ai_is_speaking = False
                         return
                     
-                    pcm_bytes = tts_result["audio_bytes"]
+                    audio_bytes = tts_result["audio_bytes"]
                     # CRITICAL: Check for interrupt BEFORE conversion (saves processing time)
                     if self.interrupt_detected:
                         logger.info("🛑 Interrupt detected before audio conversion, stopping immediately.")
                         self.ai_is_speaking = False
                         return
                     
-                    # Fast conversion: PCM -> mu-law using only Python audioop (no ffmpeg)
-                    mulaw_bytes = convert_pcm_to_mulaw(pcm_bytes, input_rate=24000, input_width=2)
+                    # Check if audio is already in mulaw format (e.g., from Deepgram)
+                    if tts_result.get("is_mulaw"):
+                        # Skip conversion - audio is already mulaw from Deepgram
+                        mulaw_bytes = audio_bytes
+                        logger.info(f"📡 Using pre-converted mulaw audio from Deepgram: {len(mulaw_bytes)} bytes")
+                    else:
+                        # Fast conversion: PCM -> mu-law using only Python audioop (no ffmpeg)
+                        mulaw_bytes = convert_pcm_to_mulaw(audio_bytes, input_rate=24000, input_width=2)
                     if mulaw_bytes:
                         logger.info(f"📡 STEP 5: Sending {len(mulaw_bytes)} bytes audio to Twilio")
                         # CHUNKED AUDIO: Split into 100ms chunks (8kHz * 0.1s = 800 bytes)
@@ -1435,7 +1462,7 @@ class TwilioStreamHandler:
                             # Small yield to allow interrupt detection between chunks
                             await asyncio.sleep(0.01)
                 else:
-                    logger.error(f"TTS failed for sentence: {sentence}")
+                    logger.error(f"TTS failed for chunk: {chunk}")
 
             # Only send end mark if we weren't interrupted
             if not self.interrupt_detected:
@@ -1490,8 +1517,26 @@ class TwilioStreamHandler:
             tts_voice = voice or (self.agent_config.get("ttsVoice", "alloy") if self.agent_config else "alloy")
             tts_model = model or (self.agent_config.get("ttsModel") if self.agent_config else self.tts_tool.model)
             
-            # Check if we should use ElevenLabs TTS
-            if is_elevenlabs_tts(tts_model):
+            # Check provider based on model name
+            if is_deepgram_tts(tts_model):
+                # Use Deepgram Aura TTS
+                logger.info(f"🔊 Using Deepgram TTS: model={tts_model}, voice={tts_voice}")
+                deepgram_tts = get_tts_tool(tts_model)
+                # Deepgram returns mulaw bytes directly for Twilio
+                audio_bytes = deepgram_tts.synthesize_pcm(
+                    text=text,
+                    voice=tts_voice,
+                    sample_rate=8000
+                )
+                # Return in format compatible with existing code
+                # Note: Deepgram synthesize_pcm returns raw mulaw bytes, not PCM
+                # We need to signal this so conversion is skipped
+                return {
+                    "success": True if audio_bytes else False,
+                    "audio_bytes": audio_bytes,
+                    "is_mulaw": True  # Signal that this is already mulaw, skip PCM conversion
+                }
+            elif is_elevenlabs_tts(tts_model):
                 # Use ElevenLabs TTS
                 logger.info(f"🎙️ Using ElevenLabs TTS: model={tts_model}, voice={tts_voice}")
                 elevenlabs_tts = get_tts_tool(tts_model)
@@ -1502,10 +1547,10 @@ class TwilioStreamHandler:
                 )
                 return result
             else:
-                # Use OpenAI TTS (existing behavior)
+                # Use OpenAI TTS (default)
                 logger.info(f"🤖 Using OpenAI TTS: model={tts_model or 'tts-1'}, voice={tts_voice}")
                 response = self.tts_tool.client.audio.speech.create(
-                    model=tts_model,
+                    model=tts_model or "tts-1",
                     voice=tts_voice,
                     input=text,
                     response_format="pcm"  # Raw PCM - fastest, no decoding needed
@@ -1606,3 +1651,50 @@ class TwilioStreamHandler:
             self.speech_processing_task.cancel()
         
         logger.info(f"✅ Call {self.call_sid} cleanup completed")
+    async def _stream_deepgram_tts(self, text: str, voice: str, model: str):
+        """Dedicated streaming path for Deepgram to minimize latency."""
+        try:
+            logger.info(f"🌊 Streaming Deepgram TTS: '{text[:20]}...'")
+            deepgram_tts = get_tts_tool(model)
+            
+            # 1. Start generation (returns iterator immediately)
+            # Use 'mulaw' encoding directly from Deepgram to skip conversion
+            audio_iterator = await deepgram_tts.synthesize_stream(
+                text=text,
+                voice=voice,
+                encoding="mulaw",
+                sample_rate=8000
+            )
+            
+            # 2. Iterate and send chunks immediately
+            # Deepgram creates small chunks suitable for streaming
+            count = 0
+            for chunk_bytes in audio_iterator:
+                # CRITICAL: Check interrupt between every network chunk
+                if self.interrupt_detected:
+                    logger.info("🛑 Interrupt detected during Deepgram stream, stopping.")
+                    self.ai_is_speaking = False
+                    return
+
+                if not chunk_bytes:
+                    continue
+
+                # 3. Send directly (no conversion needed for mulaw)
+                payload = base64.b64encode(chunk_bytes).decode('utf-8')
+                
+                await self.websocket.send_json({
+                    "event": "media",
+                    "streamSid": self.stream_sid,
+                    "media": {"payload": payload}
+                })
+                
+                # Update mark if this is the first chunk?
+                # Actually we send mark *after* all audio... 
+                # but we need to track if we sent anything.
+                count += 1
+                
+            logger.info(f"✅ Deepgram stream complete ({count} chunks)")
+
+        except Exception as e:
+            logger.error(f"❌ Error in Deepgram streaming: {e}")
+            # Don't crash, just log. Caller loop continues.

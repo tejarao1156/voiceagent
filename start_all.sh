@@ -34,6 +34,9 @@ echo "🧹 Clean slate ready."
 echo "🚀 Starting Voice Agent..."
 echo ""
 
+# --- Clean pycache to ensure fresh code ---
+find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+
 # --- Start the main API server ---
 echo "Starting Voice Agent API server (FastAPI)..."
 python3 "$SCRIPT_DIR/main.py" &
@@ -46,6 +49,24 @@ if ! kill -0 "$API_PID" 2>/dev/null; then
     exit 1
 fi
 echo "✅ API Server is running."
+
+# --- Start ngrok (Optional but requested) ---
+echo "Starting ngrok..."
+NGROK_CMD=""
+if [ -f "$SCRIPT_DIR/bin/ngrok" ]; then
+    NGROK_CMD="$SCRIPT_DIR/bin/ngrok"
+elif command -v ngrok >/dev/null 2>&1; then
+    NGROK_CMD="ngrok"
+fi
+
+if [ -n "$NGROK_CMD" ]; then
+    $NGROK_CMD http 4002 > /dev/null &
+    NGROK_PID=$!
+    echo "✅ ngrok started on port 4002 (PID: $NGROK_PID)"
+else
+    echo "⚠️ ngrok not found. Skipping ngrok start."
+    echo "   Run ./setup_ngrok.sh to install it if needed."
+fi
 
 # --- Start Next.js UI ---
 echo "Starting Voice Agent UI (Next.js)..."
@@ -75,4 +96,3 @@ echo "Press Ctrl+C to stop all services."
 
 # Keep the script alive to hold the trap and background jobs
 wait "$API_PID" "$UI_PID" 2>/dev/null || wait "$API_PID"
-
