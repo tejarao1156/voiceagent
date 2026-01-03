@@ -5,6 +5,18 @@ echo ""
 echo "This script will help you set up ngrok for Twilio webhooks."
 echo ""
 
+# --- Kill any existing ngrok processes ---
+echo "🔍 Checking for existing ngrok processes..."
+if pgrep -f "ngrok http" > /dev/null 2>&1; then
+    echo "⚠️  Found running ngrok process. Stopping it..."
+    pkill -f "ngrok http" 2>/dev/null || true
+    sleep 1
+    echo "✅ Existing ngrok stopped."
+else
+    echo "✅ No existing ngrok processes found."
+fi
+echo ""
+
 # Get project root directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

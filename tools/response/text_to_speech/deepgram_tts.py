@@ -195,6 +195,7 @@ class DeepgramTextToSpeechTool:
             logger.error(f"❌ Deepgram TTS stream error: {e}")
             return iter([])
 
+    def synthesize_sync(
         self,
         text: str,
         voice: str = "asteria",

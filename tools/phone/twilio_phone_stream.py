@@ -33,16 +33,17 @@ MIN_SPEECH_DURATION_FRAMES = 6  # 6 frames * 20ms = 120ms minimum speech (was 8)
 # INTERRUPT-SPECIFIC THRESHOLDS (higher than normal speech to reduce false positives)
 # These require stronger signals to trigger interrupts during AI playback
 # This prevents background noise, AI echo, and quiet sounds from stopping the AI
-MIN_INTERRUPT_RMS_THRESHOLD = 400  # Base RMS threshold (may be raised by noise floor)
+MIN_INTERRUPT_RMS_THRESHOLD = 300  # Lower base threshold for easier interrupts (was 400)
 
 # NOISE FLOOR CALIBRATION - Measures ambient noise to set dynamic thresholds
 # Calibrates during first 500ms after AI starts speaking
 NOISE_CALIBRATION_FRAMES = 25  # 25 frames * 20ms = 500ms calibration period
-NOISE_MARGIN = 300  # RMS margin above noise floor for interrupt detection
+NOISE_MARGIN = 200  # Lower margin for easier interrupts (was 300)
 
 # PRIMARY SPEAKER DETECTION - Filters out background speech (guy talking in back)
 # Caller's voice is louder than background because they hold phone to mouth
-PRIMARY_SPEAKER_MULTIPLIER = 2.0  # Voice must be 2x louder than noise floor
+PRIMARY_SPEAKER_MULTIPLIER = 1.5  # Lowered from 2x to 1.5x for easier interrupts
+INSTANT_INTERRUPT_MULTIPLIER = 3.0  # If RMS is 3x threshold, instant stop (no frame counting)
 MAX_INTERRUPT_RMS_VARIANCE = 30000  # Max variance - increased for PSTN call quality (was 15000)
 MAX_DYNAMIC_THRESHOLD = 800  # Cap max threshold to prevent runaway from AI echo in calibration
 
@@ -75,6 +76,7 @@ class TwilioStreamHandler:
         self.interrupt_detected = False  # User interrupted AI
         self.tts_streaming_task = None  # Track active TTS streaming task for cancellation
         self.ai_speech_start_time = None  # Timestamp when AI started speaking (for grace period)
+        self.pending_marks = 0  # Track how many audio marks are still pending (for multi-sentence responses)
         self.stream_sid = None
         self.call_sid = None
         self.to_number = None  # Store To number for credential lookup
@@ -86,7 +88,7 @@ class TwilioStreamHandler:
         
         # Human-like conversation tuning parameters
         # TUNED to reduce false interrupt triggers while maintaining responsive barge-in
-        self.SILENCE_THRESHOLD_FRAMES = 150  # 150 frames * 20ms = 3s - gives user time to pause
+        self.SILENCE_THRESHOLD_FRAMES = 100  # 100 frames * 20ms = 2s - wait for user to finish speaking
         self.INTERRUPT_GRACE_PERIOD_MS = 300  # Wait 300ms after AI starts before allowing interrupts (prevents AI echo)
         self.MIN_INTERRUPT_FRAMES = 7  # Require 7 frames (140ms) of sustained speech for valid interrupt (was 10)
         
@@ -175,12 +177,22 @@ class TwilioStreamHandler:
                 # NOTE: For multi-sentence responses, this fires after EACH sentence
                 if mark_name == "end_of_ai_speech":
                     was_interrupted = self.interrupt_detected
-                    self.ai_is_speaking = False
-                    self.ai_speech_start_time = None
+                    # Decrement pending marks counter
+                    self.pending_marks -= 1
+                    logger.info(f"📍 Mark received, pending_marks: {self.pending_marks}")
+                    
+                    # Only stop speaking when ALL marks are received
+                    if self.pending_marks <= 0:
+                        self.ai_is_speaking = False
+                        self.ai_speech_start_time = None
+                        self.pending_marks = 0  # Reset to 0 in case of underflow
+                        logger.info("✅ AI finished speaking (all marks received), listening for user now.")
+                    else:
+                        logger.info(f"📍 Still waiting for {self.pending_marks} more marks...")
+                    
                     # DON'T reset interrupt_speech_frames here!
                     # Interrupt tracking must persist across sentence boundaries
-                    # Otherwise user can't interrupt during long multi-sentence responses
-                    logger.info("✅ AI finished speaking, listening for user now.")
+                    # If there's waiting interrupt speech, process it immediately
                     # If there's waiting interrupt speech, process it immediately
                     if was_interrupted and self.is_speaking and self.speech_buffer:
                         logger.info("🔄 AI stopped, processing waiting interrupt speech...")
@@ -468,7 +480,8 @@ class TwilioStreamHandler:
         
         # CRITICAL: If AI is speaking, block ALL audio processing to prevent feedback loop
         # Exception: If interrupt is detected, allow capturing interrupt speech (but don't process until TTS stops)
-        if self.ai_is_speaking and not self.interrupt_detected:
+        # NOTE: Also require greeting_complete - during intro, mic is "muted" (no interrupts allowed)
+        if self.ai_is_speaking and not self.interrupt_detected and self.greeting_complete:
             # === NOISE FLOOR CALIBRATION ===
             # During first 500ms (25 frames) after AI starts, measure ambient noise
             if not self.noise_calibration_complete:
@@ -522,6 +535,46 @@ class TwilioStreamHandler:
                 if self.interrupt_speech_frames == 0:
                     logger.info(f"🔍 Potential interrupt detected (RMS: {rms} >= threshold {self.dynamic_interrupt_threshold}), validating...")
                     self.interrupt_rms_buffer = []  # Reset RMS buffer for new potential interrupt
+                
+                # === INSTANT INTERRUPT: If RMS is VERY loud (3x threshold), stop immediately ===
+                # This bypasses frame counting for obvious, loud interruptions
+                instant_threshold = self.dynamic_interrupt_threshold * INSTANT_INTERRUPT_MULTIPLIER
+                if rms >= instant_threshold:
+                    logger.info(f"🚨 INSTANT INTERRUPT: RMS {rms} >= {instant_threshold:.0f} (3x threshold)! Stopping AI immediately.")
+                    self.interrupt_detected = True
+                    self.last_interrupt_time = time.time()
+                    
+                    # Send Twilio "clear" command immediately
+                    async def send_instant_clear():
+                        try:
+                            for _ in range(3):
+                                await self.websocket.send_json({"event": "clear", "streamSid": self.stream_sid})
+                                await asyncio.sleep(0.01)
+                            logger.info("🛑 Sent INSTANT clear command to Twilio!")
+                        except Exception as e:
+                            logger.warning(f"Could not send instant clear: {e}")
+                    asyncio.create_task(send_instant_clear())
+                    
+                    # Cancel TTS immediately
+                    if self.tts_streaming_task and not self.tts_streaming_task.done():
+                        self.tts_streaming_task.cancel()
+                        logger.info("🛑 Cancelled TTS due to INSTANT interrupt.")
+                    
+                    self.ai_is_speaking = False
+                    self.ai_speech_start_time = None
+                    self.query_sequence += 1
+                    
+                    # Save and reset buffers
+                    self.interrupt_speech_buffer = bytes(self.speech_buffer) if self.speech_buffer else b''
+                    self.interrupt_frames_captured = self.speech_frames_count
+                    self.speech_buffer = bytearray()
+                    self.speech_frames_count = 0
+                    self.silence_frames_count = 0
+                    self.speech_buffer.extend(payload)
+                    self.speech_frames_count = 1
+                    self.is_speaking = True
+                    self.interrupt_speech_frames = 0
+                    return
                 
                 self.interrupt_speech_frames += 1
                 self.interrupt_rms_buffer.append(rms)  # Track RMS for cumulative validation
@@ -649,6 +702,10 @@ class TwilioStreamHandler:
                 self.is_speaking = True
         elif self.is_speaking:  # Silence after speech
             self.silence_frames_count += 1
+            # CRITICAL: Keep buffering audio during silence frames to capture trailing speech
+            # This prevents the last word from being cut off (e.g., "story" in "tell me a small story")
+            self.speech_buffer.extend(payload)
+            self.speech_frames_count += 1
             if self.silence_frames_count >= self.SILENCE_THRESHOLD_FRAMES:
                 # Only process if AI has stopped speaking (or if it's not an interrupt)
                 if self.interrupt_detected and self.ai_is_speaking:
@@ -1334,7 +1391,9 @@ class TwilioStreamHandler:
                 if twilio_creds:
                     from twilio.rest import Client
                     client = Client(twilio_creds["account_sid"], twilio_creds["auth_token"])
-                    client.calls(self.call_sid).update(status="completed")
+                    # Run synchronous Twilio API call in thread executor
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, lambda: client.calls(self.call_sid).update(status="completed"))
                     logger.info(f"✅ Call {self.call_sid} ended via Twilio API")
                 else:
                     # Fallback: close websocket to end stream
@@ -1467,6 +1526,8 @@ class TwilioStreamHandler:
             # Only send end mark if we weren't interrupted
             if not self.interrupt_detected:
                 # Send mark to signal end of speech (will trigger ai_is_speaking = False in mark handler)
+                self.pending_marks += 1  # Increment before sending mark
+                logger.info(f"📤 Sending mark, pending_marks now: {self.pending_marks}")
                 await self.websocket.send_json({
                     "event": "mark",
                     "streamSid": self.stream_sid,
