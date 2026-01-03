@@ -27,6 +27,11 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 
 # ============================================================================
+# DEEPGRAM CONFIGURATION
+# ============================================================================
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+
+# ============================================================================
 # HUGGING FACE CONFIGURATION
 # ============================================================================
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")  # Optional - works without but better with it

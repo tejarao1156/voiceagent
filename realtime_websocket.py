@@ -146,7 +146,7 @@ class RealTimeVoiceAgent:
         self.chunk_count: Dict[str, int] = {}               # Count chunks received
         self.last_chunk_time: Dict[str, float] = {}         # Track when last chunk was received
         self.silence_check_tasks: Dict[str, asyncio.Task] = {}  # Background tasks checking for silence
-        self.SILENCE_WAIT_SECONDS = 2.0                     # Wait 2 seconds of silence before responding
+        self.SILENCE_WAIT_SECONDS = 1.0                     # Wait 1.0 second of silence before responding (faster for chat)
         self.MAX_BUFFER_BYTES = 100000                      # Max buffer before forcing process (safety limit)
         
         # Context tracking for unclear questions
@@ -420,6 +420,13 @@ class RealTimeVoiceAgent:
         # Increment query sequence to invalidate any in-flight responses
         self.query_sequences[session_id] = self.query_sequences.get(session_id, 0) + 1
         logger.info(f"🔄 Query sequence for {session_id} incremented to {self.query_sequences[session_id]}")
+        
+        # CRITICAL: Clear audio buffers to prevent old questions from being answered
+        # This ensures only the NEW interrupt question gets processed
+        if session_id in self.audio_buffers:
+            self.audio_buffers[session_id] = []
+            logger.info(f"🧹 Cleared audio buffer for {session_id}")
+        self.chunk_count[session_id] = 0
         
         # Mark AI as not speaking
         self.ai_speaking[session_id] = False
