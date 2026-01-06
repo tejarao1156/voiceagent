@@ -48,8 +48,13 @@ import {
   DollarSign,
   LogOut,
   Moon,
-  PhoneOff
+  PhoneOff,
+  Megaphone
 } from 'lucide-react'
+
+// Import CampaignsView
+import CampaignsView from '../../components/dashboard/CampaignsView'
+
 // import { useTheme } from '../components/ThemeProvider'
 
 // --- Components ---
@@ -5013,8 +5018,8 @@ export default function FuturisticDemo() {
 
 
             <NavItem icon={PhoneIncoming} label="Incoming Agent" active={activeTab === 'incoming-agent'} onClick={() => setActiveTab('incoming-agent')} />
-            <NavItem icon={PhoneOutgoing} label="Outgoing Agent" active={activeTab === 'outgoing-agent'} onClick={() => setActiveTab('outgoing-agent')} />
             <NavItem icon={Bot} label="AI Chat" active={activeTab === 'ai-chat'} onClick={() => setActiveTab('ai-chat')} />
+            <NavItem icon={Megaphone} label="Campaigns" active={activeTab === 'campaigns'} onClick={() => setActiveTab('campaigns')} />
             <NavItem icon={FileText} label="Prompts" active={activeTab === 'prompts'} onClick={() => setActiveTab('prompts')} />
             <NavItem icon={MessageSquare} label="Messaging Agents" active={activeTab === 'messaging-agents'} onClick={() => setActiveTab('messaging-agents')} />
             <NavItem icon={Send} label="Messages & SMS" active={activeTab === 'messages'} onClick={() => setActiveTab('messages')} />
@@ -5058,8 +5063,8 @@ export default function FuturisticDemo() {
                   {activeTab === 'dashboard' ? 'Dashboard' :
 
                     activeTab === 'incoming-agent' ? 'Incoming Agent' :
-                      activeTab === 'outgoing-agent' ? 'Outgoing Agent' :
-                        activeTab === 'ai-chat' ? 'AI Chat' :
+                      activeTab === 'ai-chat' ? 'AI Chat' :
+                        activeTab === 'campaigns' ? 'Campaigns' :
                           activeTab === 'prompts' ? 'Prompts Management' :
                             activeTab === 'messaging-agents' ? 'Messaging Agents' :
                               activeTab === 'messages' ? 'Messages & SMS' :
@@ -5075,8 +5080,8 @@ export default function FuturisticDemo() {
                   {activeTab === 'dialer' ? 'Make calls and manage active connections.' :
 
                     activeTab === 'incoming-agent' ? 'Create and manage Voice Agents for your Business.' :
-                      activeTab === 'outgoing-agent' ? 'Schedule AI or normal outgoing calls.' :
-                        activeTab === 'ai-chat' ? 'Chat with AI using voice or text - no phone calls required.' :
+                      activeTab === 'ai-chat' ? 'Chat with AI using voice or text - no phone calls required.' :
+                        activeTab === 'campaigns' ? 'Send bulk Voice, SMS, or WhatsApp campaigns.' :
                           activeTab === 'prompts' ? 'Create and manage AI prompts for outgoing calls.' :
                             activeTab === 'messaging-agents' ? 'Create and manage SMS/Messaging Agents for your Business.' :
                               activeTab === 'messages' ? 'View and send SMS messages to customers.' :
@@ -5158,8 +5163,8 @@ export default function FuturisticDemo() {
 
 
               {activeTab === 'incoming-agent' && <IncomingAgentView />}
-              {activeTab === 'outgoing-agent' && <OutgoingAgentView />}
               {activeTab === 'ai-chat' && <AIChatView />}
+              {activeTab === 'campaigns' && <CampaignsView />}
               {activeTab === 'prompts' && <PromptsView />}
               {activeTab === 'messaging-agents' && <MessagingAgentsView />}
               {activeTab === 'messages' && <MessagesView />}

@@ -217,7 +217,8 @@ class MongoDBMessageStore:
     async def create_outbound_message(self, message_sid: str, from_number: str, to_number: str,
                                      body: str, agent_id: Optional[str] = None,
                                      conversation_id: Optional[str] = None,
-                                     channel: str = "sms") -> bool:
+                                     channel: str = "sms",
+                                     campaign_id: Optional[str] = None) -> bool:
         """Add a new outbound message to the conversation document.
         Document structure: { agent_id, user_number, messages: [...] }
         One document per agent_id + user_number combination."""
@@ -263,6 +264,7 @@ class MongoDBMessageStore:
                 "status": "sent",
                 "timestamp": now,
                 "channel": channel,  # Track message channel (sms or whatsapp)
+                "campaign_id": campaign_id,  # Link to campaign if from campaign
             }
             
             # Upsert: Update if document exists, insert if it doesn't

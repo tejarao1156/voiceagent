@@ -33,7 +33,8 @@ class MongoDBCallStore:
     
     async def create_call(self, call_sid: str, from_number: str, to_number: str, 
                          agent_id: Optional[str] = None, session_id: Optional[str] = None,
-                         scheduled_call_id: Optional[str] = None, is_scheduled: bool = False) -> bool:
+                         scheduled_call_id: Optional[str] = None, is_scheduled: bool = False,
+                         campaign_id: Optional[str] = None, campaign_item_id: Optional[str] = None) -> bool:
         """Create a new call record when call starts
         
         Handles edge cases:
@@ -77,7 +78,9 @@ class MongoDBCallStore:
                 "created_at": now,
                 "updated_at": now,
                 "scheduled_call_id": scheduled_call_id,
-                "is_scheduled": is_scheduled
+                "is_scheduled": is_scheduled,
+                "campaign_id": campaign_id,
+                "campaign_item_id": campaign_item_id
             }
             
             await collection.insert_one(call_doc)
