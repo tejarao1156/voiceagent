@@ -247,7 +247,7 @@ const CampaignWizard = ({
   const [uploadedNumbers, setUploadedNumbers] = useState<string[]>([])
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
-  const [useExistingList, setUseExistingList] = useState(false)
+  const [useExistingList, setUseExistingList] = useState(contactLists.length > 0)
   const [selectedListId, setSelectedListId] = useState('')
 
   const [formData, setFormData] = useState({
@@ -916,8 +916,8 @@ function ContactListDetail({ list, onBack, onRefresh }: { list: ContactList; onB
                     </td>
                     <td className="px-4 py-3">
                       <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${contact.status === 'active'
-                          ? 'bg-emerald-100 text-emerald-700'
-                          : 'bg-red-100 text-red-700'
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : 'bg-red-100 text-red-700'
                         }`}>
                         {contact.status}
                       </span>
@@ -949,9 +949,11 @@ function ContactListDetail({ list, onBack, onRefresh }: { list: ContactList; onB
               className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl"
             >
               <h3 className="text-lg font-bold text-slate-800 mb-4">Upload Contacts</h3>
-              <p className="text-sm text-slate-500 mb-6">
-                Upload an Excel file (.xlsx) or CSV. The first column should be "phone".
-                Optional columns: "name", "email", etc.
+              <p className="text-sm text-slate-500 mb-2">
+                Upload an Excel file (.xlsx) with your contacts.
+              </p>
+              <p className="text-xs text-slate-400 mb-4">
+                Required column: <span className="font-semibold text-slate-500">Phone Number</span> &nbsp;|&nbsp; Optional: <span className="font-semibold text-slate-500">Name</span>
               </p>
 
               <div
@@ -1042,7 +1044,9 @@ export default function CampaignsView() {
   const [activeTab, setActiveTab] = useState<'campaigns' | 'lists'>('campaigns')
   const [showNewListModal, setShowNewListModal] = useState(false)
   const [newListName, setNewListName] = useState('')
+  const [newListFile, setNewListFile] = useState<File | null>(null)
   const [creatingList, setCreatingList] = useState(false)
+  const newListFileInputRef = useRef<HTMLInputElement>(null)
 
   const loadCampaigns = async () => {
     try {
@@ -1107,15 +1111,33 @@ export default function CampaignsView() {
     if (!newListName) return
     setCreatingList(true)
     try {
+      // Step 1: Create the list
       const res = await fetch('/api/contact-lists', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: newListName })
       })
       if (res.ok) {
+        const data = await res.json()
+        const listId = data.list_id
+
+        // Step 2: If file selected, upload it
+        if (newListFile && listId) {
+          const formData = new FormData()
+          formData.append('file', newListFile)
+          const uploadRes = await fetch(`/api/contact-lists/${listId}/upload`, {
+            method: 'POST',
+            body: formData
+          })
+          if (!uploadRes.ok) {
+            console.error('File upload failed, but list was created')
+          }
+        }
+
         loadContactLists()
         setShowNewListModal(false)
         setNewListName('')
+        setNewListFile(null)
       }
     } catch (e) {
       console.error('Error creating list:', e)
@@ -1344,9 +1366,32 @@ export default function CampaignsView() {
                 placeholder="List name..."
                 className="w-full px-4 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none mb-4"
               />
+
+              {/* File Upload Section */}
+              <label className="block text-sm font-medium text-slate-600 mb-1">Upload Contacts (Excel)</label>
+              <p className="text-xs text-slate-400 mb-2">
+                Required column: <span className="font-semibold text-slate-500">Phone Number</span> &nbsp;|&nbsp; Optional: <span className="font-semibold text-slate-500">Name</span>
+              </p>
+              <div
+                className="border-2 border-dashed border-slate-200 rounded-xl p-4 text-center hover:border-emerald-500 hover:bg-emerald-50 transition-colors cursor-pointer group mb-4"
+                onClick={() => newListFileInputRef.current?.click()}
+              >
+                <FileSpreadsheet className="h-8 w-8 mx-auto mb-2 text-slate-400 group-hover:text-emerald-500" />
+                <p className="text-sm font-medium text-slate-600 group-hover:text-emerald-600">
+                  {newListFile ? newListFile.name : 'Click to select file (optional)'}
+                </p>
+                <input
+                  type="file"
+                  ref={newListFileInputRef}
+                  className="hidden"
+                  accept=".xlsx,.xls"
+                  onChange={(e) => setNewListFile(e.target.files?.[0] || null)}
+                />
+              </div>
+
               <div className="flex gap-2 justify-end">
                 <button
-                  onClick={() => setShowNewListModal(false)}
+                  onClick={() => { setShowNewListModal(false); setNewListFile(null); }}
                   className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg"
                 >
                   Cancel

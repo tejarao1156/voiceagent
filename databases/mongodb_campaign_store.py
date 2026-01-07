@@ -261,8 +261,64 @@ class MongoDBCampaignStore:
             return []
     
     async def get_pending_items(self, campaign_id: str, batch_size: int = 20) -> List[Dict[str, Any]]:
-        """Get pending items for processing"""
+        """Get pending items for processing (legacy - use acquire_pending_items for atomic locking)"""
         return await self.get_campaign_items(campaign_id, status="pending", limit=batch_size)
+    
+    async def acquire_pending_items(self, campaign_id: str, batch_size: int = 10) -> List[Dict[str, Any]]:
+        """Atomically acquire pending items by locking them (pending -> in_progress).
+        
+        This prevents duplicate processing even with multiple workers or pod restarts.
+        Uses find_one_and_update for each item to ensure atomic state transition.
+        
+        Returns:
+            List of locked items ready for processing
+        """
+        if not is_mongodb_available():
+            return []
+        
+        try:
+            items = self._get_items_collection()
+            if items is None:
+                return []
+            
+            locked_items = []
+            now = datetime.utcnow().isoformat()
+            
+            # Atomically lock items one by one until we have batch_size or no more pending
+            for _ in range(batch_size):
+                doc = await items.find_one_and_update(
+                    {
+                        "campaign_id": ObjectId(campaign_id),
+                        "status": "pending"
+                    },
+                    {
+                        "$set": {
+                            "status": "in_progress",
+                            "locked_at": now,
+                            "updated_at": now
+                        }
+                    },
+                    return_document=True  # Return the updated document
+                )
+                
+                if doc is None:
+                    # No more pending items
+                    break
+                
+                # Convert ObjectIds to strings
+                doc["id"] = str(doc["_id"])
+                doc["campaign_id"] = str(doc["campaign_id"])
+                del doc["_id"]
+                locked_items.append(doc)
+            
+            if locked_items:
+                logger.info(f"🔒 Acquired {len(locked_items)} items for campaign {campaign_id}")
+            
+            return locked_items
+            
+        except Exception as e:
+            logger.error(f"Error acquiring pending items: {e}", exc_info=True)
+            return []
     
     async def update_item_status(
         self,

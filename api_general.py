@@ -280,7 +280,7 @@ async def startup_event():
     try:
         from utils.campaign_worker import get_campaign_worker
         campaign_worker = get_campaign_worker()
-        campaign_worker.start()
+        await campaign_worker.start()
         app.state.campaign_worker = campaign_worker
         logger.info("✅ Campaign Worker initialized and started")
     except Exception as e:

@@ -20,9 +20,9 @@ from twilio.rest import Client
 
 logger = logging.getLogger(__name__)
 
-# Configuration - Sequential execution by default
-BATCH_SIZE = int(os.getenv("CAMPAIGN_BATCH_SIZE", "1"))  # 1 = sequential
-ITEM_DELAY_SECONDS = int(os.getenv("CAMPAIGN_ITEM_DELAY_SECONDS", "2"))
+# Configuration - Parallel batch processing
+BATCH_SIZE = int(os.getenv("CAMPAIGN_BATCH_SIZE", "10"))  # Process 10 items concurrently
+ITEM_DELAY_SECONDS = int(os.getenv("CAMPAIGN_ITEM_DELAY_SECONDS", "1"))  # Delay between batches
 
 
 class CampaignWorker:
@@ -36,13 +36,28 @@ class CampaignWorker:
         self.is_running = False
         self._task = None
     
-    def start(self):
-        """Start the worker"""
+    async def start(self):
+        """Start the worker with crash recovery"""
         if self.is_running:
             return
         self.is_running = True
+        
+        # Crash recovery: Reset any stuck in_progress items from previous run
+        await self._recover_from_crash()
+        
         self._task = asyncio.create_task(self._worker_loop())
-        logger.info("✅ Campaign Worker started (sequential mode)")
+        logger.info("✅ Campaign Worker started (parallel batch mode)")
+    
+    async def _recover_from_crash(self):
+        """Reset in_progress items for all running campaigns (crash recovery)"""
+        try:
+            running_campaigns = await self.campaign_store.list_campaigns(status="running")
+            for campaign in running_campaigns:
+                reset_count = await self.campaign_store.reset_in_progress_items(campaign["id"])
+                if reset_count > 0:
+                    logger.info(f"🔄 Recovered {reset_count} stuck items for campaign {campaign['id']}")
+        except Exception as e:
+            logger.error(f"Error during crash recovery: {e}", exc_info=True)
     
     def stop(self):
         """Stop the worker"""
@@ -97,7 +112,7 @@ class CampaignWorker:
             logger.error(f"Error checking scheduled campaigns: {e}", exc_info=True)
     
     async def _process_campaign(self, campaign: Dict[str, Any]):
-        """Process a single campaign - send ONE item (sequential)"""
+        """Process a single campaign - send a BATCH of items in parallel"""
         campaign_id = campaign.get("id")
         campaign_name = campaign.get("name", "Untitled")
         campaign_type = campaign.get("type")
@@ -105,10 +120,10 @@ class CampaignWorker:
         user_id = campaign.get("userId")
         
         try:
-            # Get ONE pending item (sequential processing)
-            pending_items = await self.campaign_store.get_pending_items(campaign_id, BATCH_SIZE)
+            # Atomically acquire a batch of pending items (locks them)
+            locked_items = await self.campaign_store.acquire_pending_items(campaign_id, BATCH_SIZE)
             
-            if not pending_items:
+            if not locked_items:
                 # No more pending items - mark campaign as completed
                 await self.campaign_store.update_campaign(campaign_id, {
                     "status": "completed",
@@ -132,9 +147,6 @@ class CampaignWorker:
             
             client = Client(twilio_creds["account_sid"], twilio_creds["auth_token"])
             
-            # Process ONE item at a time
-            item = pending_items[0]
-            
             # Create context for logging
             context = {
                 "campaign_id": campaign_id,
@@ -142,18 +154,26 @@ class CampaignWorker:
                 "user_id": user_id
             }
             
-            if campaign_type == "voice":
-                await self._send_voice(client, from_number, item, config, context)
-            elif campaign_type == "sms":
-                await self._send_sms(client, from_number, item, config, context)
-            elif campaign_type == "whatsapp":
-                await self._send_whatsapp(client, from_number, item, config, context)
+            # Process all items in parallel using asyncio.gather
+            logger.info(f"📤 Processing batch of {len(locked_items)} items for {campaign_name}...")
+            
+            tasks = []
+            for item in locked_items:
+                if campaign_type == "voice":
+                    tasks.append(self._send_voice(client, from_number, item, config, context))
+                elif campaign_type == "sms":
+                    tasks.append(self._send_sms(client, from_number, item, config, context))
+                elif campaign_type == "whatsapp":
+                    tasks.append(self._send_whatsapp(client, from_number, item, config, context))
+            
+            # Execute all tasks concurrently
+            await asyncio.gather(*tasks, return_exceptions=True)
             
             # Update campaign stats
             await self.campaign_store.update_campaign_stats(campaign_id)
             
-            # Delay before next item
-            logger.info(f"   Waiting {ITEM_DELAY_SECONDS}s before next item...")
+            # Delay before next batch
+            logger.info(f"   Waiting {ITEM_DELAY_SECONDS}s before next batch...")
             await asyncio.sleep(ITEM_DELAY_SECONDS)
             
         except Exception as e:
