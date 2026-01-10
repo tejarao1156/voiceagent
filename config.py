@@ -112,3 +112,31 @@ TWILIO_WEBHOOK_BASE_URL = get_webhook_base_url()
 
 # Determines how to process calls: "batch" for <Record>, "stream" for Media Streams.
 TWILIO_PROCESSING_MODE = os.getenv("TWILIO_PROCESSING_MODE", "batch").lower()
+
+# ============================================================================
+# CAMPAIGN WORKER CONFIGURATION
+# ============================================================================
+# Voice campaigns: Heavy resource usage (streaming, memory, long-running calls)
+# Use fewer concurrent workers to manage memory
+CAMPAIGN_VOICE_WORKERS = int(os.getenv("CAMPAIGN_VOICE_WORKERS", "2"))
+CAMPAIGN_VOICE_BATCH_SIZE = int(os.getenv("CAMPAIGN_VOICE_BATCH_SIZE", "2"))
+
+# Message campaigns (SMS + WhatsApp): Lightweight, can handle many concurrent requests
+# Both SMS and WhatsApp share the same settings
+CAMPAIGN_MESSAGE_WORKERS = int(os.getenv("CAMPAIGN_MESSAGE_WORKERS", "50"))
+CAMPAIGN_MESSAGE_BATCH_SIZE = int(os.getenv("CAMPAIGN_MESSAGE_BATCH_SIZE", "100"))
+
+# General campaign worker settings
+CAMPAIGN_POLL_INTERVAL = int(os.getenv("CAMPAIGN_POLL_INTERVAL", "5"))  # Seconds between queue checks
+
+# Type-specific batch delays
+# Voice: Uses webhook-based completion waiting, so minimal delay needed here
+# Message (SMS/WhatsApp): Wait after sending batch
+CAMPAIGN_VOICE_BATCH_DELAY = int(os.getenv("CAMPAIGN_VOICE_BATCH_DELAY", "1"))
+CAMPAIGN_MESSAGE_BATCH_DELAY = int(os.getenv("CAMPAIGN_MESSAGE_BATCH_DELAY", "5"))
+
+# Voice call completion timeout (max time to wait for a call to complete)
+CAMPAIGN_VOICE_TIMEOUT = int(os.getenv("CAMPAIGN_VOICE_TIMEOUT", "300"))  # 5 minutes
+
+
+

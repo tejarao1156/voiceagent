@@ -55,8 +55,7 @@ class MongoDBCampaignStore:
         
         try:
             campaigns = self._get_campaigns_collection()
-            items = self._get_items_collection()
-            if campaigns is None or items is None:
+            if campaigns is None:
                 return None
             
             phone_numbers = campaign_data.pop("phone_numbers", [])
@@ -96,23 +95,15 @@ class MongoDBCampaignStore:
             }
             
             result = await campaigns.insert_one(campaign_doc)
-            campaign_id = result.inserted_id
+            campaign_id = str(result.inserted_id)
             
-            # Create campaign items
+            # Create optimized queue (array-based instead of per-item docs)
             if phone_numbers:
-                items_docs = [
-                    {
-                        "campaign_id": campaign_id,
-                        "phone_number": phone,
-                        "status": "pending",
-                        "result": None,
-                        "created_at": datetime.utcnow().isoformat()
-                    }
-                    for phone in phone_numbers
-                ]
-                await items.insert_many(items_docs)
+                from .mongodb_campaign_queue_store import MongoDBCampaignQueueStore
+                queue_store = MongoDBCampaignQueueStore()
+                await queue_store.create_queue(campaign_id, phone_numbers)
             
-            logger.info(f"✅ Created campaign {campaign_id} with {len(phone_numbers)} contacts")
+            logger.info(f"✅ Created campaign {campaign_id} with {len(phone_numbers)} contacts (optimized queue)")
             return str(campaign_id)
             
         except Exception as e:

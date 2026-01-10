@@ -524,9 +524,16 @@ const CampaignWizard = ({
                   className="w-full px-4 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
                 >
                   <option value="">Select a number</option>
-                  {registeredPhones.map((p: any) => (
-                    <option key={p.id} value={p.phoneNumber}>{p.phoneNumber}</option>
-                  ))}
+                  {registeredPhones
+                    .filter((p: any) => {
+                      if (formData.type === 'voice') return !p.type || p.type === 'calls'
+                      return p.type === 'messages'
+                    })
+                    .map((p: any) => (
+                      <option key={p.id} value={p.phoneNumber}>
+                        {p.phoneNumber} {p.name ? `(${p.name})` : ''}
+                      </option>
+                    ))}
                 </select>
               </div>
 
@@ -1083,7 +1090,7 @@ export default function CampaignsView() {
 
   const loadPhoneNumbers = async () => {
     try {
-      const res = await fetch('/api/phones?type=calls')
+      const res = await fetch('/api/phones')
       const data = await res.json()
       if (data.phones) setPhoneNumbers(data.phones)
     } catch (e) {
