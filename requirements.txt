@@ -31,3 +31,6 @@ webrtcvad-wheels
 
 # Deepgram STT/TTS
 deepgram-sdk>=3.0.0
+
+# Excel parsing for Campaigns
+openpyxl>=3.1.0

@@ -33,7 +33,8 @@ class MongoDBCallStore:
     
     async def create_call(self, call_sid: str, from_number: str, to_number: str, 
                          agent_id: Optional[str] = None, session_id: Optional[str] = None,
-                         scheduled_call_id: Optional[str] = None, is_scheduled: bool = False) -> bool:
+                         scheduled_call_id: Optional[str] = None, is_scheduled: bool = False,
+                         campaign_id: Optional[str] = None, campaign_item_id: Optional[str] = None) -> bool:
         """Create a new call record when call starts
         
         Handles edge cases:
@@ -77,7 +78,9 @@ class MongoDBCallStore:
                 "created_at": now,
                 "updated_at": now,
                 "scheduled_call_id": scheduled_call_id,
-                "is_scheduled": is_scheduled
+                "is_scheduled": is_scheduled,
+                "campaign_id": campaign_id,
+                "campaign_item_id": campaign_item_id
             }
             
             await collection.insert_one(call_doc)
@@ -397,4 +400,130 @@ class MongoDBCallStore:
         except Exception as e:
             logger.error(f"Error getting calls for user: {e}")
             return []
+
+    # ==================== SESSION METHODS (merged from conversation_store) ====================
+    
+    async def save_session(self, session_id: str, session_data: Dict[str, Any], 
+                          agent_id: Optional[str] = None) -> bool:
+        """Save or update a conversation session (for AI context)
+        
+        This merges conversation_store functionality into call_store.
+        Sessions are stored with transcript data for AI context.
+        """
+        if not is_mongodb_available():
+            logger.debug("MongoDB not available, skipping session save")
+            return False
+        
+        try:
+            collection = self._get_collection()
+            if collection is None:
+                return False
+            
+            now = datetime.utcnow().isoformat()
+            
+            # Convert conversation_history to transcript format
+            conversation_history = session_data.get("conversation_history", [])
+            transcript = []
+            for item in conversation_history:
+                if item.get("user_input"):
+                    transcript.append({
+                        "role": "user",
+                        "text": item["user_input"],
+                        "timestamp": item.get("timestamp", now)
+                    })
+                if item.get("agent_response"):
+                    transcript.append({
+                        "role": "assistant",
+                        "text": item["agent_response"],
+                        "timestamp": item.get("timestamp", now)
+                    })
+            
+            # Build document for upsert
+            doc = {
+                "session_id": session_id,
+                "agent_id": agent_id,
+                "from_number": session_data.get("customer_id", "unknown"),
+                "to_number": agent_id or "unknown",
+                "status": session_data.get("status", "active"),
+                "transcript": transcript,
+                "persona": session_data.get("persona"),
+                "state": session_data.get("state"),
+                "customer_info": session_data.get("customer_info", {}),
+                "order_items": session_data.get("order_items", []),
+                "created_at": session_data.get("created_at", now),
+                "updated_at": now
+            }
+            
+            # Upsert by session_id
+            await collection.update_one(
+                {"session_id": session_id},
+                {"$set": doc},
+                upsert=True
+            )
+            
+            logger.debug(f"Saved session {session_id} to calls collection")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error saving session: {e}", exc_info=True)
+            return False
+    
+    async def load_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Load a conversation session from MongoDB
+        
+        Returns session_data format for backward compatibility.
+        """
+        if not is_mongodb_available():
+            return None
+        
+        try:
+            collection = self._get_collection()
+            if collection is None:
+                return None
+            
+            doc = await collection.find_one({"session_id": session_id})
+            if doc is None:
+                return None
+            
+            # Convert transcript back to conversation_history format
+            transcript = doc.get("transcript", [])
+            conversation_history = []
+            i = 0
+            while i < len(transcript):
+                entry = {"timestamp": transcript[i].get("timestamp", "")}
+                if transcript[i].get("role") == "user":
+                    entry["user_input"] = transcript[i].get("text", "")
+                    if i + 1 < len(transcript) and transcript[i + 1].get("role") == "assistant":
+                        entry["agent_response"] = transcript[i + 1].get("text", "")
+                        i += 2
+                    else:
+                        entry["agent_response"] = ""
+                        i += 1
+                else:
+                    entry["user_input"] = ""
+                    entry["agent_response"] = transcript[i].get("text", "")
+                    i += 1
+                conversation_history.append(entry)
+            
+            # Return in session_data format
+            session_data = {
+                "session_id": doc.get("session_id"),
+                "customer_id": doc.get("from_number"),
+                "persona": doc.get("persona"),
+                "status": doc.get("status", "active"),
+                "state": doc.get("state"),
+                "conversation_history": conversation_history,
+                "order_items": doc.get("order_items", []),
+                "customer_info": doc.get("customer_info", {}),
+                "created_at": doc.get("created_at"),
+                "last_activity": doc.get("updated_at"),
+            }
+            
+            logger.debug(f"Loaded session {session_id} from calls collection")
+            return session_data
+            
+        except Exception as e:
+            logger.error(f"Error loading session: {e}", exc_info=True)
+            return None
+
 

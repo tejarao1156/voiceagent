@@ -275,6 +275,16 @@ async def startup_event():
         logger.info("✅ Scheduled Call Worker initialized and started")
     except Exception as e:
         logger.error(f"❌ Failed to start Scheduled Call Worker: {e}")
+    
+    # Start Campaign Worker
+    try:
+        from utils.campaign_worker import get_campaign_worker
+        campaign_worker = get_campaign_worker()
+        await campaign_worker.start()
+        app.state.campaign_worker = campaign_worker
+        logger.info("✅ Campaign Worker initialized and started")
+    except Exception as e:
+        logger.error(f"❌ Failed to start Campaign Worker: {e}")
     logger.info("="*50)
 
 # ============================================================================
@@ -431,6 +441,31 @@ async def mongodb_health_check(request: Request):
             "timestamp": datetime.utcnow().isoformat()
         }
         return _cache_mongodb_health(payload)
+
+
+@app.get(
+    "/api/feature-flags",
+    summary="Get Feature Flags",
+    description="Get feature flags configuration for UI feature visibility",
+    tags=["Configuration"]
+)
+async def get_feature_flags():
+    """
+    Returns feature flags that control UI visibility.
+    
+    States:
+    - "enabled": Feature fully visible and functional
+    - "coming_soon": Tab visible with badge, content disabled
+    - "disabled": Tab completely hidden
+    """
+    from feature_flags import get_feature_flags, TAB_MAPPING, ALWAYS_ENABLED_TABS
+    
+    return {
+        "success": True,
+        "features": get_feature_flags(),
+        "tabMapping": TAB_MAPPING,
+        "alwaysEnabled": ALWAYS_ENABLED_TABS
+    }
 
 
 @app.get(
@@ -1014,8 +1049,8 @@ async def start_conversation(
         session_data["created_at"] = created_at
         
         # Save to MongoDB
-        from databases.mongodb_conversation_store import MongoDBConversationStore
-        mongo_store = MongoDBConversationStore()
+        from databases.mongodb_call_store import MongoDBCallStore
+        mongo_store = MongoDBCallStore()
         await mongo_store.save_session(session_id, session_data)
         
         # Return prompt if it was provided, otherwise return persona for backward compatibility
@@ -1073,8 +1108,8 @@ async def process_conversation(
         persona_name = persona_identifier
         
         # Load session from MongoDB if session_id provided, otherwise create new
-        from databases.mongodb_conversation_store import MongoDBConversationStore
-        mongo_store = MongoDBConversationStore()
+        from databases.mongodb_call_store import MongoDBCallStore
+        mongo_store = MongoDBCallStore()
         
         session_identifier = request.resolved_session_id()
         if session_identifier:
@@ -1935,10 +1970,15 @@ async def twilio_incoming_call(request: Request):
         
         phone_store = MongoDBPhoneStore()
         
-        # Extract query parameters (for scheduled calls)
+        # Extract query parameters (for scheduled calls and campaigns)
         query_params = request.query_params
         scheduled_call_id = query_params.get("scheduled_call_id")
         is_scheduled = query_params.get("is_scheduled") == "true"
+        campaign_id = query_params.get("campaign_id")
+        campaign_item_id = query_params.get("campaign_item_id")
+        
+        if campaign_id:
+            logger.info(f"📢 Processing CAMPAIGN call (Campaign: {campaign_id}, Item: {campaign_item_id})")
         
         # If this is a scheduled call, we DON'T need to look up an active agent.
         # We should use the configuration defined in the scheduled call itself.
@@ -2052,7 +2092,9 @@ async def twilio_incoming_call(request: Request):
                 to_number=to_number or "unknown",
                 agent_id=agent_id_for_call,
                 scheduled_call_id=scheduled_call_id,
-                is_scheduled=is_scheduled
+                is_scheduled=is_scheduled,
+                campaign_id=campaign_id,
+                campaign_item_id=campaign_item_id
             )
             
             if success:
@@ -2682,6 +2724,15 @@ async def twilio_call_status(request: Request):
 
             except Exception as db_error:
                 logger.error(f"❌ Database error in status webhook: {db_error}", exc_info=True)
+            
+            # Update campaign pending items (for completion-based waiting)
+            try:
+                from databases.mongodb_campaign_pending_store import MongoDBCampaignPendingStore
+                pending_store = MongoDBCampaignPendingStore()
+                await pending_store.mark_completed(call_sid, status)
+                logger.info(f"📋 Marked pending campaign item {call_sid} as {status}")
+            except Exception as pending_error:
+                logger.debug(f"No pending item for {call_sid}: {pending_error}")
         
         # Clean up stream handlers if call is ending
         if status in ["completed", "failed", "busy", "no-answer", "canceled"]:
@@ -3457,16 +3508,39 @@ async def list_agents(
             logger.warning("MongoDB is not available - returning empty agents list")
             return {"success": True, "agents": [], "count": 0, "mongodb_available": False}
         
+        # Get Voice Agents
         agent_store = MongoDBAgentStore()
         # Filter by user_id for multi-tenancy
-        agents = await agent_store.list_agents(
+        voice_agents = await agent_store.list_agents(
             active_only=active_only, 
             include_deleted=include_deleted,
             user_id=user["user_id"]
         )
         
-        logger.info(f"✅ User {user['email']} - Returning {len(agents)} agent(s) from MongoDB (active_only={active_only}, include_deleted={include_deleted})")
-        return {"success": True, "agents": agents, "count": len(agents), "mongodb_available": True}
+        # Get Messaging Agents
+        messaging_agents = []
+        try:
+            from databases.mongodb_message_agent_store import MongoDBMessageAgentStore
+            message_agent_store = MongoDBMessageAgentStore()
+            messaging_agents = await message_agent_store.list_message_agents(
+                active_only=active_only,
+                include_deleted=include_deleted,
+                user_id=user["user_id"]
+            )
+        except Exception as e:
+            logger.error(f"Error fetching messaging agents: {e}")
+            
+        # Label and combine
+        for agent in voice_agents:
+            agent["type"] = "voice"
+            
+        for agent in messaging_agents:
+            agent["type"] = "message"
+            
+        all_agents = voice_agents + messaging_agents
+        
+        logger.info(f"✅ User {user['email']} - Returning {len(all_agents)} total agent(s) (Voice: {len(voice_agents)}, Message: {len(messaging_agents)})")
+        return {"success": True, "agents": all_agents, "count": len(all_agents), "mongodb_available": True}
         
     except Exception as e:
         logger.error(f"Error listing agents: {e}", exc_info=True)
@@ -5205,6 +5279,821 @@ async def make_outbound_call(request: Request, user: Dict[str, Any] = Depends(ge
         elif "not found" in error_detail.lower() or "404" in error_detail:
             error_detail = f"Resource not found: {error_detail}. Please verify the phone numbers are correct."
         raise HTTPException(status_code=500, detail=f"Failed to make outbound call: {error_detail}")
+
+# ============================================================================
+# CONTACT LIST ENDPOINTS
+# ============================================================================
+
+@app.get(
+    "/api/contact-lists",
+    summary="List Contact Lists",
+    description="Get all contact lists for the current user",
+    tags=["Contact Lists"]
+)
+async def list_contact_lists(
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """List all contact lists"""
+    try:
+        from databases.mongodb_contact_list_store import MongoDBContactListStore
+        store = MongoDBContactListStore()
+        lists = await store.list_lists(user["user_id"])
+        return {"success": True, "lists": lists}
+    except Exception as e:
+        logger.error(f"Error listing contact lists: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
+    "/api/contact-lists",
+    summary="Create Contact List",
+    description="Create a new contact list",
+    tags=["Contact Lists"]
+)
+async def create_contact_list(
+    data: Dict[str, Any] = Body(...),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Create a new contact list"""
+    try:
+        from databases.mongodb_contact_list_store import MongoDBContactListStore
+        store = MongoDBContactListStore()
+        
+        list_id = await store.create_list(
+            name=data.get("name", "Untitled List"),
+            user_id=user["user_id"],
+            description=data.get("description", "")
+        )
+        
+        if not list_id:
+            raise HTTPException(status_code=500, detail="Failed to create list")
+        
+        return {"success": True, "list_id": list_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating contact list: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/api/contact-lists/{list_id}",
+    summary="Get Contact List",
+    description="Get contact list details",
+    tags=["Contact Lists"]
+)
+async def get_contact_list(
+    list_id: str,
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Get contact list by ID"""
+    try:
+        from databases.mongodb_contact_list_store import MongoDBContactListStore
+        store = MongoDBContactListStore()
+        
+        contact_list = await store.get_list(list_id, user["user_id"])
+        if not contact_list:
+            raise HTTPException(status_code=404, detail="Contact list not found")
+        
+        return {"success": True, "list": contact_list}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting contact list: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put(
+    "/api/contact-lists/{list_id}",
+    summary="Update Contact List",
+    description="Update contact list metadata",
+    tags=["Contact Lists"]
+)
+async def update_contact_list(
+    list_id: str,
+    data: Dict[str, Any] = Body(...),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Update contact list"""
+    try:
+        from databases.mongodb_contact_list_store import MongoDBContactListStore
+        store = MongoDBContactListStore()
+        
+        allowed = {"name", "description"}
+        update_data = {k: v for k, v in data.items() if k in allowed}
+        
+        success = await store.update_list(list_id, update_data, user["user_id"])
+        if not success:
+            raise HTTPException(status_code=404, detail="Contact list not found")
+        
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating contact list: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete(
+    "/api/contact-lists/{list_id}",
+    summary="Delete Contact List",
+    description="Delete a contact list",
+    tags=["Contact Lists"]
+)
+async def delete_contact_list(
+    list_id: str,
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Delete contact list"""
+    try:
+        from databases.mongodb_contact_list_store import MongoDBContactListStore
+        store = MongoDBContactListStore()
+        
+        success = await store.delete_list(list_id, user["user_id"])
+        if not success:
+            raise HTTPException(status_code=404, detail="Contact list not found")
+        
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting contact list: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# NOTE: Upload history endpoint removed - contacts stored in single array
+
+
+@app.post(
+    "/api/contact-lists/{list_id}/upload",
+    summary="Upload Contacts to List",
+    description="Upload Excel file to add contacts to a list",
+    tags=["Contact Lists"]
+)
+async def upload_contacts_to_list(
+    list_id: str,
+    file: UploadFile = File(...),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Upload Excel and add contacts to list"""
+    try:
+        import openpyxl
+        from io import BytesIO
+        from databases.mongodb_contact_list_store import MongoDBContactListStore
+        from utils.phone_validator import process_phone_list, get_phone_stats
+        
+        store = MongoDBContactListStore()
+        
+        # Verify list exists
+        contact_list = await store.get_list(list_id, user["user_id"])
+        if not contact_list:
+            raise HTTPException(status_code=404, detail="Contact list not found")
+        
+        # Parse Excel
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            raise HTTPException(status_code=400, detail="File must be Excel (.xlsx)")
+        
+        contents = await file.read()
+        wb = openpyxl.load_workbook(BytesIO(contents), read_only=True)
+        ws = wb.active
+        
+        # Find phone and name columns
+        headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+        phone_col = None
+        name_col = None
+        
+        for idx, header in enumerate(headers):
+            if header:
+                h = str(header).lower()
+                if 'phone' in h:
+                    phone_col = idx
+                elif 'name' in h:
+                    name_col = idx
+        
+        if phone_col is None:
+            raise HTTPException(status_code=400, detail="Excel must have a 'phone' column")
+        
+        # Extract data
+        raw_phones = []
+        names = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if row[phone_col]:
+                raw_phones.append(str(row[phone_col]).strip())
+                names.append(str(row[name_col]).strip() if name_col and row[name_col] else "")
+        
+        wb.close()
+        
+        logger.info(f"📊 Excel parsing: Found {len(raw_phones)} phone numbers in column '{headers[phone_col]}'")
+        
+        if not raw_phones:
+            raise HTTPException(status_code=400, detail="No phone numbers found in file")
+        
+        # Process and validate
+        processed = process_phone_list(raw_phones)
+        
+        # Add names
+        for i, item in enumerate(processed):
+            item["name"] = names[i] if i < len(names) else ""
+        
+        # Log validation results
+        valid_count = sum(1 for p in processed if p.get("status") == "active")
+        invalid_count = sum(1 for p in processed if p.get("status") == "invalid")
+        logger.info(f"📊 Phone validation: {valid_count} valid, {invalid_count} invalid")
+        
+        # Add to database with upload metadata
+        result = await store.add_contacts(
+            list_id, 
+            processed,
+            filename=file.filename,
+            user_id=user["user_id"]
+        )
+        stats = get_phone_stats(processed)
+        
+        return {
+            "success": True,
+            "filename": file.filename,
+            "processed": len(processed),
+            "raw_extracted": len(raw_phones),
+            "stats": stats,
+            "result": result
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading contacts: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
+    "/api/contact-lists/{list_id}/delete-upload",
+    summary="Delete Contacts via Excel Upload",
+    description="Upload an Excel file to delete matching contacts from the list",
+    tags=["Contact Lists"]
+)
+async def delete_contacts_via_upload(
+    list_id: str,
+    file: UploadFile = File(...),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Upload Excel and delete matching contacts from list"""
+    try:
+        import openpyxl
+        from io import BytesIO
+        from databases.mongodb_contact_list_store import MongoDBContactListStore
+        
+        store = MongoDBContactListStore()
+        
+        # Verify list exists and belongs to user
+        contact_list = await store.get_list(list_id, user["user_id"])
+        if not contact_list:
+            raise HTTPException(status_code=404, detail="Contact list not found")
+        
+        # Parse Excel
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            raise HTTPException(status_code=400, detail="File must be Excel (.xlsx)")
+        
+        contents = await file.read()
+        wb = openpyxl.load_workbook(BytesIO(contents), read_only=True)
+        ws = wb.active
+        
+        # Find phone column
+        headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+        phone_col = None
+        
+        for idx, header in enumerate(headers):
+            if header:
+                h = str(header).lower()
+                if 'phone' in h:
+                    phone_col = idx
+                    break
+        
+        if phone_col is None:
+            raise HTTPException(status_code=400, detail="Excel must have a 'phone' column")
+        
+        # Extract phone numbers
+        phone_numbers = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if row[phone_col]:
+                phone_numbers.append(str(row[phone_col]).strip())
+        
+        wb.close()
+        
+        if not phone_numbers:
+            raise HTTPException(status_code=400, detail="No phone numbers found in file")
+        
+        # Bulk delete by matching phone numbers
+        result = await store.delete_contacts_by_phones(list_id, phone_numbers)
+        
+        return {
+            "success": True,
+            "filename": file.filename,
+            "phones_in_file": len(phone_numbers),
+            "deleted": result["deleted"],
+            "not_found": result["not_found"]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting contacts via upload: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/api/contact-lists/{list_id}/contacts",
+    summary="Get Contacts",
+    description="Get contacts from a list with pagination",
+    tags=["Contact Lists"]
+)
+async def get_list_contacts(
+    list_id: str,
+    status: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Get contacts from list"""
+    try:
+        from databases.mongodb_contact_list_store import MongoDBContactListStore
+        store = MongoDBContactListStore()
+        
+        # Verify access
+        contact_list = await store.get_list(list_id, user["user_id"])
+        if not contact_list:
+            raise HTTPException(status_code=404, detail="Contact list not found")
+        
+        contacts = await store.get_contacts(list_id, status=status, limit=limit, offset=offset, search=search)
+        
+        return {"success": True, "contacts": contacts, "total": contact_list.get("contact_count", 0)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting contacts: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
+    "/api/contact-lists/{list_id}/contacts",
+    summary="Add Contacts",
+    description="Add one or more contacts to a list",
+    tags=["Contact Lists"]
+)
+async def add_contacts(
+    list_id: str,
+    data: Dict[str, Any] = Body(...),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Add contacts (single or bulk)"""
+    try:
+        from databases.mongodb_contact_list_store import MongoDBContactListStore
+        from utils.phone_validator import process_phone_list
+        
+        store = MongoDBContactListStore()
+        
+        # Verify access
+        contact_list = await store.get_list(list_id, user["user_id"])
+        if not contact_list:
+            raise HTTPException(status_code=404, detail="Contact list not found")
+        
+        contacts_to_add = []
+        
+        # Check for bulk payload
+        if "contacts" in data and isinstance(data["contacts"], list):
+            # Frontend sends: [{original: '...', name: '', metadata: {}}]
+            raw_list = []
+            for item in data["contacts"]:
+                # Ensure we handle missing 'original' key to keep indices aligned
+                raw_list.append(item.get("original", ""))
+            
+            # Process phones
+            processed = process_phone_list(raw_list)
+            
+            # Merge back names/metadata
+            for i, p_item in enumerate(processed):
+                if i < len(data["contacts"]):
+                    orig_item = data["contacts"][i]
+                    p_item["name"] = orig_item.get("name", "")
+                    p_item["metadata"] = orig_item.get("metadata", {})
+            
+            contacts_to_add = processed
+            
+        else:
+            # Single contact legacy/simple mode
+            phone = data.get("phone_number", "")
+            if not phone:
+                raise HTTPException(status_code=400, detail="Phone number required")
+            
+            processed = process_phone_list([phone])
+            processed[0]["name"] = data.get("name", "")
+            processed[0]["metadata"] = data.get("metadata", {})
+            contacts_to_add = processed
+        
+        if not contacts_to_add:
+             raise HTTPException(status_code=400, detail="No valid contacts provided")
+
+        result = await store.add_contacts(list_id, contacts_to_add)
+        
+        return {"success": True, "result": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding contact: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# NOTE: Individual contact update/delete endpoints removed
+# Use bulk delete via /delete-upload or direct phones array manipulation
+
+
+# NOTE: Versions endpoint removed - versioning system eliminated
+
+
+# ============================================================================
+# CAMPAIGN ENDPOINTS
+# ============================================================================
+
+@app.post(
+    "/api/campaigns/upload",
+    summary="Upload Excel for Campaign",
+    description="Upload an Excel file with phone numbers and get a preview count",
+    tags=["Campaigns"]
+)
+async def upload_campaign_file(
+    file: UploadFile = File(...),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Upload and parse Excel file for campaign"""
+    try:
+        import openpyxl
+        from io import BytesIO
+        
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            raise HTTPException(status_code=400, detail="File must be an Excel file (.xlsx or .xls)")
+        
+        contents = await file.read()
+        wb = openpyxl.load_workbook(BytesIO(contents), read_only=True)
+        ws = wb.active
+        
+        # Find phone number column (case insensitive)
+        phone_col = None
+        headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+        for idx, header in enumerate(headers):
+            if header and 'phone' in str(header).lower():
+                phone_col = idx
+                break
+        
+        if phone_col is None:
+            raise HTTPException(status_code=400, detail="Excel must have a column containing 'phone' in the header")
+        
+        # Extract phone numbers
+        phone_numbers = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if row[phone_col]:
+                phone_numbers.append(str(row[phone_col]).strip())
+        
+        wb.close()
+        
+        return {
+            "success": True,
+            "count": len(phone_numbers),
+            "phone_numbers": phone_numbers,
+            "filename": file.filename
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error parsing Excel file: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to parse Excel file: {str(e)}")
+
+
+@app.post(
+    "/api/campaigns",
+    summary="Create Campaign",
+    description="Create a new campaign with phone numbers",
+    tags=["Campaigns"]
+)
+async def create_campaign(
+    campaign_data: Dict[str, Any] = Body(...),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Create a new campaign"""
+    try:
+        from databases.mongodb_campaign_store import MongoDBCampaignStore
+        
+        store = MongoDBCampaignStore()
+        campaign_id = await store.create_campaign(campaign_data, user["user_id"])
+        
+        if not campaign_id:
+            raise HTTPException(status_code=500, detail="Failed to create campaign")
+        
+        return {"success": True, "campaign_id": campaign_id}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating campaign: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/api/campaigns",
+    summary="List Campaigns",
+    description="Get all campaigns for the current user",
+    tags=["Campaigns"]
+)
+async def list_campaigns(
+    campaign_type: Optional[str] = Query(None, description="Filter by type: voice, sms, whatsapp"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """List all campaigns"""
+    try:
+        from databases.mongodb_campaign_store import MongoDBCampaignStore
+        
+        store = MongoDBCampaignStore()
+        campaigns = await store.list_campaigns(
+            user_id=user["user_id"],
+            campaign_type=campaign_type,
+            status=status
+        )
+        
+        return {"success": True, "campaigns": campaigns}
+        
+    except Exception as e:
+        logger.error(f"Error listing campaigns: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/api/campaigns/{campaign_id}",
+    summary="Get Campaign",
+    description="Get campaign details including stats",
+    tags=["Campaigns"]
+)
+async def get_campaign(
+    campaign_id: str,
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Get campaign by ID"""
+    try:
+        from databases.mongodb_campaign_store import MongoDBCampaignStore
+        
+        store = MongoDBCampaignStore()
+        campaign = await store.get_campaign(campaign_id, user["user_id"])
+        
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        
+        # Get queue results for detail view
+        from databases.mongodb_campaign_queue_store import MongoDBCampaignQueueStore
+        queue_store = MongoDBCampaignQueueStore()
+        results = await queue_store.get_results(campaign_id)
+        if results:
+            campaign["queue_results"] = {
+                "success_count": results.get("success_count", 0),
+                "failed_count": results.get("failed_count", 0),
+                "total": results.get("total", 0),
+                "processed": results.get("processed", 0)
+            }
+        
+        return {"success": True, "campaign": campaign}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting campaign: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
+    "/api/campaigns/{campaign_id}/start",
+    summary="Start Campaign",
+    description="Start executing a campaign",
+    tags=["Campaigns"]
+)
+async def start_campaign(
+    campaign_id: str,
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Start a campaign"""
+    try:
+        from databases.mongodb_campaign_store import MongoDBCampaignStore
+        
+        store = MongoDBCampaignStore()
+        campaign = await store.get_campaign(campaign_id, user["user_id"])
+        
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        
+        if campaign["status"] not in ["draft", "paused"]:
+            raise HTTPException(status_code=400, detail=f"Cannot start campaign with status: {campaign['status']}")
+        
+        # Update status to running - the worker will pick it up
+        await store.update_campaign(campaign_id, {"status": "running"})
+        
+        return {"success": True, "message": "Campaign started"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting campaign: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
+    "/api/campaigns/{campaign_id}/pause",
+    summary="Pause Campaign",
+    description="Pause a running campaign",
+    tags=["Campaigns"]
+)
+async def pause_campaign(
+    campaign_id: str,
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Pause a campaign"""
+    try:
+        from databases.mongodb_campaign_store import MongoDBCampaignStore
+        
+        store = MongoDBCampaignStore()
+        campaign = await store.get_campaign(campaign_id, user["user_id"])
+        
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        
+        if campaign["status"] != "running":
+            raise HTTPException(status_code=400, detail="Can only pause running campaigns")
+        
+        await store.update_campaign(campaign_id, {"status": "paused"})
+        
+        return {"success": True, "message": "Campaign paused"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error pausing campaign: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete(
+    "/api/campaigns/{campaign_id}",
+    summary="Delete Campaign",
+    description="Delete a campaign",
+    tags=["Campaigns"]
+)
+async def delete_campaign(
+    campaign_id: str,
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Delete a campaign"""
+    try:
+        from databases.mongodb_campaign_store import MongoDBCampaignStore
+        
+        store = MongoDBCampaignStore()
+        success = await store.delete_campaign(campaign_id, user["user_id"])
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Campaign not found or already deleted")
+        
+        return {"success": True, "message": "Campaign deleted"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting campaign: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
+    "/api/campaigns/{campaign_id}/schedule",
+    summary="Schedule Campaign",
+    description="Schedule a draft campaign for future execution",
+    tags=["Campaigns"]
+)
+async def schedule_campaign(
+    campaign_id: str,
+    schedule_data: Dict[str, Any] = Body(...),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Schedule a campaign for future execution"""
+    try:
+        from databases.mongodb_campaign_store import MongoDBCampaignStore
+        
+        scheduled_at = schedule_data.get("scheduled_at")
+        if not scheduled_at:
+            raise HTTPException(status_code=400, detail="scheduled_at is required")
+        
+        store = MongoDBCampaignStore()
+        
+        # Verify campaign exists and belongs to user
+        campaign = await store.get_campaign(campaign_id, user["user_id"])
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        
+        if campaign["status"] != "draft":
+            raise HTTPException(status_code=400, detail=f"Can only schedule draft campaigns. Current status: {campaign['status']}")
+        
+        success = await store.schedule_campaign(campaign_id, scheduled_at, user["user_id"])
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to schedule campaign")
+        
+        return {"success": True, "message": f"Campaign scheduled for {scheduled_at}"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error scheduling campaign: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/api/campaigns/{campaign_id}/executions",
+    summary="Get Campaign Executions",
+    description="Get execution logs for a campaign",
+    tags=["Campaigns"]
+)
+async def get_campaign_executions(
+    campaign_id: str,
+    exec_type: Optional[str] = Query(None, description="Filter by type: sms, whatsapp, voice"),
+    status: Optional[str] = Query(None, description="Filter by status: sent, failed, called"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Get execution history for a campaign"""
+    try:
+        from databases.mongodb_campaign_store import MongoDBCampaignStore
+        from databases.mongodb_campaign_execution_store import MongoDBCampaignExecutionStore
+        
+        campaign_store = MongoDBCampaignStore()
+        execution_store = MongoDBCampaignExecutionStore()
+        
+        # Verify campaign exists and belongs to user
+        campaign = await campaign_store.get_campaign(campaign_id, user["user_id"])
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        
+        executions = await execution_store.get_executions(
+            campaign_id=campaign_id,
+            exec_type=exec_type,
+            status=status,
+            limit=limit,
+            offset=offset
+        )
+        
+        # Get stats
+        stats = await execution_store.get_execution_stats(campaign_id)
+        
+        return {
+            "success": True,
+            "executions": executions,
+            "stats": stats,
+            "campaign": {
+                "id": campaign["id"],
+                "name": campaign.get("name"),
+                "status": campaign.get("status"),
+                "progress_percent": campaign.get("progress_percent", 0)
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting campaign executions: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/api/campaign-executions",
+    summary="List All Executions",
+    description="Get all campaign execution logs for the current user",
+    tags=["Campaigns"]
+)
+async def list_all_executions(
+    exec_type: Optional[str] = Query(None, description="Filter by type: sms, whatsapp, voice"),
+    limit: int = Query(100, ge=1, le=1000),
+    user: Dict[str, Any] = Depends(get_current_active_user)
+):
+    """Get all campaign executions for user"""
+    try:
+        from databases.mongodb_campaign_execution_store import MongoDBCampaignExecutionStore
+        
+        store = MongoDBCampaignExecutionStore()
+        executions = await store.get_executions_for_user(
+            user_id=user["user_id"],
+            exec_type=exec_type,
+            limit=limit
+        )
+        
+        return {"success": True, "executions": executions}
+        
+    except Exception as e:
+        logger.error(f"Error listing executions: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============================================================================
 # ERROR HANDLERS

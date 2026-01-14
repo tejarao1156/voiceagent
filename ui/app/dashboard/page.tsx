@@ -48,8 +48,13 @@ import {
   DollarSign,
   LogOut,
   Moon,
-  PhoneOff
+  PhoneOff,
+  Megaphone
 } from 'lucide-react'
+
+// Import CampaignsView
+import CampaignsView from '../../components/dashboard/CampaignsView'
+
 // import { useTheme } from '../components/ThemeProvider'
 
 // --- Components ---
@@ -88,23 +93,48 @@ const StatCard = ({ icon: Icon, label, value, trend, color, delay }: any) => (
   </LightGlassCard>
 )
 
-const NavItem = ({ icon: Icon, label, active, onClick }: any) => (
+const NavItem = ({ icon: Icon, label, active, onClick, badge, disabled }: any) => (
   <button
-    onClick={onClick}
-    className={`relative flex w-full items-center space-x-3 rounded-xl px-4 py-3 text-sm font-medium transition-all duration-200 ${active
-      ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400 shadow-md shadow-slate-200/50 dark:shadow-slate-900/50'
-      : 'text-slate-500 dark:text-slate-400 hover:bg-white/50 dark:hover:bg-slate-800/50 hover:text-slate-800 dark:hover:text-slate-200'
+    onClick={disabled ? undefined : onClick}
+    className={`relative flex w-full items-center space-x-3 rounded-xl px-4 py-3 text-sm font-medium transition-all duration-200 ${disabled
+      ? 'text-slate-400 dark:text-slate-500 cursor-not-allowed opacity-60'
+      : active
+        ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400 shadow-md shadow-slate-200/50 dark:shadow-slate-900/50'
+        : 'text-slate-500 dark:text-slate-400 hover:bg-white/50 dark:hover:bg-slate-800/50 hover:text-slate-800 dark:hover:text-slate-200'
       }`}
   >
     <Icon className={`h-5 w-5 ${active ? 'text-blue-600' : 'text-slate-400'}`} />
     <span>{label}</span>
-    {active && (
+    {badge && (
+      <span className="ml-auto px-2 py-0.5 text-[10px] font-bold uppercase rounded-full bg-amber-100 text-amber-700">
+        {badge}
+      </span>
+    )}
+    {active && !disabled && (
       <motion.div
         layoutId="activeNavLight"
         className="absolute left-0 h-6 w-1 rounded-r-full bg-blue-500"
       />
     )}
   </button>
+)
+
+// Coming Soon View - displayed when feature is marked as coming_soon
+const ComingSoonView = ({ featureName }: { featureName: string }) => (
+  <div className="flex flex-col items-center justify-center py-20 px-4">
+    <div className="relative mb-6">
+      <div className="absolute inset-0 bg-gradient-to-r from-blue-400 to-purple-500 blur-2xl opacity-20 rounded-full" />
+      <div className="relative text-7xl">🚀</div>
+    </div>
+    <h2 className="text-3xl font-black text-slate-800 mb-3 text-center">Coming Soon</h2>
+    <p className="text-lg text-slate-500 mb-6 text-center max-w-md">
+      <span className="font-bold text-blue-600">{featureName}</span> is currently under development.
+    </p>
+    <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-amber-50 border border-amber-200">
+      <div className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+      <span className="text-sm font-medium text-amber-700">In Development</span>
+    </div>
+  </div>
 )
 
 // --- Views ---
@@ -4965,9 +4995,49 @@ export default function FuturisticDemo() {
   const [isLoaded, setIsLoaded] = useState(false)
   const [showProfileMenu, setShowProfileMenu] = useState(false)
 
+  // Feature flags state
+  const [featureFlags, setFeatureFlags] = useState<Record<string, string>>({})
+  const [tabMapping, setTabMapping] = useState<Record<string, string[]>>({})
+  const [alwaysEnabled, setAlwaysEnabled] = useState<string[]>([])
+
   useEffect(() => {
     setIsLoaded(true)
+
+    // Fetch feature flags on load
+    fetch('/api/feature-flags')
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          setFeatureFlags(data.features || {})
+          setTabMapping(data.tabMapping || {})
+          setAlwaysEnabled(data.alwaysEnabled || [])
+        }
+      })
+      .catch(err => console.error('Error loading feature flags:', err))
   }, [])
+
+  // Helper: Get the state of a specific tab
+  const getTabState = (tabId: string): 'enabled' | 'coming_soon' | 'disabled' => {
+    // Check if always enabled
+    if (alwaysEnabled.includes(tabId)) return 'enabled'
+
+    // Find which feature group this tab belongs to
+    for (const [featureKey, tabs] of Object.entries(tabMapping)) {
+      if (tabs.includes(tabId)) {
+        const state = featureFlags[featureKey]
+        if (state === 'disabled') return 'disabled'
+        if (state === 'coming_soon') return 'coming_soon'
+        return 'enabled'
+      }
+    }
+    return 'enabled' // Default to enabled if not found
+  }
+
+  // Helper: Check if tab should be shown
+  const shouldShowTab = (tabId: string) => getTabState(tabId) !== 'disabled'
+
+  // Helper: Check if tab is coming soon
+  const isComingSoon = (tabId: string) => getTabState(tabId) === 'coming_soon'
 
   const handleLogout = async () => {
     try {
@@ -5009,22 +5079,55 @@ export default function FuturisticDemo() {
 
           <nav className="flex-1 px-4 space-y-1 mt-6 overflow-y-auto">
             <div className="text-xs font-bold text-slate-400 uppercase tracking-wider px-4 mb-3">Platform</div>
+            {/* Dashboard - always enabled */}
             <NavItem icon={BarChart3} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
 
+            {/* Voice features */}
+            {shouldShowTab('incoming-agent') && (
+              <NavItem icon={PhoneIncoming} label="Incoming Agent" active={activeTab === 'incoming-agent'} onClick={() => setActiveTab('incoming-agent')} badge={isComingSoon('incoming-agent') ? 'Soon' : undefined} />
+            )}
 
-            <NavItem icon={PhoneIncoming} label="Incoming Agent" active={activeTab === 'incoming-agent'} onClick={() => setActiveTab('incoming-agent')} />
-            <NavItem icon={PhoneOutgoing} label="Outgoing Agent" active={activeTab === 'outgoing-agent'} onClick={() => setActiveTab('outgoing-agent')} />
-            <NavItem icon={Bot} label="AI Chat" active={activeTab === 'ai-chat'} onClick={() => setActiveTab('ai-chat')} />
+            {/* AI Chat features */}
+            {shouldShowTab('ai-chat') && (
+              <NavItem icon={Bot} label="AI Chat" active={activeTab === 'ai-chat'} onClick={() => setActiveTab('ai-chat')} badge={isComingSoon('ai-chat') ? 'Soon' : undefined} />
+            )}
+
+            {/* Campaigns */}
+            {shouldShowTab('campaigns') && (
+              <NavItem icon={Megaphone} label="Campaigns" active={activeTab === 'campaigns'} onClick={() => setActiveTab('campaigns')} badge={isComingSoon('campaigns') ? 'Soon' : undefined} />
+            )}
+
+            {/* Prompts - always enabled */}
             <NavItem icon={FileText} label="Prompts" active={activeTab === 'prompts'} onClick={() => setActiveTab('prompts')} />
-            <NavItem icon={MessageSquare} label="Messaging Agents" active={activeTab === 'messaging-agents'} onClick={() => setActiveTab('messaging-agents')} />
-            <NavItem icon={Send} label="Messages & SMS" active={activeTab === 'messages'} onClick={() => setActiveTab('messages')} />
-            <NavItem icon={History} label="Call History" active={activeTab === 'logs'} onClick={() => setActiveTab('logs')} />
-            <NavItem icon={Bot} label="AI Chat Logs" active={activeTab === 'ai-chat-logs'} onClick={() => setActiveTab('ai-chat-logs')} />
-            <NavItem icon={Volume2} label="Voice Customization" active={activeTab === 'voices'} onClick={() => setActiveTab('voices')} />
+
+            {/* Messaging features */}
+            {shouldShowTab('messaging-agents') && (
+              <NavItem icon={MessageSquare} label="Messaging Agents" active={activeTab === 'messaging-agents'} onClick={() => setActiveTab('messaging-agents')} badge={isComingSoon('messaging-agents') ? 'Soon' : undefined} />
+            )}
+            {shouldShowTab('messages') && (
+              <NavItem icon={Send} label="Messages & SMS" active={activeTab === 'messages'} onClick={() => setActiveTab('messages')} badge={isComingSoon('messages') ? 'Soon' : undefined} />
+            )}
+
+            {/* Voice History */}
+            {shouldShowTab('logs') && (
+              <NavItem icon={History} label="Call History" active={activeTab === 'logs'} onClick={() => setActiveTab('logs')} badge={isComingSoon('logs') ? 'Soon' : undefined} />
+            )}
+
+            {/* AI Chat Logs */}
+            {shouldShowTab('ai-chat-logs') && (
+              <NavItem icon={Bot} label="AI Chat Logs" active={activeTab === 'ai-chat-logs'} onClick={() => setActiveTab('ai-chat-logs')} badge={isComingSoon('ai-chat-logs') ? 'Soon' : undefined} />
+            )}
+
+            {/* Voice Customization */}
+            {shouldShowTab('voices') && (
+              <NavItem icon={Volume2} label="Voice Customization" active={activeTab === 'voices'} onClick={() => setActiveTab('voices')} badge={isComingSoon('voices') ? 'Soon' : undefined} />
+            )}
+
+            {/* Endpoints - always enabled */}
             <NavItem icon={Link} label="Endpoints & Webhooks" active={activeTab === 'endpoints'} onClick={() => setActiveTab('endpoints')} />
 
             <div className="text-xs font-bold text-slate-400 uppercase tracking-wider px-4 mb-3 mt-8">System</div>
-            <NavItem icon={Activity} label="Activity Logs" active={activeTab === 'activity'} onClick={() => setActiveTab('activity')} />
+            {/* Settings - always enabled */}
             <NavItem icon={Settings} label="Settings" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
           </nav>
 
@@ -5058,8 +5161,8 @@ export default function FuturisticDemo() {
                   {activeTab === 'dashboard' ? 'Dashboard' :
 
                     activeTab === 'incoming-agent' ? 'Incoming Agent' :
-                      activeTab === 'outgoing-agent' ? 'Outgoing Agent' :
-                        activeTab === 'ai-chat' ? 'AI Chat' :
+                      activeTab === 'ai-chat' ? 'AI Chat' :
+                        activeTab === 'campaigns' ? 'Campaigns' :
                           activeTab === 'prompts' ? 'Prompts Management' :
                             activeTab === 'messaging-agents' ? 'Messaging Agents' :
                               activeTab === 'messages' ? 'Messages & SMS' :
@@ -5075,8 +5178,8 @@ export default function FuturisticDemo() {
                   {activeTab === 'dialer' ? 'Make calls and manage active connections.' :
 
                     activeTab === 'incoming-agent' ? 'Create and manage Voice Agents for your Business.' :
-                      activeTab === 'outgoing-agent' ? 'Schedule AI or normal outgoing calls.' :
-                        activeTab === 'ai-chat' ? 'Chat with AI using voice or text - no phone calls required.' :
+                      activeTab === 'ai-chat' ? 'Chat with AI using voice or text - no phone calls required.' :
+                        activeTab === 'campaigns' ? 'Send bulk Voice, SMS, or WhatsApp campaigns.' :
                           activeTab === 'prompts' ? 'Create and manage AI prompts for outgoing calls.' :
                             activeTab === 'messaging-agents' ? 'Create and manage SMS/Messaging Agents for your Business.' :
                               activeTab === 'messages' ? 'View and send SMS messages to customers.' :
@@ -5156,18 +5259,16 @@ export default function FuturisticDemo() {
             >
               {activeTab === 'dashboard' && <DashboardView />}
 
-
-              {activeTab === 'incoming-agent' && <IncomingAgentView />}
-              {activeTab === 'outgoing-agent' && <OutgoingAgentView />}
-              {activeTab === 'ai-chat' && <AIChatView />}
+              {activeTab === 'incoming-agent' && (isComingSoon('incoming-agent') ? <ComingSoonView featureName="Incoming Agent" /> : <IncomingAgentView />)}
+              {activeTab === 'ai-chat' && (isComingSoon('ai-chat') ? <ComingSoonView featureName="AI Chat" /> : <AIChatView />)}
+              {activeTab === 'campaigns' && (isComingSoon('campaigns') ? <ComingSoonView featureName="Campaigns" /> : <CampaignsView />)}
               {activeTab === 'prompts' && <PromptsView />}
-              {activeTab === 'messaging-agents' && <MessagingAgentsView />}
-              {activeTab === 'messages' && <MessagesView />}
-              {activeTab === 'logs' && <LogsView />}
-              {activeTab === 'ai-chat-logs' && <AIChatLogsView />}
-              {activeTab === 'voices' && <VoiceCustomizationView />}
+              {activeTab === 'messaging-agents' && (isComingSoon('messaging-agents') ? <ComingSoonView featureName="Messaging Agents" /> : <MessagingAgentsView />)}
+              {activeTab === 'messages' && (isComingSoon('messages') ? <ComingSoonView featureName="Messages & SMS" /> : <MessagesView />)}
+              {activeTab === 'logs' && (isComingSoon('logs') ? <ComingSoonView featureName="Call History" /> : <LogsView />)}
+              {activeTab === 'ai-chat-logs' && (isComingSoon('ai-chat-logs') ? <ComingSoonView featureName="AI Chat Logs" /> : <AIChatLogsView />)}
+              {activeTab === 'voices' && (isComingSoon('voices') ? <ComingSoonView featureName="Voice Customization" /> : <VoiceCustomizationView />)}
               {activeTab === 'endpoints' && <EndpointsView />}
-              {activeTab === 'activity' && <ActivityLogsView />}
               {activeTab === 'settings' && <SettingsView />}
             </motion.div>
 
