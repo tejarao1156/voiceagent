@@ -444,6 +444,31 @@ async def mongodb_health_check(request: Request):
 
 
 @app.get(
+    "/api/feature-flags",
+    summary="Get Feature Flags",
+    description="Get feature flags configuration for UI feature visibility",
+    tags=["Configuration"]
+)
+async def get_feature_flags():
+    """
+    Returns feature flags that control UI visibility.
+    
+    States:
+    - "enabled": Feature fully visible and functional
+    - "coming_soon": Tab visible with badge, content disabled
+    - "disabled": Tab completely hidden
+    """
+    from feature_flags import get_feature_flags, TAB_MAPPING, ALWAYS_ENABLED_TABS
+    
+    return {
+        "success": True,
+        "features": get_feature_flags(),
+        "tabMapping": TAB_MAPPING,
+        "alwaysEnabled": ALWAYS_ENABLED_TABS
+    }
+
+
+@app.get(
     "/api/languages",
     summary="Get Supported Languages",
     description="Get supported languages based on STT and TTS model intersection",
@@ -5822,9 +5847,17 @@ async def get_campaign(
         if not campaign:
             raise HTTPException(status_code=404, detail="Campaign not found")
         
-        # Get items for detail view
-        items = await store.get_campaign_items(campaign_id, limit=100)
-        campaign["items"] = items
+        # Get queue results for detail view
+        from databases.mongodb_campaign_queue_store import MongoDBCampaignQueueStore
+        queue_store = MongoDBCampaignQueueStore()
+        results = await queue_store.get_results(campaign_id)
+        if results:
+            campaign["queue_results"] = {
+                "success_count": results.get("success_count", 0),
+                "failed_count": results.get("failed_count", 0),
+                "total": results.get("total", 0),
+                "processed": results.get("processed", 0)
+            }
         
         return {"success": True, "campaign": campaign}
         

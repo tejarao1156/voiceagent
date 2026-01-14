@@ -1,6 +1,6 @@
 """
 MongoDB Campaign Store
-Handles saving and loading campaigns and campaign items
+Handles saving and loading campaigns from MongoDB
 """
 
 from typing import Optional, Dict, Any, List
@@ -17,19 +17,12 @@ class MongoDBCampaignStore:
     
     def __init__(self):
         self.campaigns_collection = "campaigns"
-        self.items_collection = "campaign_items"
     
     def _get_campaigns_collection(self):
         db = get_mongo_db()
         if db is None:
             return None
         return db[self.campaigns_collection]
-    
-    def _get_items_collection(self):
-        db = get_mongo_db()
-        if db is None:
-            return None
-        return db[self.items_collection]
     
     # ==================== CAMPAIGN METHODS ====================
     
@@ -215,183 +208,7 @@ class MongoDBCampaignStore:
             logger.error(f"Error deleting campaign {campaign_id}: {e}")
             return False
     
-    # ==================== CAMPAIGN ITEMS METHODS ====================
-    
-    async def get_campaign_items(
-        self,
-        campaign_id: str,
-        status: Optional[str] = None,
-        limit: int = 100,
-        offset: int = 0
-    ) -> List[Dict[str, Any]]:
-        """Get items for a campaign"""
-        if not is_mongodb_available():
-            return []
-        
-        try:
-            items = self._get_items_collection()
-            if items is None:
-                return []
-            
-            query = {"campaign_id": ObjectId(campaign_id)}
-            if status:
-                query["status"] = status
-            
-            result = []
-            cursor = items.find(query).skip(offset).limit(limit)
-            async for doc in cursor:
-                doc["id"] = str(doc["_id"])
-                doc["campaign_id"] = str(doc["campaign_id"])
-                del doc["_id"]
-                result.append(doc)
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error getting campaign items: {e}")
-            return []
-    
-    async def get_pending_items(self, campaign_id: str, batch_size: int = 20) -> List[Dict[str, Any]]:
-        """Get pending items for processing (legacy - use acquire_pending_items for atomic locking)"""
-        return await self.get_campaign_items(campaign_id, status="pending", limit=batch_size)
-    
-    async def acquire_pending_items(self, campaign_id: str, batch_size: int = 10) -> List[Dict[str, Any]]:
-        """Atomically acquire pending items by locking them (pending -> in_progress).
-        
-        This prevents duplicate processing even with multiple workers or pod restarts.
-        Uses find_one_and_update for each item to ensure atomic state transition.
-        
-        Returns:
-            List of locked items ready for processing
-        """
-        if not is_mongodb_available():
-            return []
-        
-        try:
-            items = self._get_items_collection()
-            if items is None:
-                return []
-            
-            locked_items = []
-            now = datetime.utcnow().isoformat()
-            
-            # Atomically lock items one by one until we have batch_size or no more pending
-            for _ in range(batch_size):
-                doc = await items.find_one_and_update(
-                    {
-                        "campaign_id": ObjectId(campaign_id),
-                        "status": "pending"
-                    },
-                    {
-                        "$set": {
-                            "status": "in_progress",
-                            "locked_at": now,
-                            "updated_at": now
-                        }
-                    },
-                    return_document=True  # Return the updated document
-                )
-                
-                if doc is None:
-                    # No more pending items
-                    break
-                
-                # Convert ObjectIds to strings
-                doc["id"] = str(doc["_id"])
-                doc["campaign_id"] = str(doc["campaign_id"])
-                del doc["_id"]
-                locked_items.append(doc)
-            
-            if locked_items:
-                logger.info(f"🔒 Acquired {len(locked_items)} items for campaign {campaign_id}")
-            
-            return locked_items
-            
-        except Exception as e:
-            logger.error(f"Error acquiring pending items: {e}", exc_info=True)
-            return []
-    
-    async def update_item_status(
-        self,
-        item_id: str,
-        status: str,
-        result: Optional[str] = None
-    ) -> bool:
-        """Update status of a campaign item"""
-        if not is_mongodb_available():
-            return False
-        
-        try:
-            items = self._get_items_collection()
-            if items is None:
-                return False
-            
-            update = {
-                "status": status,
-                "updated_at": datetime.utcnow().isoformat()
-            }
-            if result:
-                update["result"] = result
-            
-            res = await items.update_one(
-                {"_id": ObjectId(item_id)},
-                {"$set": update}
-            )
-            return res.modified_count > 0
-            
-        except Exception as e:
-            logger.error(f"Error updating item {item_id}: {e}")
-            return False
-    
-    async def update_campaign_stats(self, campaign_id: str) -> bool:
-        """Recalculate and update campaign stats"""
-        if not is_mongodb_available():
-            return False
-        
-        try:
-            items = self._get_items_collection()
-            campaigns = self._get_campaigns_collection()
-            if items is None or campaigns is None:
-                return False
-            
-            pipeline = [
-                {"$match": {"campaign_id": ObjectId(campaign_id)}},
-                {"$group": {
-                    "_id": "$status",
-                    "count": {"$sum": 1}
-                }}
-            ]
-            
-            stats = {"total": 0, "pending": 0, "sent": 0, "failed": 0}
-            async for doc in items.aggregate(pipeline):
-                status = doc["_id"]
-                count = doc["count"]
-                stats["total"] += count
-                if status == "pending":
-                    stats["pending"] = count
-                elif status == "sent":
-                    stats["sent"] = count
-                elif status == "failed":
-                    stats["failed"] = count
-            
-            # Calculate progress percentage
-            progress = 0.0
-            if stats["total"] > 0:
-                progress = ((stats["sent"] + stats["failed"]) / stats["total"]) * 100
-            
-            await campaigns.update_one(
-                {"_id": ObjectId(campaign_id)},
-                {"$set": {
-                    "stats": stats,
-                    "progress_percent": progress,
-                    "updated_at": datetime.utcnow().isoformat()
-                }}
-            )
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error updating campaign stats: {e}")
-            return False
+    # ==================== SCHEDULING METHODS ====================
     
     async def schedule_campaign(self, campaign_id: str, scheduled_at: str, user_id: Optional[str] = None) -> bool:
         """Schedule a draft campaign for future execution"""
@@ -455,26 +272,3 @@ class MongoDBCampaignStore:
             logger.error(f"Error getting ready scheduled campaigns: {e}")
             return []
     
-    async def reset_in_progress_items(self, campaign_id: str) -> int:
-        """Reset any in_progress items back to pending (crash recovery)"""
-        if not is_mongodb_available():
-            return 0
-        
-        try:
-            items = self._get_items_collection()
-            if items is None:
-                return 0
-            
-            result = await items.update_many(
-                {"campaign_id": ObjectId(campaign_id), "status": "in_progress"},
-                {"$set": {"status": "pending", "updated_at": datetime.utcnow().isoformat()}}
-            )
-            
-            if result.modified_count > 0:
-                logger.info(f"🔄 Reset {result.modified_count} in_progress items to pending for campaign {campaign_id}")
-            
-            return result.modified_count
-            
-        except Exception as e:
-            logger.error(f"Error resetting in_progress items: {e}")
-            return 0

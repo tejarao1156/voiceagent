@@ -93,15 +93,14 @@ class CampaignWorker:
         logger.info(f"   📞 Voice:   {CAMPAIGN_VOICE_WORKERS} workers, batch {CAMPAIGN_VOICE_BATCH_SIZE}, waits for completion (timeout {CAMPAIGN_VOICE_TIMEOUT}s)")
         logger.info(f"   📱 Message: {CAMPAIGN_MESSAGE_WORKERS} workers, batch {CAMPAIGN_MESSAGE_BATCH_SIZE}, {CAMPAIGN_MESSAGE_BATCH_DELAY}s delay after batch (SMS + WhatsApp)")
     
-    
     async def _recover_from_crash(self):
-        """Reset in_progress items for all running campaigns (crash recovery)"""
+        """Reset queue cursors for all running campaigns (crash recovery)"""
         try:
             running_campaigns = await self.campaign_store.list_campaigns(status="running")
             for campaign in running_campaigns:
-                reset_count = await self.campaign_store.reset_in_progress_items(campaign["id"])
-                if reset_count > 0:
-                    logger.info(f"🔄 Recovered {reset_count} stuck items for campaign {campaign['id']}")
+                reset = await self.queue_store.reset_queue(campaign["id"])
+                if reset:
+                    logger.info(f"🔄 Recovered queue for campaign {campaign['id']}")
         except Exception as e:
             logger.error(f"Error during crash recovery: {e}", exc_info=True)
     
@@ -112,25 +111,36 @@ class CampaignWorker:
             self._task.cancel()
     
     async def _worker_loop(self):
-        """Main worker loop - checks for scheduled and running campaigns"""
-        logger.info("🔄 Campaign Worker loop running...")
+        """Main worker loop - processes campaigns SEQUENTIALLY (one at a time)
+        
+        Completes one campaign entirely before starting the next.
+        Campaigns are processed in order of creation (oldest first).
+        """
+        logger.info("🔄 Campaign Worker loop running (SEQUENTIAL mode)...")
         
         while self.is_running:
             try:
                 # 1. Check for scheduled campaigns that are ready to run
                 await self._check_scheduled_campaigns()
                 
-                # 2. Process running campaigns
+                # 2. Get running campaigns (ordered by created_at - oldest first)
                 running_campaigns = await self.campaign_store.list_campaigns(status="running")
                 
-                for campaign in running_campaigns:
-                    # Check if campaign is still running (might have been paused)
+                if running_campaigns:
+                    # Pick ONLY the first campaign (oldest by creation date)
+                    # Complete it entirely before moving to the next
+                    campaign = running_campaigns[0]
+                    
                     current = await self.campaign_store.get_campaign(campaign["id"])
                     if current and current.get("status") == "running":
+                        logger.debug(f"📋 Processing campaign: {current.get('name')} ({campaign['id']})")
                         await self._process_campaign(current)
-                
-                # Sleep before next check
-                await asyncio.sleep(CAMPAIGN_POLL_INTERVAL)
+                    
+                    # Short sleep between batches of the SAME campaign
+                    await asyncio.sleep(1)
+                else:
+                    # No campaigns running, sleep longer before next check
+                    await asyncio.sleep(CAMPAIGN_POLL_INTERVAL)
                 
             except asyncio.CancelledError:
                 logger.info("Campaign Worker cancelled")
@@ -147,9 +157,6 @@ class CampaignWorker:
             for campaign in ready_campaigns:
                 campaign_id = campaign["id"]
                 logger.info(f"📅 Starting scheduled campaign: {campaign_id} - {campaign.get('name')}")
-                
-                # Reset any in_progress items (crash recovery)
-                await self.campaign_store.reset_in_progress_items(campaign_id)
                 
                 # Move to running
                 await self.campaign_store.update_campaign(campaign_id, {"status": "running"})
@@ -291,195 +298,7 @@ class CampaignWorker:
         except Exception as e:
             logger.error(f"Error processing campaign {campaign_id}: {e}", exc_info=True)
     
-    async def _send_voice(self, client: Client, from_number: str, item: Dict, config: Dict, context: Dict):
-        """Initiate a voice call"""
-        item_id = item.get("id")
-        to_number = normalize_phone_number(item.get("phone_number", ""))
-        campaign_id = context.get("campaign_id")
-        campaign_name = context.get("campaign_name")
-        user_id = context.get("user_id")
-        
-        try:
-            # Include campaign info in webhook URL for call tracking
-            webhook_url = f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/incoming?campaign_item_id={item_id}&campaign_id={campaign_id}"
-            
-            loop = asyncio.get_event_loop()
-            call = await loop.run_in_executor(
-                None,
-                lambda: client.calls.create(
-                    to=to_number,
-                    from_=from_number,
-                    url=webhook_url,
-                    method="POST",
-                    status_callback=f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/status",
-                    status_callback_event=["initiated", "ringing", "answered", "completed"],
-                    status_callback_method="POST",
-                    machine_detection="DetectMessageEnd",
-                    machine_detection_timeout=30,
-                    async_amd=True,
-                    async_amd_status_callback=f"{TWILIO_WEBHOOK_BASE_URL}/webhooks/twilio/amd-status",
-                    async_amd_status_callback_method="POST"
-                )
-            )
-            
-            await self.campaign_store.update_item_status(item_id, "sent", call.sid)
-            logger.info(f"      ✅ Call initiated to {to_number}: {call.sid}")
-            
-            # Log to campaign_executions
-            await self.execution_store.log_execution(
-                campaign_id=campaign_id,
-                campaign_name=campaign_name,
-                exec_type="voice",
-                from_number=from_number,
-                to_number=to_number,
-                status="called",
-                call_sid=call.sid,
-                user_id=user_id
-            )
-            
-        except Exception as e:
-            await self.campaign_store.update_item_status(item_id, "failed", str(e))
-            logger.error(f"      ❌ Failed to call {to_number}: {e}")
-            
-            # Log failure to campaign_executions
-            await self.execution_store.log_execution(
-                campaign_id=campaign_id,
-                campaign_name=campaign_name,
-                exec_type="voice",
-                from_number=from_number,
-                to_number=to_number,
-                status="failed",
-                error=str(e),
-                user_id=user_id
-            )
-    
-    async def _send_sms(self, client: Client, from_number: str, item: Dict, config: Dict, context: Dict):
-        """Send an SMS message"""
-        item_id = item.get("id")
-        to_number = normalize_phone_number(item.get("phone_number", ""))
-        message_body = config.get("messageBody", "")
-        campaign_id = context.get("campaign_id")
-        campaign_name = context.get("campaign_name")
-        user_id = context.get("user_id")
-        
-        try:
-            loop = asyncio.get_event_loop()
-            message = await loop.run_in_executor(
-                None,
-                lambda: client.messages.create(
-                    to=to_number,
-                    from_=from_number,
-                    body=message_body
-                )
-            )
-            
-            await self.campaign_store.update_item_status(item_id, "sent", message.sid)
-            logger.info(f"      ✅ SMS sent to {to_number}: {message.sid}")
-
-            # Store in conversation history with campaign link
-            await self.message_store.create_outbound_message(
-                message_sid=message.sid,
-                from_number=from_number,
-                to_number=to_number,
-                body=message_body,
-                channel="sms",
-                campaign_id=campaign_id
-            )
-            
-            # Log to campaign_executions
-            await self.execution_store.log_execution(
-                campaign_id=campaign_id,
-                campaign_name=campaign_name,
-                exec_type="sms",
-                from_number=from_number,
-                to_number=to_number,
-                status="sent",
-                message_sid=message.sid,
-                user_id=user_id
-            )
-            
-        except Exception as e:
-            await self.campaign_store.update_item_status(item_id, "failed", str(e))
-            logger.error(f"      ❌ Failed SMS to {to_number}: {e}")
-            
-            # Log failure to campaign_executions
-            await self.execution_store.log_execution(
-                campaign_id=campaign_id,
-                campaign_name=campaign_name,
-                exec_type="sms",
-                from_number=from_number,
-                to_number=to_number,
-                status="failed",
-                error=str(e),
-                user_id=user_id
-            )
-    
-    async def _send_whatsapp(self, client: Client, from_number: str, item: Dict, config: Dict, context: Dict):
-        """Send a WhatsApp message"""
-        item_id = item.get("id")
-        to_number = normalize_phone_number(item.get("phone_number", ""))
-        message_body = config.get("messageBody", "")
-        campaign_id = context.get("campaign_id")
-        campaign_name = context.get("campaign_name")
-        user_id = context.get("user_id")
-        
-        # WhatsApp requires whatsapp: prefix
-        whatsapp_from = f"whatsapp:{from_number}"
-        whatsapp_to = f"whatsapp:{to_number}"
-        
-        try:
-            loop = asyncio.get_event_loop()
-            message = await loop.run_in_executor(
-                None,
-                lambda: client.messages.create(
-                    to=whatsapp_to,
-                    from_=whatsapp_from,
-                    body=message_body
-                )
-            )
-            
-            await self.campaign_store.update_item_status(item_id, "sent", message.sid)
-            logger.info(f"      ✅ WhatsApp sent to {to_number}: {message.sid}")
-
-            # Store in conversation history with campaign link
-            await self.message_store.create_outbound_message(
-                message_sid=message.sid,
-                from_number=from_number,
-                to_number=to_number,
-                body=message_body,
-                channel="whatsapp",
-                campaign_id=campaign_id
-            )
-            
-            # Log to campaign_executions
-            await self.execution_store.log_execution(
-                campaign_id=campaign_id,
-                campaign_name=campaign_name,
-                exec_type="whatsapp",
-                from_number=from_number,
-                to_number=to_number,
-                status="sent",
-                message_sid=message.sid,
-                user_id=user_id
-            )
-            
-        except Exception as e:
-            await self.campaign_store.update_item_status(item_id, "failed", str(e))
-            logger.error(f"      ❌ Failed WhatsApp to {to_number}: {e}")
-            
-            # Log failure to campaign_executions
-            await self.execution_store.log_execution(
-                campaign_id=campaign_id,
-                campaign_name=campaign_name,
-                exec_type="whatsapp",
-                from_number=from_number,
-                to_number=to_number,
-                status="failed",
-                error=str(e),
-                user_id=user_id
-            )
-    
-    # ==================== SIMPLIFIED METHODS FOR QUEUE SYSTEM ====================
+    # ==================== SEND METHODS (Queue-based) ====================
     
     async def _send_voice_simple(self, client: Client, from_number: str, phone: str, config: Dict, context: Dict) -> Optional[str]:
         """Simplified voice call - returns call_sid on success, None on failure
